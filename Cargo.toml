@@ -1,0 +1,3 @@
+[workspace]
+members = ["nanojudge-core", "nanojudge-cli"]
+resolver = "3"

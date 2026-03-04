@@ -1,0 +1,20 @@
+[package]
+name = "nanojudge-cli"
+version = "0.1.0"
+edition = "2024"
+description = "CLI tool for ranking items using LLM pairwise comparisons"
+license = "MIT"
+
+[[bin]]
+name = "nanojudge"
+path = "src/main.rs"
+
+[dependencies]
+nanojudge-core = { path = "../nanojudge-core" }
+clap = { version = "4", features = ["derive"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+tokio = { version = "1", features = ["full"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.8"
+rand = "0.9"

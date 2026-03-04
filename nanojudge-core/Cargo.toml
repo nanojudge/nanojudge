@@ -1,0 +1,14 @@
+[package]
+name = "nanojudge-core"
+version = "0.1.0"
+edition = "2024"
+description = "Pure-computation ranking engine using Bradley-Terry models and MCMC sampling"
+license = "MIT"
+
+[dependencies]
+rand = "0.9"
+serde = { version = "1", features = ["derive"], optional = true }
+
+[features]
+default = []
+serde = ["dep:serde"]

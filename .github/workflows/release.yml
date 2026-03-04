@@ -1,0 +1,77 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+            archive: nanojudge-linux-x86_64.tar.gz
+          - target: x86_64-apple-darwin
+            os: macos-latest
+            archive: nanojudge-macos-x86_64.tar.gz
+          - target: aarch64-apple-darwin
+            os: macos-latest
+            archive: nanojudge-macos-aarch64.tar.gz
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+            archive: nanojudge-windows-x86_64.zip
+
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        run: rustup target add ${{ matrix.target }}
+
+      - name: Build
+        run: cargo build --release --target ${{ matrix.target }} -p nanojudge-cli
+
+      - name: Package (unix)
+        if: runner.os != 'Windows'
+        run: |
+          cd target/${{ matrix.target }}/release
+          tar czf ../../../${{ matrix.archive }} nanojudge
+          cd ../../..
+
+      - name: Package (windows)
+        if: runner.os == 'Windows'
+        run: |
+          cd target/${{ matrix.target }}/release
+          7z a ../../../${{ matrix.archive }} nanojudge.exe
+          cd ../../..
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.archive }}
+          path: ${{ matrix.archive }}
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          merge-multiple: true
+
+      - name: Create release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            nanojudge-linux-x86_64.tar.gz
+            nanojudge-macos-x86_64.tar.gz
+            nanojudge-macos-aarch64.tar.gz
+            nanojudge-windows-x86_64.zip
+          generate_release_notes: true
