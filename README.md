@@ -113,6 +113,16 @@ CLI flags always override config file values.
 
 4. **Positional bias correction** — LLMs tend to favor whichever option is shown first. The MCMC sampler jointly estimates this bias and corrects for it automatically.
 
+## Recommended models
+
+Any instruct-tuned model served via an OpenAI-compatible API with logprobs support should work. Here are models we've tested:
+
+| Model | Size | Recommended | Notes |
+|---|---|---|---|
+| [Qwen3-4B-Instruct-2507](https://huggingface.co/Qwen/Qwen3-4B-Instruct-2507) | 4B | Yes | Used in production on nanojudge.com. Good balance of quality and speed. |
+| [Qwen3.5-2B](https://huggingface.co/Qwen/Qwen3.5-2B) | 2B | Yes | Reliably follows NanoJudge's instructions. |
+| [LFM2.5-1.2B-Instruct](https://huggingface.co/LiquidAI/LFM2.5-1.2B-Instruct) | 1.2B | No | Fails to declare a verdict consistently. |
+
 ## Workspace structure
 
 This repo is a Cargo workspace with two crates:
