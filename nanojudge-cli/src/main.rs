@@ -103,7 +103,7 @@ struct RankArgs {
     #[arg(long)]
     criterion: String,
 
-    /// File with one item per line
+    /// File with one item per line, or a directory of text files (each file = one item)
     #[arg(long)]
     items: Option<PathBuf>,
 
@@ -199,7 +199,17 @@ struct RankArgs {
     prompt_template: Option<PathBuf>,
 }
 
-/// Load items from all sources: --items file, --item inline args, or stdin.
+const TITLE_MAX_LEN: usize = 20;
+
+/// Derive a display title from item text: first 20 chars, hard cut.
+fn title_from_text(text: &str) -> String {
+    if text.chars().count() <= TITLE_MAX_LEN {
+        text.to_string()
+    } else {
+        text.chars().take(TITLE_MAX_LEN).collect()
+    }
+}
+
 /// Parse a string as either a JSON array of strings or plain text (one item per line).
 fn parse_items_from_str(content: &str) -> Vec<String> {
     let trimmed = content.trim();
@@ -234,37 +244,98 @@ fn parse_save_count(value: &str, total: usize) -> usize {
     }
 }
 
-/// Load items from all sources: --items file, --item inline args, or stdin.
-fn load_items(args: &RankArgs) -> Vec<String> {
-    let mut items = Vec::new();
+/// Plain text file extensions that we read from directories.
+const TEXT_EXTENSIONS: &[&str] = &[
+    "txt", "md", "html", "csv", "json", "xml", "rst", "log", "yaml", "yml", "toml",
+];
 
-    // From file (auto-detects JSON array vs one-per-line)
+/// Load items from all sources: --items file/dir, --item inline args, or stdin.
+/// Returns (titles, texts) where titles are for display and texts are sent to the LLM.
+fn load_items(args: &RankArgs) -> (Vec<String>, Vec<String>) {
+    let mut titles = Vec::new();
+    let mut texts = Vec::new();
+
     if let Some(ref path) = args.items {
-        let content = std::fs::read_to_string(path)
-            .unwrap_or_else(|e| bail(format!("Failed to read items file {}: {e}", path.display())));
-        items = parse_items_from_str(&content);
+        if path.is_dir() {
+            // Directory mode: each file is an item
+            let entries = std::fs::read_dir(path)
+                .unwrap_or_else(|e| bail(format!("Failed to read directory {}: {e}", path.display())));
+
+            let mut files: Vec<_> = entries
+                .filter_map(|e| e.ok())
+                .filter(|e| e.file_type().map(|t| t.is_file()).unwrap_or(false))
+                .collect();
+
+            // Sort by filename for deterministic ordering
+            files.sort_by_key(|e| e.file_name());
+
+            let mut skipped = 0usize;
+            let total = files.len();
+
+            for entry in &files {
+                let file_path = entry.path();
+                let ext = file_path.extension()
+                    .and_then(|e| e.to_str())
+                    .unwrap_or("");
+
+                if !TEXT_EXTENSIONS.contains(&ext) {
+                    skipped += 1;
+                    continue;
+                }
+
+                let content = std::fs::read_to_string(&file_path)
+                    .unwrap_or_else(|e| bail(format!("Failed to read {}: {e}", file_path.display())));
+                let content = content.trim().to_string();
+
+                if content.is_empty() {
+                    skipped += 1;
+                    continue;
+                }
+
+                let stem = file_path.file_stem()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or("unnamed")
+                    .to_string();
+
+                titles.push(stem);
+                texts.push(content);
+            }
+
+            let loaded = titles.len();
+            eprintln!("Found {total} files, loaded {loaded}, skipped {skipped} (unsupported format or empty)");
+        } else {
+            // File mode: one item per line or JSON array
+            let content = std::fs::read_to_string(path)
+                .unwrap_or_else(|e| bail(format!("Failed to read items file {}: {e}", path.display())));
+            texts = parse_items_from_str(&content);
+            titles = texts.iter().map(|t| title_from_text(t)).collect();
+        }
     }
 
     // From inline --item flags
-    items.extend(args.inline_items.iter().cloned());
+    for item in &args.inline_items {
+        titles.push(title_from_text(item));
+        texts.push(item.clone());
+    }
 
-    // From stdin (only if no file and no inline items)
-    if items.is_empty() {
+    // From stdin (only if no file/dir and no inline items)
+    if texts.is_empty() {
         let stdin = io::stdin();
         if stdin.is_terminal() {
-            bail("No items provided. Use --items <file>, --item <name>, or pipe items via stdin.");
+            bail("No items provided. Use --items <file|dir>, --item <name>, or pipe items via stdin.");
         }
         let content: String = stdin.lock().lines()
             .map(|l| l.expect("Failed to read from stdin"))
             .collect::<Vec<_>>()
             .join("\n");
-        items = parse_items_from_str(&content);
+        texts = parse_items_from_str(&content);
+        titles = texts.iter().map(|t| title_from_text(t)).collect();
     }
 
-    if items.len() < 2 {
-        bail(format!("Need at least 2 items to rank, got {}", items.len()));
+    if texts.len() < 2 {
+        bail(format!("Need at least 2 items to rank, got {}", texts.len()));
     }
-    items
+    (titles, texts)
 }
 
 #[tokio::main]
@@ -375,8 +446,8 @@ async fn run_rank(args: RankArgs) {
         bail("--narrow-win must be greater than 0.5 and less than 1.0");
     }
 
-    let items = load_items(&args);
-    let item_ids: Vec<i64> = (0..items.len() as i64).collect();
+    let (titles, texts) = load_items(&args);
+    let item_ids: Vec<i64> = (0..texts.len() as i64).collect();
 
     let api_key = args
         .api_key
@@ -406,14 +477,15 @@ async fn run_rank(args: RankArgs) {
     let prompt_template = Arc::new(prompt_template);
 
     let client = Client::new();
-    let names = Arc::new(items.clone());
+    let titles = Arc::new(titles);
+    let texts = Arc::new(texts);
 
-    let total_planned = calculate_total_expected_comparisons(items.len(), rounds);
+    let total_planned = calculate_total_expected_comparisons(texts.len(), rounds);
 
     if args.verbose {
         eprintln!(
             "Ranking {} items across {} rounds ({} comparisons planned)",
-            items.len(),
+            texts.len(),
             rounds,
             total_planned,
         );
@@ -465,8 +537,8 @@ async fn run_rank(args: RankArgs) {
     // Pure heuristic — no empirical basis. Just a guess at how many top
     // positions users typically care about for a given list size.
     let top_k = args.top_k.unwrap_or_else(|| {
-        ((items.len() as f64).sqrt() * 3.0) as usize
-    }).min(items.len() - 1);
+        ((texts.len() as f64).sqrt() * 3.0) as usize
+    }).min(texts.len() - 1);
 
     let engine_config = EngineConfig {
         strategy,
@@ -498,7 +570,7 @@ async fn run_rank(args: RankArgs) {
             let sem = semaphore.clone();
             let client = client.clone();
             let llm_config = llm_config.clone();
-            let names = names.clone();
+            let texts = texts.clone();
             let criterion = args.criterion.clone();
             let analysis_length = analysis_length.clone();
             let template = prompt_template.clone();
@@ -513,8 +585,8 @@ async fn run_rank(args: RankArgs) {
                     &llm_config,
                     &template,
                     &criterion,
-                    &names[id_a as usize],
-                    &names[id_b as usize],
+                    &texts[id_a as usize],
+                    &texts[id_b as usize],
                     id_a,
                     id_b,
                     narrow_win,
@@ -541,8 +613,8 @@ async fn run_rank(args: RankArgs) {
                             if indices.contains(&global_idx) {
                                 let line = serde_json::json!({
                                     "round": round + 1,
-                                    "item1": names[result.item1_id as usize],
-                                    "item2": names[result.item2_id as usize],
+                                    "item1": titles[result.item1_id as usize],
+                                    "item2": titles[result.item2_id as usize],
                                     "probability": p,
                                     "response": result.response_text,
                                 });
@@ -647,11 +719,11 @@ async fn run_rank(args: RankArgs) {
     }
 
     if args.json {
-        output::print_json(&scoring_result.rankings, &items, rounds, total_comparisons);
+        output::print_json(&scoring_result.rankings, &titles, rounds, total_comparisons);
     } else {
         output::print_table(
             &scoring_result.rankings,
-            &items,
+            &titles,
             &engine.games_played,
             rounds,
             total_comparisons,
