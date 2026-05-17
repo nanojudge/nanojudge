@@ -103,6 +103,23 @@ pub struct ComparisonResult {
     pub hit_max_tokens: bool,
 }
 
+/// Build the full chat completions URL from a user-provided endpoint.
+///
+/// If the endpoint has no path (just `scheme://host` or `scheme://host:port`),
+/// assumes OpenAI-style and appends `/v1/chat/completions`. Otherwise appends
+/// `/chat/completions` to whatever path the user provided.
+fn build_completions_url(endpoint: &str) -> String {
+    let base = endpoint.trim_end_matches('/');
+    // Find the start of the path: skip past "scheme://host(:port)"
+    let after_scheme = base.find("://").map(|i| i + 3).unwrap_or(0);
+    let has_path = base[after_scheme..].contains('/');
+    if has_path {
+        format!("{base}/chat/completions")
+    } else {
+        format!("{base}/v1/chat/completions")
+    }
+}
+
 /// Apply normal jitter to temperature: N(1.0, jitter_std) clamped to [0.8, 1.2].
 /// Uses Box-Muller transform to avoid an extra crate dependency.
 /// Returns base unchanged if jitter_std is 0.0.
@@ -150,7 +167,7 @@ pub async fn send_comparison_request(
         }),
     };
 
-    let url = format!("{}/v1/chat/completions", config.endpoint.trim_end_matches('/').trim_end_matches("/v1"));
+    let url = build_completions_url(&config.endpoint);
 
     let mut req_builder = client.post(&url).json(&request);
     if let Some(ref key) = config.api_key {
@@ -283,5 +300,62 @@ mod tests {
             assert!(result >= base * 0.8);
             assert!(result <= base * 1.2);
         }
+    }
+
+    #[test]
+    fn test_build_url_bare_host() {
+        assert_eq!(
+            build_completions_url("http://localhost:8000"),
+            "http://localhost:8000/v1/chat/completions"
+        );
+    }
+
+    #[test]
+    fn test_build_url_bare_host_trailing_slash() {
+        assert_eq!(
+            build_completions_url("http://localhost:8000/"),
+            "http://localhost:8000/v1/chat/completions"
+        );
+    }
+
+    #[test]
+    fn test_build_url_with_v1() {
+        assert_eq!(
+            build_completions_url("http://localhost:8000/v1"),
+            "http://localhost:8000/v1/chat/completions"
+        );
+    }
+
+    #[test]
+    fn test_build_url_with_v1_trailing_slash() {
+        assert_eq!(
+            build_completions_url("http://localhost:8000/v1/"),
+            "http://localhost:8000/v1/chat/completions"
+        );
+    }
+
+    #[test]
+    fn test_build_url_openai() {
+        assert_eq!(
+            build_completions_url("https://api.openai.com/v1"),
+            "https://api.openai.com/v1/chat/completions"
+        );
+    }
+
+    #[test]
+    fn test_build_url_openrouter() {
+        assert_eq!(
+            build_completions_url("https://openrouter.ai/api/v1"),
+            "https://openrouter.ai/api/v1/chat/completions"
+        );
+    }
+
+    #[test]
+    fn test_build_url_deepinfra() {
+        // The bug: path after /v1 used to get /v1 appended again
+        assert_eq!(
+            build_completions_url("https://api.deepinfra.com/v1/openai"),
+            "https://api.deepinfra.com/v1/openai/chat/completions"
+        );
     }
 }
