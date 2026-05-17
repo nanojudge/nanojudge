@@ -104,7 +104,7 @@ pub async fn run(args: RankArgs) {
     let resolved = resolve_config(&args.cfg, &cfg);
 
     // Resolve judges from [[judge]] blocks
-    let judges = resolve_judges(&args.cfg, &cfg, &config_path);
+    let judges = resolve_judges(&args.cfg, &cfg, &config_path, resolved.reasoning_enabled);
     let logprobs_mode = judges[0].logprobs;
 
     if !logprobs_mode {

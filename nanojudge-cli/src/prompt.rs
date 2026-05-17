@@ -27,6 +27,25 @@ Verdict D: Option 2 narrowly wins
 Verdict E: Option 2 clearly wins
 ";
 
+pub const DEFAULT_TEMPLATE_NO_REASONING: &str = "\
+$criterion
+
+Option 1:
+$option1
+
+Option 2:
+$option2
+
+Instructions:
+Respond with one of these sentences verbatim:
+
+Verdict A: Option 1 clearly wins
+Verdict B: Option 1 narrowly wins
+Verdict C: Draw
+Verdict D: Option 2 narrowly wins
+Verdict E: Option 2 clearly wins
+";
+
 const REQUIRED_VARIABLES: &[&str] = &["$criterion", "$option1", "$option2", "$length"];
 
 /// Validate that a template contains all required variables.
@@ -111,5 +130,25 @@ mod tests {
     fn test_validate_complete_template() {
         let template = "$criterion\n$option1\n$option2\n$length";
         validate_template(template).unwrap();
+    }
+
+    #[test]
+    fn test_no_reasoning_template_has_no_length() {
+        assert!(!DEFAULT_TEMPLATE_NO_REASONING.contains("$length"));
+    }
+
+    #[test]
+    fn test_no_reasoning_template_has_verdicts() {
+        assert!(DEFAULT_TEMPLATE_NO_REASONING.contains("Verdict A: Option 1 clearly wins"));
+        assert!(DEFAULT_TEMPLATE_NO_REASONING.contains("Verdict E: Option 2 clearly wins"));
+    }
+
+    #[test]
+    fn test_build_prompt_no_reasoning() {
+        let prompt = build_prompt(DEFAULT_TEMPLATE_NO_REASONING, "Which is tastier?", "Pizza", "Sushi", "ignored");
+        assert!(prompt.contains("Option 1:\nPizza"));
+        assert!(prompt.contains("Option 2:\nSushi"));
+        assert!(prompt.contains("Respond with one of these sentences verbatim:"));
+        assert!(!prompt.contains("analysis"));
     }
 }

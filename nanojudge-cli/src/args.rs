@@ -70,6 +70,11 @@ pub struct ConfigArgs {
     #[arg(long)]
     pub analysis_length: Option<String>,
 
+    /// Skip analysis and output only the verdict line.
+    /// Faster and cheaper, but may reduce accuracy. Forces max_tokens to 16.
+    #[arg(long)]
+    pub no_reasoning: bool,
+
     /// Path to a custom prompt template file.
     /// The template must contain: $criterion, $option1, $option2, $length
     #[arg(long)]

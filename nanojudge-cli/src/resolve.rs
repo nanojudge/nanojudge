@@ -42,6 +42,7 @@ pub struct ResolvedConfig {
     pub top_k: Option<usize>,
     pub retries: usize,
     pub analysis_length: String,
+    pub reasoning_enabled: bool,
     pub prompt_template: String,
     pub confidence_level: f64,
     pub regularization_strength: f64,
@@ -84,6 +85,7 @@ pub fn resolve_judges(
     shared: &ConfigArgs,
     cfg: &config::NanojudgeConfig,
     config_path: &Path,
+    reasoning_enabled: bool,
 ) -> Vec<ResolvedJudge> {
     let judge_configs = cfg.judge.as_ref().filter(|j| !j.is_empty())
         .unwrap_or_else(|| {
@@ -212,6 +214,17 @@ pub fn resolve_judges(
         });
     }
 
+    if !reasoning_enabled {
+        let any_explicit_max_tokens = judge_configs.iter().any(|jc| jc.max_tokens.is_some());
+        if any_explicit_max_tokens {
+            eprintln!("Warning: max_tokens is ignored when reasoning is disabled (forced to 16)");
+        }
+        for j in &mut judges {
+            j.max_tokens = 16;
+            j.temperature = 0.0;
+        }
+    }
+
     judges
 }
 
@@ -274,6 +287,20 @@ pub fn resolve_config(shared: &ConfigArgs, cfg: &config::NanojudgeConfig) -> Res
     }
     let bias_prior_logit = (bias_prior / (1.0 - bias_prior)).ln();
 
+    // reasoning_enabled: CLI --no-reasoning overrides config file value. Default: true.
+    let reasoning_enabled = if shared.no_reasoning {
+        if let Some(true) = cfg.reasoning_enabled {
+            eprintln!("Warning: --no-reasoning overrides config file value (true)");
+        }
+        false
+    } else {
+        cfg.reasoning_enabled.unwrap_or(true)
+    };
+
+    if !reasoning_enabled && shared.analysis_length.is_some() {
+        eprintln!("Warning: --analysis-length is ignored when reasoning is disabled");
+    }
+
     // Prompt template: CLI path > config path > built-in default
     let prompt_template = {
         let cli_path = shared.prompt_template.clone();
@@ -287,9 +314,13 @@ pub fn resolve_config(shared: &ConfigArgs, cfg: &config::NanojudgeConfig) -> Res
         }
 
         let template_path = cli_path.or(cfg_path);
+        if template_path.is_some() && !reasoning_enabled {
+            bail("Cannot use --no-reasoning with a custom prompt template. Custom templates control their own reasoning format.");
+        }
         match template_path {
             Some(path) => prompt::load_template(&path),
-            None => prompt::DEFAULT_TEMPLATE.to_string(),
+            None if reasoning_enabled => prompt::DEFAULT_TEMPLATE.to_string(),
+            None => prompt::DEFAULT_TEMPLATE_NO_REASONING.to_string(),
         }
     };
 
@@ -300,6 +331,7 @@ pub fn resolve_config(shared: &ConfigArgs, cfg: &config::NanojudgeConfig) -> Res
         top_k,
         retries,
         analysis_length,
+        reasoning_enabled,
         prompt_template,
         confidence_level,
         regularization_strength,

@@ -52,6 +52,7 @@ pub struct NanojudgeConfig {
     pub bias_proposal_std: Option<f64>,
     pub decisiveness_prior_tau2: Option<f64>,
     pub decisiveness_proposal_std: Option<f64>,
+    pub reasoning_enabled: Option<bool>,
     /// Judge panel configuration. At least one [[judge]] block is required.
     pub judge: Option<Vec<JudgeConfig>>,
 }
@@ -83,6 +84,12 @@ const DEFAULT_CONFIG_TEMPLATE: &str = "\
 # How much analysis the LLM should write before its verdict.
 # Examples: \"3 sentences\", \"1 paragraph\", \"5 sentences\".
 # analysis_length = \"2 paragraphs\"
+
+# Whether to have the LLM reason before giving its verdict.
+# When false, the LLM skips analysis and outputs only the verdict line.
+# Faster and cheaper, but may reduce accuracy. max_tokens is forced to 16.
+# Cannot be used with a custom prompt_template.
+# reasoning_enabled = true
 
 # Pairing strategy: \"balanced\" or \"top-heavy\".
 # Balanced gives equal attention to all items. Top-heavy focuses on contenders.
@@ -339,5 +346,27 @@ rounds = 5
         let config = load_config(tmpfile.path());
         assert!(config.judge.is_none());
         assert_eq!(config.rounds.unwrap(), 5);
+    }
+
+    #[test]
+    fn test_reasoning_enabled_parses() {
+        let mut tmpfile = tempfile::NamedTempFile::new().unwrap();
+        write!(tmpfile, r#"
+reasoning_enabled = false
+"#).unwrap();
+
+        let config = load_config(tmpfile.path());
+        assert_eq!(config.reasoning_enabled, Some(false));
+    }
+
+    #[test]
+    fn test_reasoning_enabled_defaults_to_none() {
+        let mut tmpfile = tempfile::NamedTempFile::new().unwrap();
+        write!(tmpfile, r#"
+rounds = 5
+"#).unwrap();
+
+        let config = load_config(tmpfile.path());
+        assert!(config.reasoning_enabled.is_none());
     }
 }
