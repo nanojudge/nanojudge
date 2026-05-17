@@ -161,7 +161,7 @@ pub fn parse_response_text(text: &str, narrow_win: f64) -> ParseResult {
         let mut saw_colon = false;
         for (byte_off, c) in lower[after_verdict..].char_indices() {
             match c {
-                ' ' | '\t' | '\n' | '\r' => continue,
+                ' ' | '\t' | '\n' | '\r' | '*' | '#' => continue,
                 ':' => {
                     saw_colon = true;
                     continue;
@@ -370,5 +370,33 @@ mod tests {
         let text = "Analysis.\n\nVerdict b: Option 1 narrowly wins";
         let result = parse_response_text(text, DEFAULT_NARROW_WIN);
         assert_eq!(result.item1_win_probability, Some(0.8));
+    }
+
+    #[test]
+    fn test_text_parse_bold_wrapped_verdict() {
+        let text = "Analysis.\n\n**Verdict E**";
+        let result = parse_response_text(text, DEFAULT_NARROW_WIN);
+        assert_eq!(result.item1_win_probability, Some(0.0));
+    }
+
+    #[test]
+    fn test_text_parse_bold_verdict_with_colon() {
+        let text = "Analysis.\n\n**Verdict B:** Option 1 narrowly wins";
+        let result = parse_response_text(text, DEFAULT_NARROW_WIN);
+        assert_eq!(result.item1_win_probability, Some(0.8));
+    }
+
+    #[test]
+    fn test_text_parse_bold_only_keyword() {
+        let text = "Analysis.\n\n**Verdict** A";
+        let result = parse_response_text(text, DEFAULT_NARROW_WIN);
+        assert_eq!(result.item1_win_probability, Some(1.0));
+    }
+
+    #[test]
+    fn test_text_parse_heading_verdict() {
+        let text = "Analysis.\n\n## Verdict D: Option 2 narrowly wins";
+        let result = parse_response_text(text, DEFAULT_NARROW_WIN);
+        assert_eq!(result.item1_win_probability, Some(1.0 - DEFAULT_NARROW_WIN));
     }
 }
