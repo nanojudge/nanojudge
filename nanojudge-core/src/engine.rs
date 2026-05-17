@@ -5,7 +5,7 @@
 ///
 /// Items are identified by caller-provided `i64` IDs.
 use crate::bradley_terry::BradleyTerry;
-use crate::constants::{CONCURRENCY_LIMIT, INITIAL_BRADLEY_TERRY_RATING, MAX_ROUND_MULTIPLIER};
+use crate::constants::INITIAL_BRADLEY_TERRY_RATING;
 use crate::pairing::{
     generate_balanced_pairings_indexed, generate_top_heavy_pairings_indexed,
     get_effective_strategy, Strategy,
@@ -77,6 +77,7 @@ impl RankingEngine {
     pub fn generate_pairs_for_round(&mut self, round_index: usize) -> Vec<Pair> {
         self.current_round_number = round_index;
         let num_items = self.id_map.len();
+        let pairs_count = calculate_pairs_for_round(num_items);
 
         let effective_strategy = get_effective_strategy(
             self.config.strategy,
@@ -90,7 +91,7 @@ impl RankingEngine {
         let index_pairs = match effective_strategy {
             Strategy::Balanced => generate_balanced_pairings_indexed(
                 num_items,
-                self.current_round_number,
+                pairs_count,
                 &self.current_ratings,
                 self.config.matchmaking_sharpness,
                 &self.first_position_count,
@@ -104,7 +105,7 @@ impl RankingEngine {
 
                 generate_top_heavy_pairings_indexed(
                     num_items,
-                    self.current_round_number,
+                    pairs_count,
                     top_k_probs,
                     sample_means,
                     self.config.matchmaking_sharpness,
@@ -160,43 +161,23 @@ impl RankingEngine {
     }
 }
 
-/// Calculate pairs for a round using progressive scaling.
-pub fn calculate_pairs_for_round(num_items: usize, round_number: usize) -> usize {
-    let base_pairs = num_items / 2;
-
-    if base_pairs >= CONCURRENCY_LIMIT {
-        return base_pairs;
-    }
-
-    if base_pairs == 0 {
-        return 0;
-    }
-
-    let min_multiplier_to_saturate = (CONCURRENCY_LIMIT + base_pairs - 1) / base_pairs;
-    let effective_max_multiplier = min_multiplier_to_saturate.min(MAX_ROUND_MULTIPLIER);
-    let multiplier = round_number.min(effective_max_multiplier);
-
-    base_pairs * multiplier
+/// Calculate pairs for a single round: every item gets compared once.
+pub fn calculate_pairs_for_round(num_items: usize) -> usize {
+    num_items / 2
 }
 
 /// Calculate total expected comparisons across all rounds.
 pub fn calculate_total_expected_comparisons(num_items: usize, number_of_rounds: usize) -> usize {
-    (1..=number_of_rounds).map(|r| calculate_pairs_for_round(num_items, r)).sum()
+    calculate_pairs_for_round(num_items) * number_of_rounds
 }
 
 /// Calculate rounds needed to reach target comparisons.
 pub fn calculate_rounds_for_target_comparisons(num_items: usize, target_comparisons: usize) -> usize {
-    if num_items < 2 || target_comparisons == 0 {
+    let pairs_per_round = calculate_pairs_for_round(num_items);
+    if pairs_per_round == 0 || target_comparisons == 0 {
         return 0;
     }
-
-    let mut total = 0;
-    let mut rounds = 0;
-    while total < target_comparisons {
-        rounds += 1;
-        total += calculate_pairs_for_round(num_items, rounds);
-    }
-    rounds
+    (target_comparisons + pairs_per_round - 1) / pairs_per_round
 }
 
 #[cfg(test)]
@@ -204,30 +185,27 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_calculate_pairs_for_round_large_list() {
-        assert_eq!(calculate_pairs_for_round(1000, 1), 500);
-        assert_eq!(calculate_pairs_for_round(1000, 5), 500);
+    fn test_calculate_pairs_for_round() {
+        assert_eq!(calculate_pairs_for_round(1000), 500);
+        assert_eq!(calculate_pairs_for_round(10), 5);
+        assert_eq!(calculate_pairs_for_round(79), 39);
+        assert_eq!(calculate_pairs_for_round(1), 0);
+        assert_eq!(calculate_pairs_for_round(0), 0);
     }
 
     #[test]
-    fn test_calculate_pairs_for_round_small_list() {
-        assert_eq!(calculate_pairs_for_round(10, 1), 5);
-        assert_eq!(calculate_pairs_for_round(10, 2), 10);
-        assert_eq!(calculate_pairs_for_round(10, 4), 20);
+    fn test_calculate_total_expected_comparisons() {
+        assert_eq!(calculate_total_expected_comparisons(10, 5), 25);
+        assert_eq!(calculate_total_expected_comparisons(78, 10), 390);
+        assert_eq!(calculate_total_expected_comparisons(1000, 3), 1500);
     }
 
     #[test]
     fn test_calculate_rounds_for_target() {
-        let num_items = 100;
-        let target = 500;
-        let rounds = calculate_rounds_for_target_comparisons(num_items, target);
-        let total = calculate_total_expected_comparisons(num_items, rounds);
-        assert!(total >= target);
-
-        if rounds > 1 {
-            let total_minus_one = calculate_total_expected_comparisons(num_items, rounds - 1);
-            assert!(total_minus_one < target);
-        }
+        assert_eq!(calculate_rounds_for_target_comparisons(100, 500), 10);
+        assert_eq!(calculate_rounds_for_target_comparisons(100, 501), 11);
+        assert_eq!(calculate_rounds_for_target_comparisons(100, 0), 0);
+        assert_eq!(calculate_rounds_for_target_comparisons(1, 100), 0);
     }
 
     fn make_input(id1: i64, id2: i64, prob: f64) -> ComparisonInput {
@@ -288,12 +266,12 @@ mod tests {
             strategy: Strategy::Balanced,
             matchmaking_sharpness: 1.0,
             min_games_before_strategy: 3,
-            number_of_rounds: Some(30),
+            number_of_rounds: Some(114),
         };
 
         let mut engine = RankingEngine::new(&item_ids, config);
 
-        for round in 0..30 {
+        for round in 0..114 {
             let pairs = engine.generate_pairs_for_round(round);
             let results: Vec<ComparisonInput> = pairs.iter()
                 .map(|(a, b)| make_input(*a, *b, 0.5))
@@ -302,8 +280,7 @@ mod tests {
         }
 
         let total_comparisons: usize = engine.games_played.iter().sum::<usize>() / 2;
-        assert!(total_comparisons >= 800,
-            "expected at least 800 comparisons, got {}", total_comparisons);
+        assert_eq!(total_comparisons, 1140);
 
         for i in 0..engine.num_items() {
             let games = engine.games_played[i];

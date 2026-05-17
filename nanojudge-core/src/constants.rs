@@ -2,15 +2,6 @@
 /// Using 1.0 as the neutral starting point allows the algorithm to converge naturally.
 pub const INITIAL_BRADLEY_TERRY_RATING: f64 = 1.0;
 
-/// Maximum number of concurrent comparison requests to process at once.
-/// Used by `calculate_pairs_for_round` to determine progressive scaling.
-pub const CONCURRENCY_LIMIT: usize = 300;
-
-/// Maximum multiplier for scaling pairs per round in small lists.
-/// For lists where base_pairs < CONCURRENCY_LIMIT, we progressively scale
-/// the number of pairs per round (round 1: 1x, round 2: 2x, etc.) up to this max.
-pub const MAX_ROUND_MULTIPLIER: usize = 4;
-
 /// Maximum number of nearby items to consider when selecting an opponent.
 ///
 /// When choosing who to pair an item against, we use info-gain weighting:

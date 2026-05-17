@@ -1,6 +1,7 @@
 use nanojudge_core::{
     ComparisonInput, EngineConfig, JudgeInfo, RankingEngine, ScoringOptions, Strategy,
-    calculate_pairs_for_round, calculate_total_expected_comparisons, run_scoring,
+    calculate_pairs_for_round, calculate_rounds_for_target_comparisons,
+    calculate_total_expected_comparisons, run_scoring,
 };
 use rand::seq::SliceRandom;
 use reqwest::Client;
@@ -115,27 +116,21 @@ pub async fn run(args: RankArgs) {
     let item_ids: Vec<i64> = (0..texts.len() as i64).collect();
 
     let rounds = if let Some(target) = resolved.comparisons {
-        let mut total = 0;
-        let mut r = 0;
-        loop {
-            let next = calculate_pairs_for_round(texts.len(), r + 1);
-            if total + next > target {
-                break;
-            }
-            r += 1;
-            total += next;
+        let pairs_per_round = calculate_pairs_for_round(texts.len());
+        if pairs_per_round == 0 {
+            bail("Cannot run comparisons: need at least 2 items.");
         }
+        let r = calculate_rounds_for_target_comparisons(texts.len(), target);
         if r == 0 {
-            let min = calculate_pairs_for_round(texts.len(), 1);
             bail(format!(
-                "--comparisons ({target}) is less than one round ({min} comparisons). Use at least {min}.",
+                "--comparisons ({target}) is less than one round ({pairs_per_round} comparisons). Use at least {pairs_per_round}.",
             ));
         }
         let actual = calculate_total_expected_comparisons(texts.len(), r);
-        if actual < target {
+        if actual != target {
             eprintln!(
-                "Running {} comparisons instead of {}, to align with round boundaries ({} per first round).",
-                actual, target, calculate_pairs_for_round(texts.len(), 1),
+                "Running {} comparisons instead of {}, to align with round boundaries ({} per round).",
+                actual, target, pairs_per_round,
             );
         }
         r

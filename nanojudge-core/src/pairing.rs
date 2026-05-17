@@ -5,7 +5,6 @@
 use rand::Rng;
 
 use crate::constants::OPPONENT_WINDOW_SIZE;
-use crate::engine::calculate_pairs_for_round;
 use crate::types::{IndexedPair, Pair};
 
 /// Pairing strategy enum.
@@ -85,7 +84,7 @@ pub fn get_effective_strategy(
 /// Returns pairs of item IDs.
 pub fn generate_balanced_pairings(
     item_ids: &[i64],
-    round_number: usize,
+    pairs_count: usize,
     current_ratings: &[f64],
     sharpness: f64,
 ) -> Vec<Pair> {
@@ -93,7 +92,7 @@ pub fn generate_balanced_pairings(
     let zeros = vec![0usize; n];
     let index_pairs = generate_balanced_pairings_indexed(
         n,
-        round_number,
+        pairs_count,
         current_ratings,
         sharpness,
         &zeros,
@@ -108,7 +107,7 @@ pub fn generate_balanced_pairings(
 /// Returns pairs of item IDs.
 pub fn generate_top_heavy_pairings(
     item_ids: &[i64],
-    round_number: usize,
+    pairs_count: usize,
     top_k_probs: &[f64],
     sample_means: &[f64],
     sharpness: f64,
@@ -117,7 +116,7 @@ pub fn generate_top_heavy_pairings(
     let zeros = vec![0usize; n];
     let index_pairs = generate_top_heavy_pairings_indexed(
         n,
-        round_number,
+        pairs_count,
         top_k_probs,
         sample_means,
         sharpness,
@@ -133,23 +132,18 @@ pub fn generate_top_heavy_pairings(
 
 pub(crate) fn generate_balanced_pairings_indexed(
     num_items: usize,
-    round_number: usize,
+    pairs_count: usize,
     current_ratings: &[f64],
     sharpness: f64,
     first_position_counts: &[usize],
     games_played: &[usize],
 ) -> Vec<IndexedPair> {
     let mut rng = rand::rng();
-    let pairs_target = calculate_pairs_for_round(num_items, round_number + 1);
+    let mut pairings: Vec<IndexedPair> = Vec::with_capacity(pairs_count);
 
-    let mut pairings: Vec<IndexedPair> = Vec::with_capacity(pairs_target);
-
-    let items_per_iteration = num_items / 2;
-    if items_per_iteration == 0 {
+    if num_items < 2 {
         return pairings;
     }
-    let full_iterations = pairs_target / items_per_iteration;
-    let remaining_pairs = pairs_target % items_per_iteration;
 
     // Local mutable copies of caller-provided counters. Updated optimistically
     // as positions are assigned within this call so later pairs balance against
@@ -157,21 +151,11 @@ pub(crate) fn generate_balanced_pairings_indexed(
     let mut local_first_counts: Vec<usize> = first_position_counts.to_vec();
     let mut local_games: Vec<usize> = games_played.to_vec();
 
-    for _ in 0..full_iterations {
-        generate_balanced_iteration(
-            num_items, current_ratings, sharpness, items_per_iteration,
-            &mut pairings, &mut rng,
-            &mut local_first_counts, &mut local_games,
-        );
-    }
-
-    if remaining_pairs > 0 {
-        generate_balanced_iteration(
-            num_items, current_ratings, sharpness, remaining_pairs,
-            &mut pairings, &mut rng,
-            &mut local_first_counts, &mut local_games,
-        );
-    }
+    generate_balanced_iteration(
+        num_items, current_ratings, sharpness, pairs_count,
+        &mut pairings, &mut rng,
+        &mut local_first_counts, &mut local_games,
+    );
 
     pairings
 }
@@ -286,7 +270,7 @@ fn swap_remove_live(
 
 pub(crate) fn generate_top_heavy_pairings_indexed(
     num_items: usize,
-    round_number: usize,
+    pairs_count: usize,
     top_k_probs: &[f64],
     sample_means: &[f64],
     sharpness: f64,
@@ -298,7 +282,7 @@ pub(crate) fn generate_top_heavy_pairings_indexed(
     }
 
     let mut rng = rand::rng();
-    let pairs_target = calculate_pairs_for_round(num_items, round_number + 1);
+    let pairs_target = pairs_count;
 
     let total_item1_weight: f64 = top_k_probs.iter().sum();
 
@@ -445,9 +429,9 @@ mod tests {
     fn test_balanced_pairings_coverage() {
         let item_ids: Vec<i64> = (100..110).collect(); // IDs 100-109
         let ratings = vec![1.0; 10];
-        let pairs = generate_balanced_pairings(&item_ids, 0, &ratings, 1.0);
+        let pairs = generate_balanced_pairings(&item_ids, 5, &ratings, 1.0);
 
-        assert_eq!(pairs.len(), 5); // floor(10/2)
+        assert_eq!(pairs.len(), 5);
 
         // All pairs should use IDs from item_ids, not indices
         for (a, b) in &pairs {
@@ -522,7 +506,7 @@ mod tests {
         let sample_means: Vec<f64> = (0..10).map(|i| 10.0 - i as f64).collect();
         let top_k_probs: Vec<f64> = (0..10).map(|i| if i < 3 { 0.8 } else { 0.05 }).collect();
 
-        let pairs = generate_top_heavy_pairings(&item_ids, 0, &top_k_probs, &sample_means, 1.0);
+        let pairs = generate_top_heavy_pairings(&item_ids, 5, &top_k_probs, &sample_means, 1.0);
         assert!(!pairs.is_empty());
     }
 }
