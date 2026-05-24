@@ -118,6 +118,14 @@ pub fn resolve_judges(
 
     let global_concurrency = cfg.concurrency.unwrap_or(DEFAULT_CONCURRENCY);
 
+    let global_narrow_win = merge_opt(shared.narrow_win, cfg.narrow_win, "narrow-win")
+        .unwrap_or(parse::DEFAULT_NARROW_WIN);
+    if !global_narrow_win.is_finite() || global_narrow_win <= 0.5 || global_narrow_win >= 1.0 {
+        bail(format!(
+            "narrow_win={global_narrow_win}, must be finite, > 0.5 and < 1.0"
+        ));
+    }
+
     // CLI --api-key or OPENAI_API_KEY env var
     let cli_api_key = shared.api_key.clone()
         .or_else(|| std::env::var("OPENAI_API_KEY").ok());
@@ -188,7 +196,7 @@ pub fn resolve_judges(
             bail(format!("Judge {} has non-positive weight {}. All weights must be > 0.", jc.model, weight));
         }
 
-        let narrow_win = jc.narrow_win.unwrap_or(parse::DEFAULT_NARROW_WIN);
+        let narrow_win = jc.narrow_win.unwrap_or(global_narrow_win);
         if !narrow_win.is_finite() || narrow_win <= 0.5 || narrow_win >= 1.0 {
             bail(format!(
                 "Judge {} has narrow_win={}, must be finite, > 0.5 and < 1.0",
@@ -351,5 +359,108 @@ pub fn resolve_config(shared: &ConfigArgs, cfg: &config::NanojudgeConfig) -> Res
         decisiveness_prior_tau2,
         decisiveness_proposal_std,
         live_top,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::{JudgeConfig, NanojudgeConfig};
+
+    fn default_cli() -> ConfigArgs {
+        ConfigArgs {
+            api_key: None,
+            logprobs: false,
+            rounds: None,
+            comparisons: None,
+            concurrency: None,
+            narrow_win: None,
+            strategy: None,
+            top_k: None,
+            retries: None,
+            analysis_length: None,
+            no_reasoning: false,
+            prompt_template: None,
+            confidence_level: None,
+            regularization_strength: None,
+            mcmc_iterations: None,
+            mcmc_burn_in: None,
+            bias_prior: None,
+            matchmaking_sharpness: None,
+            min_games: None,
+            prior_tau2: None,
+            sigma2: None,
+            proposal_std: None,
+            bias_prior_tau2: None,
+            bias_proposal_std: None,
+            decisiveness_prior_tau2: None,
+            decisiveness_proposal_std: None,
+            live_top: None,
+        }
+    }
+
+    fn one_judge_config(narrow_win: Option<f64>) -> NanojudgeConfig {
+        NanojudgeConfig {
+            judge: Some(vec![JudgeConfig {
+                endpoint: "http://localhost:8000".into(),
+                model: "test-model".into(),
+                concurrency: None,
+                weight: None,
+                temperature: Some(0.7),
+                temperature_jitter: None,
+                presence_penalty: None,
+                top_p: None,
+                narrow_win,
+                api_key_env: None,
+                max_tokens: None,
+                reasoning_effort: None,
+            }]),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn test_narrow_win_default() {
+        let cli = default_cli();
+        let cfg = one_judge_config(None);
+        let judges = resolve_judges(&cli, &cfg, Path::new("test.toml"), true);
+        assert_eq!(judges[0].narrow_win, parse::DEFAULT_NARROW_WIN);
+    }
+
+    #[test]
+    fn test_narrow_win_from_cli() {
+        let mut cli = default_cli();
+        cli.narrow_win = Some(0.9);
+        let cfg = one_judge_config(None);
+        let judges = resolve_judges(&cli, &cfg, Path::new("test.toml"), true);
+        assert_eq!(judges[0].narrow_win, 0.9);
+    }
+
+    #[test]
+    fn test_narrow_win_from_config() {
+        let cli = default_cli();
+        let mut cfg = one_judge_config(None);
+        cfg.narrow_win = Some(0.75);
+        let judges = resolve_judges(&cli, &cfg, Path::new("test.toml"), true);
+        assert_eq!(judges[0].narrow_win, 0.75);
+    }
+
+    #[test]
+    fn test_narrow_win_cli_overrides_config() {
+        let mut cli = default_cli();
+        cli.narrow_win = Some(0.9);
+        let mut cfg = one_judge_config(None);
+        cfg.narrow_win = Some(0.75);
+        let judges = resolve_judges(&cli, &cfg, Path::new("test.toml"), true);
+        assert_eq!(judges[0].narrow_win, 0.9);
+    }
+
+    #[test]
+    fn test_narrow_win_per_judge_overrides_global() {
+        let mut cli = default_cli();
+        cli.narrow_win = Some(0.9);
+        let cfg = one_judge_config(Some(0.65));
+        let judges = resolve_judges(&cli, &cfg, Path::new("test.toml"), true);
+        assert_eq!(judges[0].narrow_win, 0.65);
     }
 }
