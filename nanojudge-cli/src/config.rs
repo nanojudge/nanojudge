@@ -9,6 +9,7 @@ use crate::bail;
 
 /// Per-judge configuration from a [[judge]] TOML block.
 #[derive(Deserialize, Clone, Debug)]
+#[serde(deny_unknown_fields)]
 pub struct JudgeConfig {
     pub endpoint: String,
     pub model: String,
@@ -27,7 +28,8 @@ pub struct JudgeConfig {
     pub reasoning_effort: Option<String>,
 }
 
-#[derive(Deserialize, Default)]
+#[derive(Deserialize, Default, Debug)]
+#[serde(deny_unknown_fields)]
 pub struct NanojudgeConfig {
     pub rounds: Option<usize>,
     pub comparisons: Option<usize>,
@@ -197,8 +199,16 @@ pub fn config_path() -> PathBuf {
 pub fn load_config(path: &Path) -> NanojudgeConfig {
     match std::fs::read_to_string(path) {
         Ok(content) => {
-            toml::from_str(&content)
-                .unwrap_or_else(|e| bail(format!("Failed to parse config at {}: {e}", path.display())))
+            toml::from_str(&content).unwrap_or_else(|e| {
+                let mut msg = format!("Bad config at {}:\n  {e}", path.display());
+                if let Some(span) = e.span() {
+                    let line_num = content[..span.start].matches('\n').count() + 1;
+                    if let Some(line) = content.lines().nth(line_num - 1) {
+                        msg.push_str(&format!("\n\n  line {line_num}: {}", line.trim()));
+                    }
+                }
+                bail(msg)
+            })
         }
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => NanojudgeConfig::default(),
         Err(e) => bail(format!("Failed to read config at {}: {e}", path.display())),
@@ -368,5 +378,37 @@ rounds = 5
 
         let config = load_config(tmpfile.path());
         assert!(config.reasoning_enabled.is_none());
+    }
+
+    #[test]
+    fn test_unknown_top_level_field_rejected() {
+        let input = "rounds = 10\nbogus_field = true\n";
+        let result: Result<NanojudgeConfig, _> = toml::from_str(input);
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("bogus_field"), "error should name the bad field: {err}");
+    }
+
+    #[test]
+    fn test_unknown_judge_field_rejected() {
+        let input = r#"
+[[judge]]
+endpoint = "http://localhost:8000"
+model = "test"
+strategy = "top-heavy"
+"#;
+        let result: Result<NanojudgeConfig, _> = toml::from_str(input);
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("strategy"), "error should name the bad field: {err}");
+    }
+
+    #[test]
+    fn test_misspelled_field_rejected() {
+        let input = "roudns = 10\n";
+        let result: Result<NanojudgeConfig, _> = toml::from_str(input);
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("roudns"), "error should name the bad field: {err}");
     }
 }
