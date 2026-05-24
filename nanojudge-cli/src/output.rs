@@ -238,6 +238,44 @@ fn print_judge_panel_analytics(
     }
 }
 
+/// Print a compact live ranking table to stderr after a round.
+/// If `limit` is 0, prints all items.
+pub fn print_live_table(
+    rankings: &[RankedItem],
+    names: &[String],
+    round: usize,
+    total_comparisons: usize,
+    limit: usize,
+) {
+    let show = if limit == 0 || limit >= rankings.len() {
+        rankings
+    } else {
+        &rankings[..limit]
+    };
+
+    let name_width = show
+        .iter()
+        .map(|r| names[r.item as usize].len())
+        .max()
+        .unwrap_or(4)
+        .max(4);
+
+    eprintln!("\n── Round {} ({} comparisons) ──", round, total_comparisons);
+    for (i, r) in show.iter().enumerate() {
+        eprintln!(
+            " {:>2}. {:<name_width$}  {:>7.4}  [{:.2}, {:.2}]",
+            i + 1,
+            names[r.item as usize],
+            r.score,
+            r.lower_bound,
+            r.upper_bound,
+        );
+    }
+    if limit > 0 && limit < rankings.len() {
+        eprintln!("     … and {} more", rankings.len() - limit);
+    }
+}
+
 /// Format a duration in seconds to a human-readable string.
 fn format_duration(secs: f64) -> String {
     if secs < 60.0 {

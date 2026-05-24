@@ -136,6 +136,11 @@ pub struct ConfigArgs {
     /// MH proposal step size for log-decisiveness (logprobs mode). Default: 0.1.
     #[arg(long)]
     pub decisiveness_proposal_std: Option<f64>,
+
+    /// Print a live ranking table after each round.
+    /// With no value: prints all items. With a number: prints top N only.
+    #[arg(long, num_args = 0..=1, default_missing_value = "0")]
+    pub live_top: Option<usize>,
 }
 
 #[derive(Parser)]

@@ -522,8 +522,8 @@ pub async fn run(args: RankArgs) {
         engine.record_results(&round_results);
         engine.update_current_ratings();
 
-        // TopHeavy needs interim MCMC scoring to guide next round's pairing
-        if matches!(strategy, Strategy::TopHeavy) && !engine.completed_comparisons.is_empty() {
+        let need_interim = matches!(strategy, Strategy::TopHeavy) || resolved.live_top.is_some();
+        if need_interim && !engine.completed_comparisons.is_empty() {
             let interim = run_scoring(
                 &item_ids,
                 &engine.completed_comparisons,
@@ -545,8 +545,19 @@ pub async fn run(args: RankArgs) {
                 },
                 &judge_info,
             );
-            engine.mcmc_top_k_probs = interim.top_k_probs;
-            engine.mcmc_sample_means = interim.sample_means;
+            if matches!(strategy, Strategy::TopHeavy) {
+                engine.mcmc_top_k_probs = interim.top_k_probs;
+                engine.mcmc_sample_means = interim.sample_means;
+            }
+            if let Some(limit) = resolved.live_top {
+                output::print_live_table(
+                    &interim.rankings,
+                    &titles,
+                    round + 1,
+                    total_comparisons,
+                    limit,
+                );
+            }
             interim_warm_start = Some(interim.warm_start_state);
         }
     }

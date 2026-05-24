@@ -58,6 +58,7 @@ pub struct ResolvedConfig {
     pub bias_proposal_std: f64,
     pub decisiveness_prior_tau2: f64,
     pub decisiveness_proposal_std: f64,
+    pub live_top: Option<usize>,
 }
 
 /// A resolved judge — all fields concrete, ready to build LlmConfig.
@@ -279,6 +280,8 @@ pub fn resolve_config(shared: &ConfigArgs, cfg: &config::NanojudgeConfig) -> Res
     let decisiveness_proposal_std = merge_opt(shared.decisiveness_proposal_std, cfg.decisiveness_proposal_std, "decisiveness-proposal-std")
         .unwrap_or(0.1);
 
+    let live_top = merge_opt(shared.live_top, cfg.live_top, "live-top");
+
     // bias_prior: user specifies in probability space, we convert to logit
     let bias_prior = merge_opt(shared.bias_prior, cfg.bias_prior, "bias-prior")
         .unwrap_or(0.5);
@@ -347,5 +350,6 @@ pub fn resolve_config(shared: &ConfigArgs, cfg: &config::NanojudgeConfig) -> Res
         bias_proposal_std,
         decisiveness_prior_tau2,
         decisiveness_proposal_std,
+        live_top,
     }
 }

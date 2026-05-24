@@ -55,6 +55,7 @@ pub struct NanojudgeConfig {
     pub decisiveness_prior_tau2: Option<f64>,
     pub decisiveness_proposal_std: Option<f64>,
     pub reasoning_enabled: Option<bool>,
+    pub live_top: Option<usize>,
     /// Judge panel configuration. At least one [[judge]] block is required.
     pub judge: Option<Vec<JudgeConfig>>,
 }
@@ -100,6 +101,10 @@ const DEFAULT_CONFIG_TEMPLATE: &str = "\
 # How many top positions to track for the top-heavy strategy.
 # Default: sqrt(n) * 3, clamped to n-1. Only used with strategy = \"top-heavy\".
 # top_k = 10
+
+# Print a live ranking table after each round. 0 = all items, N = top N.
+# Omit or comment out to disable.
+# live_top = 10
 
 # Max retries per comparison on HTTP errors. 0 = no retries. Default: 3.
 # retries = 3
