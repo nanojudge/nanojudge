@@ -109,14 +109,11 @@ pub fn resolve_judges(
         }
     }
 
-    // logprobs is a global setting — all judges must be in the same mode
-    let global_logprobs = if shared.logprobs {
-        true
-    } else {
-        cfg.logprobs.unwrap_or(false)
-    };
+    let global_logprobs = merge_opt(shared.logprobs, cfg.logprobs, "logprobs")
+        .unwrap_or(false);
 
-    let global_concurrency = cfg.concurrency.unwrap_or(DEFAULT_CONCURRENCY);
+    let global_concurrency = merge_opt(shared.concurrency, cfg.concurrency, "concurrency")
+        .unwrap_or(DEFAULT_CONCURRENCY);
 
     let global_narrow_win = merge_opt(shared.narrow_win, cfg.narrow_win, "narrow-win")
         .unwrap_or(parse::DEFAULT_NARROW_WIN);
@@ -298,15 +295,8 @@ pub fn resolve_config(shared: &ConfigArgs, cfg: &config::NanojudgeConfig) -> Res
     }
     let bias_prior_logit = (bias_prior / (1.0 - bias_prior)).ln();
 
-    // reasoning_enabled: CLI --no-reasoning overrides config file value. Default: true.
-    let reasoning_enabled = if shared.no_reasoning {
-        if let Some(true) = cfg.reasoning_enabled {
-            eprintln!("Warning: --no-reasoning overrides config file value (true)");
-        }
-        false
-    } else {
-        cfg.reasoning_enabled.unwrap_or(true)
-    };
+    let reasoning_enabled = merge_opt(shared.reasoning, cfg.reasoning_enabled, "reasoning")
+        .unwrap_or(true);
 
     if !reasoning_enabled && shared.analysis_length.is_some() {
         eprintln!("Warning: --analysis-length is ignored when reasoning is disabled");
@@ -326,7 +316,7 @@ pub fn resolve_config(shared: &ConfigArgs, cfg: &config::NanojudgeConfig) -> Res
 
         let template_path = cli_path.or(cfg_path);
         if template_path.is_some() && !reasoning_enabled {
-            bail("Cannot use --no-reasoning with a custom prompt template. Custom templates control their own reasoning format.");
+            bail("Cannot use --reasoning false with a custom prompt template. Custom templates control their own reasoning format.");
         }
         match template_path {
             Some(path) => prompt::load_template(&path),
@@ -370,7 +360,7 @@ mod tests {
     fn default_cli() -> ConfigArgs {
         ConfigArgs {
             api_key: None,
-            logprobs: false,
+            logprobs: None,
             rounds: None,
             comparisons: None,
             concurrency: None,
@@ -379,7 +369,7 @@ mod tests {
             top_k: None,
             retries: None,
             analysis_length: None,
-            no_reasoning: false,
+            reasoning: None,
             prompt_template: None,
             confidence_level: None,
             regularization_strength: None,
@@ -462,5 +452,71 @@ mod tests {
         let cfg = one_judge_config(Some(0.65));
         let judges = resolve_judges(&cli, &cfg, Path::new("test.toml"), true);
         assert_eq!(judges[0].narrow_win, 0.65);
+    }
+
+    #[test]
+    fn test_concurrency_from_cli() {
+        let mut cli = default_cli();
+        cli.concurrency = Some(32);
+        let cfg = one_judge_config(None);
+        let judges = resolve_judges(&cli, &cfg, Path::new("test.toml"), true);
+        assert_eq!(judges[0].concurrency, 32);
+    }
+
+    #[test]
+    fn test_concurrency_cli_overrides_config() {
+        let mut cli = default_cli();
+        cli.concurrency = Some(32);
+        let mut cfg = one_judge_config(None);
+        cfg.concurrency = Some(8);
+        let judges = resolve_judges(&cli, &cfg, Path::new("test.toml"), true);
+        assert_eq!(judges[0].concurrency, 32);
+    }
+
+    #[test]
+    fn test_logprobs_from_cli() {
+        let mut cli = default_cli();
+        cli.logprobs = Some(true);
+        let cfg = one_judge_config(None);
+        let judges = resolve_judges(&cli, &cfg, Path::new("test.toml"), true);
+        assert!(judges[0].logprobs);
+    }
+
+    #[test]
+    fn test_logprobs_cli_false_overrides_config() {
+        let mut cli = default_cli();
+        cli.logprobs = Some(false);
+        let mut cfg = one_judge_config(None);
+        cfg.logprobs = Some(true);
+        let judges = resolve_judges(&cli, &cfg, Path::new("test.toml"), true);
+        assert!(!judges[0].logprobs);
+    }
+
+    #[test]
+    fn test_reasoning_from_cli() {
+        let mut cli = default_cli();
+        cli.reasoning = Some(false);
+        let cfg = NanojudgeConfig::default();
+        let resolved = resolve_config(&cli, &cfg);
+        assert!(!resolved.reasoning_enabled);
+    }
+
+    #[test]
+    fn test_reasoning_cli_overrides_config() {
+        let mut cli = default_cli();
+        cli.reasoning = Some(true);
+        let mut cfg = NanojudgeConfig::default();
+        cfg.reasoning_enabled = Some(false);
+        let resolved = resolve_config(&cli, &cfg);
+        assert!(resolved.reasoning_enabled);
+    }
+
+    #[test]
+    fn test_reasoning_from_config() {
+        let cli = default_cli();
+        let mut cfg = NanojudgeConfig::default();
+        cfg.reasoning_enabled = Some(false);
+        let resolved = resolve_config(&cli, &cfg);
+        assert!(!resolved.reasoning_enabled);
     }
 }

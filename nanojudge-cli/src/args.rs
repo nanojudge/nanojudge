@@ -31,8 +31,8 @@ pub struct ConfigArgs {
 
     /// Enable logprob extraction for continuous win probabilities.
     /// Requires an endpoint that supports logprobs.
-    #[arg(long)]
-    pub logprobs: bool,
+    #[arg(long, num_args = 0..=1, default_missing_value = "true")]
+    pub logprobs: Option<bool>,
 
     /// Number of comparison rounds
     #[arg(long, conflicts_with = "comparisons")]
@@ -70,10 +70,10 @@ pub struct ConfigArgs {
     #[arg(long)]
     pub analysis_length: Option<String>,
 
-    /// Skip analysis and output only the verdict line.
-    /// Faster and cheaper, but may reduce accuracy. Forces max_tokens to 16.
-    #[arg(long)]
-    pub no_reasoning: bool,
+    /// Enable LLM reasoning/analysis before the verdict. Default: true.
+    /// Use --reasoning false to skip analysis (faster/cheaper, forces max_tokens to 16).
+    #[arg(long, num_args = 0..=1, default_missing_value = "true")]
+    pub reasoning: Option<bool>,
 
     /// Path to a custom prompt template file.
     /// The template must contain: $criterion, $option1, $option2, $length
