@@ -5,9 +5,9 @@ use nanojudge_core::{
 };
 use rand::seq::SliceRandom;
 use reqwest::Client;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::io::Write;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -29,19 +29,17 @@ struct JudgeStats {
     round_count: usize,
 }
 
-/// Parse --save-comparisons value: float with '.' → fraction of total, integer → exact count.
-fn parse_save_count(value: &str, total: usize) -> usize {
-    if value.contains('.') {
-        let frac: f64 = value.parse()
-            .unwrap_or_else(|_| bail(format!("Invalid fraction for --save-comparisons: \"{value}\"")));
-        if !(0.0..=1.0).contains(&frac) {
-            bail(format!("--save-comparisons fraction must be between 0.0 and 1.0, got {frac}"));
-        }
-        (frac * total as f64).round() as usize
+fn resolve_save_path(path: &Path, prefix: &str) -> PathBuf {
+    let ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
+    if path.is_dir() {
+        path.join(format!("{prefix}-{ts}.jsonl"))
     } else {
-        let count: usize = value.parse()
-            .unwrap_or_else(|_| bail(format!("Invalid count for --save-comparisons: \"{value}\"")));
-        count.min(total)
+        let parent = path.parent().unwrap_or_else(|| Path::new("."));
+        if !parent.exists() {
+            bail(format!("Directory {} does not exist", parent.display()));
+        }
+        path.to_path_buf()
     }
 }
 
@@ -226,39 +224,23 @@ pub async fn run(args: RankArgs) {
     }
 
     // Set up comparison saving if requested
-    let save_file = if let Some(ref save_value) = args.save_comparisons {
-        let save_count = parse_save_count(save_value, total_planned);
-        let save_path = args.save_comparisons_to.clone()
-            .unwrap_or_else(|| {
-                let ts = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
-                PathBuf::from(format!("comparisons-{ts}.jsonl"))
-            });
-
-        let save_indices: HashSet<usize> = if save_count >= total_planned {
-            (0..total_planned).collect()
-        } else {
-            use rand::seq::index::sample;
-            let mut rng = rand::rng();
-            sample(&mut rng, total_planned, save_count).into_iter().collect()
-        };
+    let save_file = if let Some(ref save_path) = resolved.save_comparisons {
+        let path = resolve_save_path(save_path, "comparisons");
 
         let file = std::fs::OpenOptions::new()
             .create(true)
             .append(true)
-            .open(&save_path)
-            .unwrap_or_else(|e| bail(format!("Failed to open {}: {e}", save_path.display())));
+            .open(&path)
+            .unwrap_or_else(|e| bail(format!("Failed to open {}: {e}", path.display())));
 
         if args.verbose {
-            eprintln!("Saving {} comparisons to {}", save_count, save_path.display());
+            eprintln!("Saving comparisons to {}", path.display());
         }
 
-        Some((std::sync::Mutex::new(file), save_indices))
+        Some(std::sync::Mutex::new(file))
     } else {
         None
     };
-
-    let mut global_idx: usize = 0;
 
     let strategy = resolved.strategy;
 
@@ -386,8 +368,6 @@ pub async fn run(args: RankArgs) {
         let mut judge_aborted: Vec<usize> = vec![0; judges.len()];
 
         for (handle, handle_judge_idx) in handles {
-            let this_idx = global_idx;
-            global_idx += 1;
             if cancelled.load(Ordering::Relaxed) {
                 handle.abort();
                 judge_aborted[handle_judge_idx] += 1;
@@ -418,22 +398,19 @@ pub async fn run(args: RankArgs) {
                         judge_stats[judge_idx].output_tokens += usage.completion_tokens;
                     }
                     if let Some(p) = result.parse_result.item1_win_probability {
-                        // Save to JSONL if this index was selected
-                        if let Some((ref file_mutex, ref indices)) = save_file {
-                            if indices.contains(&this_idx) {
-                                let line = serde_json::json!({
-                                    "round": round + 1,
-                                    "item1": titles[result.item1_id as usize],
-                                    "item2": titles[result.item2_id as usize],
-                                    "probability": p,
-                                    "judge_model": judge_models[judge_idx],
-                                    "judge_endpoint": judge_endpoints[judge_idx],
-                                    "response": result.response_text,
-                                });
-                                let mut f = file_mutex.lock().unwrap();
-                                let _ = writeln!(f, "{}", line);
-                                let _ = f.flush();
-                            }
+                        if let Some(ref file_mutex) = save_file {
+                            let line = serde_json::json!({
+                                "round": round + 1,
+                                "item1": titles[result.item1_id as usize],
+                                "item2": titles[result.item2_id as usize],
+                                "probability": p,
+                                "judge_model": judge_models[judge_idx],
+                                "judge_endpoint": judge_endpoints[judge_idx],
+                                "response": result.response_text,
+                            });
+                            let mut f = file_mutex.lock().unwrap();
+                            let _ = writeln!(f, "{}", line);
+                            let _ = f.flush();
                         }
 
                         round_results.push(ComparisonInput {

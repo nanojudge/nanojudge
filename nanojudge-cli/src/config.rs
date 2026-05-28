@@ -57,6 +57,7 @@ pub struct NanojudgeConfig {
     pub reasoning_enabled: Option<bool>,
     pub narrow_win: Option<f64>,
     pub live_top: Option<usize>,
+    pub save_comparisons: Option<PathBuf>,
     /// Judge panel configuration. At least one [[judge]] block is required.
     pub judge: Option<Vec<JudgeConfig>>,
 }
@@ -110,6 +111,12 @@ const DEFAULT_CONFIG_TEMPLATE: &str = "\
 # Print a live ranking table after each round. 0 = all items, N = top N.
 # Omit or comment out to disable.
 # live_top = 10
+
+# Save all comparisons to a JSONL file. Value is a path.
+# Use \".\" for the current directory (auto-generates comparisons-{timestamp}.jsonl).
+# A directory path auto-generates a filename inside it.
+# Omit or comment out to disable.
+# save_comparisons = \".\"
 
 # Max retries per comparison on HTTP errors. 0 = no retries. Default: 3.
 # retries = 3

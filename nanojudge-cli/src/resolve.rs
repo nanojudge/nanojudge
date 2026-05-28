@@ -59,6 +59,7 @@ pub struct ResolvedConfig {
     pub decisiveness_prior_tau2: f64,
     pub decisiveness_proposal_std: f64,
     pub live_top: Option<usize>,
+    pub save_comparisons: Option<PathBuf>,
 }
 
 /// A resolved judge — all fields concrete, ready to build LlmConfig.
@@ -286,6 +287,17 @@ pub fn resolve_config(shared: &ConfigArgs, cfg: &config::NanojudgeConfig) -> Res
         .unwrap_or(0.1);
 
     let live_top = merge_opt(shared.live_top, cfg.live_top, "live-top");
+    let save_comparisons = match (shared.save_comparisons.clone(), cfg.save_comparisons.clone()) {
+        (Some(c), Some(f)) => {
+            if c != f {
+                eprintln!("Warning: --save-comparisons ({}) overrides config file value ({})",
+                    c.display(), f.display());
+            }
+            Some(c)
+        }
+        (c @ Some(_), None) => c,
+        (None, f) => f,
+    };
 
     // bias_prior: user specifies in probability space, we convert to logit
     let bias_prior = merge_opt(shared.bias_prior, cfg.bias_prior, "bias-prior")
@@ -349,6 +361,7 @@ pub fn resolve_config(shared: &ConfigArgs, cfg: &config::NanojudgeConfig) -> Res
         decisiveness_prior_tau2,
         decisiveness_proposal_std,
         live_top,
+        save_comparisons,
     }
 }
 
@@ -386,6 +399,7 @@ mod tests {
             decisiveness_prior_tau2: None,
             decisiveness_proposal_std: None,
             live_top: None,
+            save_comparisons: None,
         }
     }
 
