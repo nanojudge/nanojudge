@@ -242,6 +242,25 @@ pub async fn run(args: RankArgs) {
         None
     };
 
+    // Set up failure saving if requested
+    let failures_file = if let Some(ref save_path) = resolved.save_failures {
+        let path = resolve_save_path(save_path, "failures");
+
+        let file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path)
+            .unwrap_or_else(|e| bail(format!("Failed to open {}: {e}", path.display())));
+
+        if resolved.verbose {
+            eprintln!("Saving failures to {}", path.display());
+        }
+
+        Some(std::sync::Mutex::new(file))
+    } else {
+        None
+    };
+
     let strategy = resolved.strategy;
 
     if resolved.top_k.is_some() && matches!(strategy, Strategy::Balanced) {
@@ -421,6 +440,19 @@ pub async fn run(args: RankArgs) {
                         });
                     } else {
                         failed_parse += 1;
+                        if let Some(ref file_mutex) = failures_file {
+                            let line = serde_json::json!({
+                                "round": round + 1,
+                                "item1": titles[result.item1_id as usize],
+                                "item2": titles[result.item2_id as usize],
+                                "judge_model": judge_models[judge_idx],
+                                "judge_endpoint": judge_endpoints[judge_idx],
+                                "response": result.response_text,
+                            });
+                            let mut f = file_mutex.lock().unwrap();
+                            let _ = writeln!(f, "{}", line);
+                            let _ = f.flush();
+                        }
                         if resolved.verbose {
                             if judges.len() > 1 {
                                 eprintln!(

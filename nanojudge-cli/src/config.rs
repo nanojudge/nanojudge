@@ -60,6 +60,7 @@ pub struct NanojudgeConfig {
     pub save_comparisons: Option<PathBuf>,
     pub json: Option<bool>,
     pub verbose: Option<bool>,
+    pub save_failures: Option<PathBuf>,
     /// Judge panel configuration. At least one [[judge]] block is required.
     pub judge: Option<Vec<JudgeConfig>>,
 }
@@ -125,6 +126,12 @@ const DEFAULT_CONFIG_TEMPLATE: &str = "\
 
 # Show progress during execution.
 # verbose = false
+
+# Save failed comparisons (unparseable responses) to a JSONL file. Value is a path.
+# Use \".\" for the current directory (auto-generates failures-{timestamp}.jsonl).
+# A directory path auto-generates a filename inside it.
+# Omit or comment out to disable.
+# save_failures = \".\"
 
 # Max retries per comparison on HTTP errors. 0 = no retries. Default: 3.
 # retries = 3

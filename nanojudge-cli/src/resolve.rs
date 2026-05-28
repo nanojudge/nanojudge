@@ -62,6 +62,7 @@ pub struct ResolvedConfig {
     pub save_comparisons: Option<PathBuf>,
     pub json: bool,
     pub verbose: bool,
+    pub save_failures: Option<PathBuf>,
 }
 
 /// A resolved judge — all fields concrete, ready to build LlmConfig.
@@ -302,6 +303,17 @@ pub fn resolve_config(shared: &ConfigArgs, cfg: &config::NanojudgeConfig) -> Res
     };
     let json = merge_opt(shared.json, cfg.json, "json").unwrap_or(false);
     let verbose = merge_opt(shared.verbose, cfg.verbose, "verbose").unwrap_or(false);
+    let save_failures = match (shared.save_failures.clone(), cfg.save_failures.clone()) {
+        (Some(c), Some(f)) => {
+            if c != f {
+                eprintln!("Warning: --save-failures ({}) overrides config file value ({})",
+                    c.display(), f.display());
+            }
+            Some(c)
+        }
+        (c @ Some(_), None) => c,
+        (None, f) => f,
+    };
 
     // bias_prior: user specifies in probability space, we convert to logit
     let bias_prior = merge_opt(shared.bias_prior, cfg.bias_prior, "bias-prior")
@@ -368,6 +380,7 @@ pub fn resolve_config(shared: &ConfigArgs, cfg: &config::NanojudgeConfig) -> Res
         save_comparisons,
         json,
         verbose,
+        save_failures,
     }
 }
 
@@ -408,6 +421,7 @@ mod tests {
             save_comparisons: None,
             json: None,
             verbose: None,
+            save_failures: None,
         }
     }
 

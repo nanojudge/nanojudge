@@ -155,6 +155,12 @@ pub struct ConfigArgs {
     /// Show progress during execution.
     #[arg(short, long, num_args = 0..=1, default_missing_value = "true")]
     pub verbose: Option<bool>,
+
+    /// Save failed comparisons (unparseable responses) to a JSONL file.
+    /// Bare flag: saves to failures-{timestamp}.jsonl in the current directory.
+    /// With a path: saves to that file (or auto-generates a name if path is a directory).
+    #[arg(long, num_args = 0..=1, default_missing_value = ".")]
+    pub save_failures: Option<PathBuf>,
 }
 
 #[derive(Parser)]
