@@ -229,7 +229,11 @@ pub async fn run(args: RankArgs) {
     let save_file = if let Some(ref save_value) = args.save_comparisons {
         let save_count = parse_save_count(save_value, total_planned);
         let save_path = args.save_comparisons_to.clone()
-            .unwrap_or_else(|| PathBuf::from("comparisons.jsonl"));
+            .unwrap_or_else(|| {
+                let ts = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
+                PathBuf::from(format!("comparisons-{ts}.jsonl"))
+            });
 
         let save_indices: HashSet<usize> = if save_count >= total_planned {
             (0..total_planned).collect()
