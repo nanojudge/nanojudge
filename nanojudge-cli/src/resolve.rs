@@ -60,6 +60,8 @@ pub struct ResolvedConfig {
     pub decisiveness_proposal_std: f64,
     pub live_top: Option<usize>,
     pub save_comparisons: Option<PathBuf>,
+    pub json: bool,
+    pub verbose: bool,
 }
 
 /// A resolved judge — all fields concrete, ready to build LlmConfig.
@@ -298,6 +300,8 @@ pub fn resolve_config(shared: &ConfigArgs, cfg: &config::NanojudgeConfig) -> Res
         (c @ Some(_), None) => c,
         (None, f) => f,
     };
+    let json = merge_opt(shared.json, cfg.json, "json").unwrap_or(false);
+    let verbose = merge_opt(shared.verbose, cfg.verbose, "verbose").unwrap_or(false);
 
     // bias_prior: user specifies in probability space, we convert to logit
     let bias_prior = merge_opt(shared.bias_prior, cfg.bias_prior, "bias-prior")
@@ -362,6 +366,8 @@ pub fn resolve_config(shared: &ConfigArgs, cfg: &config::NanojudgeConfig) -> Res
         decisiveness_proposal_std,
         live_top,
         save_comparisons,
+        json,
+        verbose,
     }
 }
 
@@ -400,6 +406,8 @@ mod tests {
             decisiveness_proposal_std: None,
             live_top: None,
             save_comparisons: None,
+            json: None,
+            verbose: None,
         }
     }
 

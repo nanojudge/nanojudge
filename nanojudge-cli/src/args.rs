@@ -147,6 +147,14 @@ pub struct ConfigArgs {
     /// With a path: saves to that file (or auto-generates a name if path is a directory).
     #[arg(long, num_args = 0..=1, default_missing_value = ".")]
     pub save_comparisons: Option<PathBuf>,
+
+    /// Output JSON instead of table.
+    #[arg(long, num_args = 0..=1, default_missing_value = "true")]
+    pub json: Option<bool>,
+
+    /// Show progress during execution.
+    #[arg(short, long, num_args = 0..=1, default_missing_value = "true")]
+    pub verbose: Option<bool>,
 }
 
 #[derive(Parser)]
@@ -183,14 +191,6 @@ pub struct RankArgs {
     /// Inline item (repeatable)
     #[arg(long = "item")]
     pub inline_items: Vec<String>,
-
-    /// Output JSON instead of table
-    #[arg(long)]
-    pub json: bool,
-
-    /// Show progress during execution
-    #[arg(short, long)]
-    pub verbose: bool,
 
     /// Path to config file (default: ~/.config/nanojudge/config.toml)
     #[arg(long)]

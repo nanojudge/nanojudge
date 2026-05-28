@@ -191,7 +191,7 @@ pub async fn run(args: RankArgs) {
 
     let total_planned = calculate_total_expected_comparisons(texts.len(), rounds);
 
-    if args.verbose {
+    if resolved.verbose {
         eprintln!(
             "Ranking {} items across {} rounds ({} comparisons planned)",
             texts.len(),
@@ -233,7 +233,7 @@ pub async fn run(args: RankArgs) {
             .open(&path)
             .unwrap_or_else(|e| bail(format!("Failed to open {}: {e}", path.display())));
 
-        if args.verbose {
+        if resolved.verbose {
             eprintln!("Saving comparisons to {}", path.display());
         }
 
@@ -297,7 +297,7 @@ pub async fn run(args: RankArgs) {
         let pairs = engine.generate_pairs_for_round(round);
         let round_start = std::time::Instant::now();
 
-        if args.verbose {
+        if resolved.verbose {
             eprintln!("Round {}/{}: {} pairs", round + 1, rounds, pairs.len());
         }
 
@@ -337,7 +337,7 @@ pub async fn run(args: RankArgs) {
             let assigned_judge_id = judge_ids[judge_idx];
             let judge_name = judge_display_names[judge_idx].clone();
 
-            let verbose = args.verbose;
+            let verbose = resolved.verbose;
             let handle = tokio::spawn(async move {
                 let _permit = sem.acquire().await.unwrap();
                 let result = compare_pair(
@@ -421,7 +421,7 @@ pub async fn run(args: RankArgs) {
                         });
                     } else {
                         failed_parse += 1;
-                        if args.verbose {
+                        if resolved.verbose {
                             if judges.len() > 1 {
                                 eprintln!(
                                     "  Warning: unparseable response for {} vs {} [{}], skipping",
@@ -445,7 +445,7 @@ pub async fn run(args: RankArgs) {
                         *entry = Some(finished_at);
                     }
                     failed_http += 1;
-                    if args.verbose {
+                    if resolved.verbose {
                         eprintln!(
                             "  Error [{}] (after exhausting {} retries): {e}",
                             judge_display_names[judge_idx], max_retries,
@@ -454,7 +454,7 @@ pub async fn run(args: RankArgs) {
                 }
                 Err(e) => {
                     failed_http += 1;
-                    if args.verbose {
+                    if resolved.verbose {
                         eprintln!("  Task panicked: {e}");
                     }
                 }
@@ -482,7 +482,7 @@ pub async fn run(args: RankArgs) {
         total_comparisons += round_results.len();
 
         let round_failed = pairs.len() - round_results.len();
-        if args.verbose {
+        if resolved.verbose {
             eprintln!(
                 "  Completed: {} successful, {} failed",
                 round_results.len(),
@@ -551,7 +551,7 @@ pub async fn run(args: RankArgs) {
         bail("All comparisons failed. No results to score.");
     }
 
-    if args.verbose {
+    if resolved.verbose {
         eprintln!("Running final MCMC scoring ({total_comparisons} comparisons)...");
     }
 
@@ -578,7 +578,7 @@ pub async fn run(args: RankArgs) {
         &judge_info,
     );
 
-    if args.verbose {
+    if resolved.verbose {
         if total_retries > 0 {
             eprintln!("HTTP retries: {total_retries}");
         }
@@ -623,7 +623,7 @@ pub async fn run(args: RankArgs) {
         })
         .collect();
 
-    if args.json {
+    if resolved.json {
         output::print_json(&scoring_result.rankings, &titles, rounds, total_comparisons, &scoring_result.judge_analytics);
     } else {
         output::print_table(

@@ -58,6 +58,8 @@ pub struct NanojudgeConfig {
     pub narrow_win: Option<f64>,
     pub live_top: Option<usize>,
     pub save_comparisons: Option<PathBuf>,
+    pub json: Option<bool>,
+    pub verbose: Option<bool>,
     /// Judge panel configuration. At least one [[judge]] block is required.
     pub judge: Option<Vec<JudgeConfig>>,
 }
@@ -117,6 +119,12 @@ const DEFAULT_CONFIG_TEMPLATE: &str = "\
 # A directory path auto-generates a filename inside it.
 # Omit or comment out to disable.
 # save_comparisons = \".\"
+
+# Output JSON instead of table.
+# json = false
+
+# Show progress during execution.
+# verbose = false
 
 # Max retries per comparison on HTTP errors. 0 = no retries. Default: 3.
 # retries = 3
