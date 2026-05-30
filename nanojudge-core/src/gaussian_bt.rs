@@ -687,7 +687,7 @@ mod tests {
             logprobs_mode: false,
         };
         let mut mcmc = GaussianBT::new(3, &results, &opts, &ji);
-        let samples = mcmc.calculate_with_samples(500, 200, 0);
+        let samples = mcmc.calculate_with_samples(2000, 200, 0);
         let ranked = GaussianBT::compute_confidence_intervals_from_sorted_samples(
             &samples.sorted_samples, &samples.means, 0.95,
         );
