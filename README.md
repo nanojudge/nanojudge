@@ -160,13 +160,12 @@ Per-judge settings (in `[[judge]]` blocks):
 
 ## Recommended models
 
-Any instruct-tuned model served via an OpenAI-compatible API with logprobs support should work. Here are models we've tested:
+NanoJudge works with any instruct-tuned model served over an OpenAI-compatible API. These two score near GPT-5 on [Artificial Analysis](https://artificialanalysis.ai) at a fraction of the price:
 
-| Model | Size | Recommended | Notes |
-|---|---|---|---|
-| [Qwen3-4B-Instruct-2507](https://huggingface.co/Qwen/Qwen3-4B-Instruct-2507) | 4B | Yes | Used in production on nanojudge.ai. Good balance of quality and speed. |
-| [Qwen3.5-2B](https://huggingface.co/Qwen/Qwen3.5-2B) | 2B | Yes | Reliably follows NanoJudge's instructions. |
-| [LFM2.5-1.2B-Instruct](https://huggingface.co/LiquidAI/LFM2.5-1.2B-Instruct) | 1.2B | No | Fails to declare a verdict consistently. |
+| Model | Input per 1M | Output per 1M |
+|---|---|---|
+| `deepseek/deepseek-v4-flash` | $0.10 | $0.20 |
+| `google/gemma-4-31b-it` | $0.12 | $0.37 |
 
 ## Workspace structure
 
