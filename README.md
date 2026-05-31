@@ -184,19 +184,19 @@ Computer science already has sorting algorithms for numerical data (e.g. QuickSo
 
 What we've been missing is an engine for subjective criteria - a way to programmatically sort lists by "which is more rewatchable," "which aged the best," or "which code is cleaner."
 
-Nanojudge is **LLM-Sort**. It takes the chaotic, inherently subjective opinions of small, cheap LLMs, runs optimized pairwise comparisons, and uses Bayesian inference. It is a general-purpose algorithm that turns fuzzy "vibes" into statistically rigorous rankings.
+NanoJudge is **LLM-Sort**. It takes the chaotic, inherently subjective opinions of small, cheap LLMs, runs optimized pairwise comparisons, and uses Bayesian inference. It is a general-purpose algorithm that turns fuzzy "vibes" into statistically rigorous rankings.
 
 ### A coprocessor for agentic systems
 
 This is a fundamental building block for AI architectures. When a large LLM needs to choose between 100+ options, stuffing them into a massive context window is expensive, slow, and prone to "lost in the middle" failures.
 
-Instead, the main LLM can act as the orchestrator: it fetches the candidates, passes the list and the subjective criteria to nanojudge, uses a much smaller efficient LLM to do the pairwise comparisons, and gets back a mathematically grounded ranking.
+Instead, the main LLM can act as the orchestrator: it fetches the candidates, passes the list and the subjective criteria to NanoJudge, uses a much smaller efficient LLM to do the pairwise comparisons, and gets back a mathematically grounded ranking.
 
-Every time an AI agent makes a decision, a travel app recommends an itinerary, or a feed ranks content, it is solving a subjective ranking problem. Nanojudge makes that universal process mathematically explicit and can scale to hundreds of thousands of options without running into context length limits.
+Every time an AI agent makes a decision, a travel app recommends an itinerary, or a feed ranks content, it is solving a subjective ranking problem. NanoJudge makes that universal process mathematically explicit and can scale to hundreds of thousands of options without running into context length limits.
 
 ### Scales with AI progress
 
-Nanojudge is model-agnostic. It uses whatever LLM you point it at as a raw compute engine. That means it surfs the wave of AI progress directly: as small, open-weight models get faster, cheaper, and smarter, Nanojudge inherits every one of those gains and becomes a more powerful engine.
+NanoJudge is model-agnostic. It uses whatever LLM you point it at as a raw compute engine. That means it surfs the wave of AI progress directly: as models get faster, cheaper, and smarter, NanoJudge inherits every one of those gains and becomes a more powerful engine.
 
 ## Related work
 
