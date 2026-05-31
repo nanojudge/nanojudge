@@ -198,6 +198,25 @@ Every time an AI agent makes a decision, a travel app recommends an itinerary, o
 
 NanoJudge is model-agnostic. It uses whatever LLM you point it at as a raw compute engine. That means it surfs the wave of AI progress directly: as models get faster, cheaper, and smarter, NanoJudge inherits every one of those gains and becomes a more powerful engine.
 
+## Benchmark
+
+We pitted NanoJudge against **Score-O** — the pointwise scoring baseline from the [BIRCO](https://github.com/BIRCO-benchmark/BIRCO_dataset) paper, on BIRCO's **RELIC** task (recovering a masked quotation in a literary analysis). Both run on the same judge model (Gemma 4 E4B); the only difference is the protocol: NanoJudge compares items pairwise, Score-O scores them one at a time.
+
+To stress-test robustness over increasing scales, we grew the candidate pool up to 32x its original size with generated distractors (larger pools are harder). 1x is the original dataset, and 32x represents the dataset increased to 32x its original size by adding in synthesized incorrect answers. Score-O collapses; NanoJudge degrades gracefully.
+
+| Dataset size | Score-O | NanoJudge |
+|---|---|---|
+| 1x | 0.3858 | **0.6043** |
+| 2x | 0.3158 | **0.5590** |
+| 4x | 0.2549 | **0.5325** |
+| 8x | 0.1788 | **0.4533** |
+| 16x | 0.1546 | **0.3734** |
+| 32x | 0.0784 | **0.2958** |
+
+_nDCG@10, higher is better._
+
+At 32x the pool, NanoJudge scores nearly 4x higher than Score-O - and even on a pool 16x larger, it matches Score-O's score on the original, undiluted pool. NanoJudge is built to scale.
+
 ## Related work
 
 Qin et al. (2023) showed that pairwise prompting significantly outperforms pointwise and listwise approaches for LLM-based ranking. [Large Language Models are Effective Text Rankers with Pairwise Ranking Prompting](https://arxiv.org/abs/2306.17563)
