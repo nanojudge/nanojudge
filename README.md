@@ -202,7 +202,7 @@ NanoJudge is model-agnostic. It uses whatever LLM you point it at as a raw compu
 
 We pitted NanoJudge against **Score-O** — the pointwise scoring baseline from the [BIRCO](https://github.com/BIRCO-benchmark/BIRCO_dataset) paper, on BIRCO's **RELIC** task (recovering a masked quotation in a literary analysis). Both run on the same judge model (Gemma 4 E4B); the only difference is the protocol: NanoJudge compares items pairwise, Score-O scores them one at a time.
 
-To stress-test robustness over increasing scales, we grew the candidate pool up to 32x its original size with generated distractors (larger pools are harder). 1x is the original dataset, and 32x represents the dataset increased to 32x its original size by adding in synthesized incorrect answers. Score-O collapses; NanoJudge degrades gracefully.
+Each query in RELIC comes with a pool of passages, one of which is the correct answer and the rest wrong. We made the task harder by generating additional wrong passages with a completion-based LLM, leaving only 1 correct answer as before. 1x is the original dataset. 2x means we doubled the pool size, 4x quadrupled and so on. Score-O collapses as the pool grows whereas NanoJudge degrades gracefully.
 
 | Dataset size | Score-O | NanoJudge |
 |---|---|---|
