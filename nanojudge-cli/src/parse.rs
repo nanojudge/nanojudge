@@ -8,6 +8,11 @@ use serde::Deserialize;
 /// Default narrow-win probability (B and D on the likert scale).
 pub const DEFAULT_NARROW_WIN: f64 = 0.8;
 
+/// Default minimum fraction of A-E probability mass the top-logprobs must
+/// cover before the logprob-derived probability is trusted. Below this, the
+/// comparison parse fails (returns None).
+pub const DEFAULT_MIN_LOGPROB_COVERAGE: f64 = 0.95;
+
 /// Build likert mapping from a narrow-win value.
 /// A=1.0, B=narrow_win, C=0.5, D=1.0-narrow_win, E=0.0.
 fn likert_mapping(narrow_win: f64) -> [f64; 5] {
@@ -44,7 +49,7 @@ fn letter_to_index(c: char) -> Option<usize> {
 /// Extract likert choice probabilities from logprobs.
 ///
 /// Returns (choice_probs, expected_p1) or (None, None) if extraction fails.
-fn extract_likert_probabilities(logprobs: &[LogprobContent], mapping: &[f64; 5]) -> (Option<[f64; 5]>, Option<f64>) {
+fn extract_likert_probabilities(logprobs: &[LogprobContent], mapping: &[f64; 5], min_logprob_coverage: f64) -> (Option<[f64; 5]>, Option<f64>) {
     if logprobs.is_empty() {
         return (None, None);
     }
@@ -110,7 +115,7 @@ fn extract_likert_probabilities(logprobs: &[LogprobContent], mapping: &[f64; 5])
         }
 
         let prob_sum: f64 = choice_probs.iter().sum();
-        if prob_sum >= 0.99 {
+        if prob_sum >= min_logprob_coverage {
             // Normalize
             for p in &mut choice_probs {
                 *p /= prob_sum;
@@ -133,9 +138,9 @@ fn extract_likert_probabilities(logprobs: &[LogprobContent], mapping: &[f64; 5])
 /// Parse a comparison response into a win probability.
 ///
 /// Logprobs only — no text fallback. Returns None if logprob extraction fails.
-pub fn parse_response(logprobs: &[LogprobContent], narrow_win: f64) -> ParseResult {
+pub fn parse_response(logprobs: &[LogprobContent], narrow_win: f64, min_logprob_coverage: f64) -> ParseResult {
     let mapping = likert_mapping(narrow_win);
-    let (_, expected_p1) = extract_likert_probabilities(logprobs, &mapping);
+    let (_, expected_p1) = extract_likert_probabilities(logprobs, &mapping, min_logprob_coverage);
 
     ParseResult {
         item1_win_probability: expected_p1,
@@ -233,7 +238,7 @@ mod tests {
         ];
 
         let mapping = likert_mapping(DEFAULT_NARROW_WIN);
-        let (choice_probs, expected_p1) = extract_likert_probabilities(&logprobs, &mapping);
+        let (choice_probs, expected_p1) = extract_likert_probabilities(&logprobs, &mapping, DEFAULT_MIN_LOGPROB_COVERAGE);
         assert!(choice_probs.is_some(), "choice_probs should be Some");
         assert!(expected_p1.is_some(), "expected_p1 should be Some");
 
@@ -270,30 +275,54 @@ mod tests {
             },
         ];
 
-        let result = parse_response(&logprobs, DEFAULT_NARROW_WIN);
+        let result = parse_response(&logprobs, DEFAULT_NARROW_WIN, DEFAULT_MIN_LOGPROB_COVERAGE);
         assert!(result.item1_win_probability.is_some());
         let p = result.item1_win_probability.unwrap();
         assert!(p > 0.7);
     }
 
     #[test]
+    fn test_min_logprob_coverage_gates_parsing() {
+        // A-E mass sums to 0.96 (the rest is on a non-letter token).
+        let logprobs = vec![
+            LogprobContent { token: "Verdict".to_string(), top_logprobs: None },
+            LogprobContent { token: ":".to_string(), top_logprobs: None },
+            LogprobContent {
+                token: "B".to_string(),
+                top_logprobs: Some(vec![
+                    TopLogprob { token: "B".to_string(), logprob: (0.96_f64).ln() },
+                    TopLogprob { token: " the".to_string(), logprob: (0.04_f64).ln() },
+                ]),
+            },
+        ];
+
+        // 0.96 coverage clears the 0.95 threshold.
+        let result = parse_response(&logprobs, DEFAULT_NARROW_WIN, 0.95);
+        assert!(result.item1_win_probability.is_some());
+
+        // ...but not a stricter 0.99 threshold.
+        let result = parse_response(&logprobs, DEFAULT_NARROW_WIN, 0.99);
+        assert!(result.item1_win_probability.is_none());
+    }
+
+    #[test]
     fn test_parse_response_no_logprobs_returns_none() {
-        let result = parse_response(&[], DEFAULT_NARROW_WIN);
+        let result = parse_response(&[], DEFAULT_NARROW_WIN, DEFAULT_MIN_LOGPROB_COVERAGE);
         assert!(result.item1_win_probability.is_none());
     }
 
     #[test]
     fn test_parse_response_unparseable() {
-        let result = parse_response(&[], DEFAULT_NARROW_WIN);
+        let result = parse_response(&[], DEFAULT_NARROW_WIN, DEFAULT_MIN_LOGPROB_COVERAGE);
         assert!(result.item1_win_probability.is_none());
     }
 
     #[test]
     fn test_custom_narrow_win_no_logprobs_returns_none() {
-        let result = parse_response(&[], 0.7);
+        let result = parse_response(&[], 0.7, DEFAULT_MIN_LOGPROB_COVERAGE);
         assert!(result.item1_win_probability.is_none());
 
-        let result = parse_response(&[], 0.7);
+        let result = parse_response(&[], 0.7, DEFAULT_MIN_LOGPROB_COVERAGE);
         assert!(result.item1_win_probability.is_none());
     }
 

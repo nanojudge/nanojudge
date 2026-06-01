@@ -44,6 +44,7 @@ pub async fn run_benchmark(
     num_pairs: usize,
     concurrency: usize,
     narrow_win: f64,
+    min_logprob_coverage: f64,
     template: &str,
 ) {
     let questions: Vec<BenchmarkQuestion> = serde_json::from_str(BENCHMARK_QUESTIONS)
@@ -120,7 +121,7 @@ pub async fn run_benchmark(
         let handle = tokio::spawn(async move {
             let _permit = sem.acquire().await.unwrap();
             let start = Instant::now();
-            let result = send_comparison_request(&client, &config, &prompt, narrow_win).await;
+            let result = send_comparison_request(&client, &config, &prompt, narrow_win, min_logprob_coverage).await;
             let latency = start.elapsed().as_secs_f64();
 
             let single = match result {

@@ -170,6 +170,8 @@ pub async fn run(args: RankArgs) {
     let normalized_weights: Vec<f64> = judges.iter().map(|j| j.weight / total_weight).collect();
     // Per-judge narrow_win values
     let judge_narrow_wins: Vec<f64> = judges.iter().map(|j| j.narrow_win).collect();
+    // Per-judge min_logprob_coverage values
+    let judge_min_logprob_coverages: Vec<f64> = judges.iter().map(|j| j.min_logprob_coverage).collect();
 
     let criteria: Vec<String> = if let Some(ref path) = args.criterion_file {
         let content = std::fs::read_to_string(path)
@@ -353,6 +355,7 @@ pub async fn run(args: RankArgs) {
             let id_a = *id_a;
             let id_b = *id_b;
             let narrow_win = judge_narrow_wins[judge_idx];
+            let min_logprob_coverage = judge_min_logprob_coverages[judge_idx];
             let assigned_judge_id = judge_ids[judge_idx];
             let judge_name = judge_display_names[judge_idx].clone();
 
@@ -369,6 +372,7 @@ pub async fn run(args: RankArgs) {
                     id_a,
                     id_b,
                     narrow_win,
+                    min_logprob_coverage,
                     &analysis_length,
                     max_retries,
                     verbose,

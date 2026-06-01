@@ -145,6 +145,7 @@ Per-judge settings (in `[[judge]]` blocks):
 | `max_tokens` | No | Max tokens in response (default: 2048) |
 | `api_key_env` | No | Environment variable containing the API key |
 | `reasoning_effort` | No | Controls model reasoning mode (e.g. `"none"` to disable Qwen 3.5 thinking) |
+| `min_logprob_coverage` | No | Min fraction of A–E logprob mass required to trust a verdict, > 0.0 and ≤ 1.0 (default: 0.95) |
 
 ## How it works
 

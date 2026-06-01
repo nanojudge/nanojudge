@@ -20,6 +20,7 @@ pub struct JudgeConfig {
     pub presence_penalty: Option<f64>,
     pub top_p: Option<f64>,
     pub narrow_win: Option<f64>,
+    pub min_logprob_coverage: Option<f64>,
     pub api_key_env: Option<String>,
     pub max_tokens: Option<u32>,
     /// OpenRouter extension: controls model reasoning/thinking mode.
@@ -56,6 +57,7 @@ pub struct NanojudgeConfig {
     pub decisiveness_proposal_std: Option<f64>,
     pub reasoning_enabled: Option<bool>,
     pub narrow_win: Option<f64>,
+    pub min_logprob_coverage: Option<f64>,
     pub live_top: Option<usize>,
     pub save_comparisons: Option<PathBuf>,
     pub json: Option<bool>,
@@ -111,6 +113,12 @@ const DEFAULT_CONFIG_TEMPLATE: &str = "\
 # Must be > 0.5 and < 1.0. Can be overridden per-judge.
 # narrow_win = 0.8
 
+# Minimum fraction of A-E probability mass the top-logprobs must cover for a
+# logprob-based verdict to be trusted (logprobs mode only). Below this, the
+# comparison is treated as unparseable. Must be > 0.0 and <= 1.0.
+# Can be overridden per-judge.
+# min_logprob_coverage = 0.95
+
 # Print a live ranking table after each round. 0 = all items, N = top N.
 # Omit or comment out to disable.
 # live_top = 10
@@ -150,6 +158,7 @@ const DEFAULT_CONFIG_TEMPLATE: &str = "\
 #   presence_penalty       - Penalizes repeated tokens, range -2.0 to 2.0
 #   top_p                  - Nucleus sampling threshold, range 0.0 to 1.0
 #   narrow_win             - Win probability for narrow verdicts, > 0.5 and < 1.0 (default: 0.8)
+#   min_logprob_coverage   - Min A-E logprob mass to trust a verdict, > 0.0 and <= 1.0 (default: 0.95)
 #   max_tokens             - Maximum tokens in LLM response (default: 2048, or average of specified judges)
 #   api_key_env            - Environment variable name containing the API key
 #   reasoning_effort       - OpenRouter: controls reasoning/thinking mode (e.g. \\\"none\\\" to disable Qwen thinking)

@@ -78,6 +78,7 @@ pub struct ResolvedJudge {
     pub concurrency: usize,
     pub weight: f64,
     pub narrow_win: f64,
+    pub min_logprob_coverage: f64,
     pub max_tokens: u32,
     pub reasoning_effort: Option<String>,
     pub judge_id: u64,
@@ -124,6 +125,14 @@ pub fn resolve_judges(
     if !global_narrow_win.is_finite() || global_narrow_win <= 0.5 || global_narrow_win >= 1.0 {
         bail(format!(
             "narrow_win={global_narrow_win}, must be finite, > 0.5 and < 1.0"
+        ));
+    }
+
+    let global_min_logprob_coverage = merge_opt(shared.min_logprob_coverage, cfg.min_logprob_coverage, "min-logprob-coverage")
+        .unwrap_or(parse::DEFAULT_MIN_LOGPROB_COVERAGE);
+    if !global_min_logprob_coverage.is_finite() || global_min_logprob_coverage <= 0.0 || global_min_logprob_coverage > 1.0 {
+        bail(format!(
+            "min_logprob_coverage={global_min_logprob_coverage}, must be finite, > 0.0 and <= 1.0"
         ));
     }
 
@@ -205,6 +214,14 @@ pub fn resolve_judges(
             ));
         }
 
+        let min_logprob_coverage = jc.min_logprob_coverage.unwrap_or(global_min_logprob_coverage);
+        if !min_logprob_coverage.is_finite() || min_logprob_coverage <= 0.0 || min_logprob_coverage > 1.0 {
+            bail(format!(
+                "Judge {} has min_logprob_coverage={}, must be finite, > 0.0 and <= 1.0",
+                jc.model, min_logprob_coverage
+            ));
+        }
+
         judges.push(ResolvedJudge {
             endpoint: jc.endpoint.clone(),
             model: jc.model.clone(),
@@ -217,6 +234,7 @@ pub fn resolve_judges(
             concurrency: jc.concurrency.unwrap_or(global_concurrency),
             weight,
             narrow_win,
+            min_logprob_coverage,
             max_tokens: jc.max_tokens.unwrap_or(default_max_tokens),
             reasoning_effort: jc.reasoning_effort.clone(),
             judge_id,
@@ -397,6 +415,7 @@ mod tests {
             comparisons: None,
             concurrency: None,
             narrow_win: None,
+            min_logprob_coverage: None,
             strategy: None,
             top_k: None,
             retries: None,
@@ -437,6 +456,7 @@ mod tests {
                 presence_penalty: None,
                 top_p: None,
                 narrow_win,
+                min_logprob_coverage: None,
                 api_key_env: None,
                 max_tokens: None,
                 reasoning_effort: None,
@@ -488,6 +508,52 @@ mod tests {
         let cfg = one_judge_config(Some(0.65));
         let judges = resolve_judges(&cli, &cfg, Path::new("test.toml"), true);
         assert_eq!(judges[0].narrow_win, 0.65);
+    }
+
+    #[test]
+    fn test_min_logprob_coverage_default() {
+        let cli = default_cli();
+        let cfg = one_judge_config(None);
+        let judges = resolve_judges(&cli, &cfg, Path::new("test.toml"), true);
+        assert_eq!(judges[0].min_logprob_coverage, parse::DEFAULT_MIN_LOGPROB_COVERAGE);
+    }
+
+    #[test]
+    fn test_min_logprob_coverage_from_cli() {
+        let mut cli = default_cli();
+        cli.min_logprob_coverage = Some(0.9);
+        let cfg = one_judge_config(None);
+        let judges = resolve_judges(&cli, &cfg, Path::new("test.toml"), true);
+        assert_eq!(judges[0].min_logprob_coverage, 0.9);
+    }
+
+    #[test]
+    fn test_min_logprob_coverage_from_config() {
+        let cli = default_cli();
+        let mut cfg = one_judge_config(None);
+        cfg.min_logprob_coverage = Some(0.85);
+        let judges = resolve_judges(&cli, &cfg, Path::new("test.toml"), true);
+        assert_eq!(judges[0].min_logprob_coverage, 0.85);
+    }
+
+    #[test]
+    fn test_min_logprob_coverage_cli_overrides_config() {
+        let mut cli = default_cli();
+        cli.min_logprob_coverage = Some(0.9);
+        let mut cfg = one_judge_config(None);
+        cfg.min_logprob_coverage = Some(0.85);
+        let judges = resolve_judges(&cli, &cfg, Path::new("test.toml"), true);
+        assert_eq!(judges[0].min_logprob_coverage, 0.9);
+    }
+
+    #[test]
+    fn test_min_logprob_coverage_per_judge_overrides_global() {
+        let mut cli = default_cli();
+        cli.min_logprob_coverage = Some(0.9);
+        let mut cfg = one_judge_config(None);
+        cfg.judge.as_mut().unwrap()[0].min_logprob_coverage = Some(0.7);
+        let judges = resolve_judges(&cli, &cfg, Path::new("test.toml"), true);
+        assert_eq!(judges[0].min_logprob_coverage, 0.7);
     }
 
     #[test]

@@ -52,6 +52,11 @@ pub struct ConfigArgs {
     #[arg(long)]
     pub narrow_win: Option<f64>,
 
+    /// Minimum fraction of A-E probability mass the top-logprobs must cover for a
+    /// logprob-based verdict to be trusted. Must be > 0.0 and <= 1.0. Default: 0.95.
+    #[arg(long)]
+    pub min_logprob_coverage: Option<f64>,
+
     /// Pairing strategy: "balanced" or "top-heavy"
     #[arg(long)]
     pub strategy: Option<String>,
