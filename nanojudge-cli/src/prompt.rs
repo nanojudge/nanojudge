@@ -18,13 +18,13 @@ Option 2:
 $option2
 
 Instructions:
-Write a $length analysis. You MUST end your response with one of these sentences verbatim:
+Write a $length analysis. You MUST end your response with one of these lines verbatim:
 
-Verdict A: Option 1 clearly wins
-Verdict B: Option 1 narrowly wins
-Verdict C: Draw
-Verdict D: Option 2 narrowly wins
-Verdict E: Option 2 clearly wins
+Verdict A: Option 1, clearly
+Verdict B: Option 1, marginally
+Verdict C: Too close to call
+Verdict D: Option 2, marginally
+Verdict E: Option 2, clearly
 ";
 
 pub const DEFAULT_TEMPLATE_NO_REASONING: &str = "\
@@ -37,13 +37,13 @@ Option 2:
 $option2
 
 Instructions:
-Respond with one of these sentences verbatim:
+Respond with one of these lines verbatim:
 
-Verdict A: Option 1 clearly wins
-Verdict B: Option 1 narrowly wins
-Verdict C: Draw
-Verdict D: Option 2 narrowly wins
-Verdict E: Option 2 clearly wins
+Verdict A: Option 1, clearly
+Verdict B: Option 1, marginally
+Verdict C: Too close to call
+Verdict D: Option 2, marginally
+Verdict E: Option 2, clearly
 ";
 
 const REQUIRED_VARIABLES: &[&str] = &["$criterion", "$option1", "$option2", "$length"];
@@ -106,8 +106,8 @@ mod tests {
         assert!(prompt.contains("Option 2:\nSushi"));
         assert!(prompt.contains("2 paragraph"));
         assert!(prompt.contains("Verdict A:"));
-        assert!(prompt.contains("Verdict A: Option 1 clearly wins"));
-        assert!(prompt.contains("E: Option 2 clearly wins"));
+        assert!(prompt.contains("Verdict A: Option 1, clearly"));
+        assert!(prompt.contains("E: Option 2, clearly"));
     }
 
     #[test]
@@ -139,8 +139,8 @@ mod tests {
 
     #[test]
     fn test_no_reasoning_template_has_verdicts() {
-        assert!(DEFAULT_TEMPLATE_NO_REASONING.contains("Verdict A: Option 1 clearly wins"));
-        assert!(DEFAULT_TEMPLATE_NO_REASONING.contains("Verdict E: Option 2 clearly wins"));
+        assert!(DEFAULT_TEMPLATE_NO_REASONING.contains("Verdict A: Option 1, clearly"));
+        assert!(DEFAULT_TEMPLATE_NO_REASONING.contains("Verdict E: Option 2, clearly"));
     }
 
     #[test]
@@ -148,7 +148,7 @@ mod tests {
         let prompt = build_prompt(DEFAULT_TEMPLATE_NO_REASONING, "Which is tastier?", "Pizza", "Sushi", "ignored");
         assert!(prompt.contains("Option 1:\nPizza"));
         assert!(prompt.contains("Option 2:\nSushi"));
-        assert!(prompt.contains("Respond with one of these sentences verbatim:"));
+        assert!(prompt.contains("Respond with one of these lines verbatim:"));
         assert!(!prompt.contains("analysis"));
     }
 }

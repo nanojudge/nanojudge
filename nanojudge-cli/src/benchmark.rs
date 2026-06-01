@@ -223,7 +223,7 @@ pub async fn run_benchmark(
     let non_http_count = all_results.len() - http_errors;
 
     // Verdict distribution (A-E)
-    let verdict_labels = ["A (Option 1 clearly wins)", "B (Option 1 narrowly wins)", "C (Draw)", "D (Option 2 narrowly wins)", "E (Option 2 clearly wins)"];
+    let verdict_labels = ["A (Option 1, clearly)", "B (Option 1, marginally)", "C (Too close to call)", "D (Option 2, marginally)", "E (Option 2, clearly)"];
     let mut verdict_counts = [0usize; 5];
     let mut option1_wins = 0usize;
     let mut option2_wins = 0usize;

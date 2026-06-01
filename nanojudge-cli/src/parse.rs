@@ -330,35 +330,35 @@ mod tests {
 
     #[test]
     fn test_text_parse_verdict_b() {
-        let text = "Some analysis.\n\nVerdict B: Option 1 narrowly wins";
+        let text = "Some analysis.\n\nVerdict B: Option 1, marginally";
         let result = parse_response_text(text, DEFAULT_NARROW_WIN);
         assert_eq!(result.item1_win_probability, Some(0.8));
     }
 
     #[test]
     fn test_text_parse_verdict_a() {
-        let text = "Analysis here.\n\nVerdict A: Option 1 clearly wins";
+        let text = "Analysis here.\n\nVerdict A: Option 1, clearly";
         let result = parse_response_text(text, DEFAULT_NARROW_WIN);
         assert_eq!(result.item1_win_probability, Some(1.0));
     }
 
     #[test]
     fn test_text_parse_verdict_e() {
-        let text = "Analysis here.\n\nVerdict E: Option 2 clearly wins";
+        let text = "Analysis here.\n\nVerdict E: Option 2, clearly";
         let result = parse_response_text(text, DEFAULT_NARROW_WIN);
         assert_eq!(result.item1_win_probability, Some(0.0));
     }
 
     #[test]
     fn test_text_parse_verdict_c_draw() {
-        let text = "Analysis here.\n\nVerdict C: Draw";
+        let text = "Analysis here.\n\nVerdict C: Too close to call";
         let result = parse_response_text(text, DEFAULT_NARROW_WIN);
         assert_eq!(result.item1_win_probability, Some(0.5));
     }
 
     #[test]
     fn test_text_parse_verdict_d_with_custom_narrow_win() {
-        let text = "Analysis.\n\nVerdict D: Option 2 narrowly wins";
+        let text = "Analysis.\n\nVerdict D: Option 2, marginally";
         let result = parse_response_text(text, 0.7);
         let p = result.item1_win_probability.unwrap();
         assert!((p - 0.3).abs() < 1e-10, "expected ~0.3, got {p}"); // 1.0 - 0.7
@@ -366,7 +366,7 @@ mod tests {
 
     #[test]
     fn test_text_parse_verdict_with_colon_separator() {
-        let text = "Analysis.\n\nVerdict: B: Option 1 narrowly wins";
+        let text = "Analysis.\n\nVerdict: B: Option 1, marginally";
         let result = parse_response_text(text, DEFAULT_NARROW_WIN);
         assert_eq!(result.item1_win_probability, Some(0.8));
     }
@@ -374,7 +374,7 @@ mod tests {
     #[test]
     fn test_text_parse_uses_last_verdict() {
         // "verdict" appears in the analysis, but we want the final one
-        let text = "The verdict on flavor is mixed.\n\nVerdict D: Option 2 narrowly wins";
+        let text = "The verdict on flavor is mixed.\n\nVerdict D: Option 2, marginally";
         let result = parse_response_text(text, DEFAULT_NARROW_WIN);
         let p = result.item1_win_probability.unwrap();
         assert!((p - 0.2).abs() < 1e-10, "expected ~0.2, got {p}");
@@ -389,14 +389,14 @@ mod tests {
 
     #[test]
     fn test_text_parse_case_insensitive() {
-        let text = "Analysis.\n\nVERDICT B: Option 1 narrowly wins";
+        let text = "Analysis.\n\nVERDICT B: Option 1, marginally";
         let result = parse_response_text(text, DEFAULT_NARROW_WIN);
         assert_eq!(result.item1_win_probability, Some(0.8));
     }
 
     #[test]
     fn test_text_parse_lowercase_verdict_letter() {
-        let text = "Analysis.\n\nVerdict b: Option 1 narrowly wins";
+        let text = "Analysis.\n\nVerdict b: Option 1, marginally";
         let result = parse_response_text(text, DEFAULT_NARROW_WIN);
         assert_eq!(result.item1_win_probability, Some(0.8));
     }
@@ -410,7 +410,7 @@ mod tests {
 
     #[test]
     fn test_text_parse_bold_verdict_with_colon() {
-        let text = "Analysis.\n\n**Verdict B:** Option 1 narrowly wins";
+        let text = "Analysis.\n\n**Verdict B:** Option 1, marginally";
         let result = parse_response_text(text, DEFAULT_NARROW_WIN);
         assert_eq!(result.item1_win_probability, Some(0.8));
     }
@@ -424,7 +424,7 @@ mod tests {
 
     #[test]
     fn test_text_parse_heading_verdict() {
-        let text = "Analysis.\n\n## Verdict D: Option 2 narrowly wins";
+        let text = "Analysis.\n\n## Verdict D: Option 2, marginally";
         let result = parse_response_text(text, DEFAULT_NARROW_WIN);
         assert_eq!(result.item1_win_probability, Some(1.0 - DEFAULT_NARROW_WIN));
     }
