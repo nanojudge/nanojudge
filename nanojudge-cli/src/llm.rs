@@ -157,12 +157,8 @@ pub async fn send_comparison_request(
         top_logprobs: if config.logprobs { Some(10) } else { None },
         presence_penalty: config.presence_penalty,
         top_p: config.top_p,
-        stop: if config.logprobs {
-            vec!["Verdict A:", "Verdict B:", "Verdict C:", "Verdict D:", "Verdict E:"]
-        } else {
-            vec![]
-        },
-        include_stop_str_in_output: if config.logprobs { Some(true) } else { None },
+        stop: vec![],
+        include_stop_str_in_output: None,
         reasoning: config.reasoning_effort.as_ref().map(|effort| ReasoningConfig {
             effort: effort.clone(),
         }),

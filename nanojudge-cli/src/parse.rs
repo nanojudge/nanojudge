@@ -56,19 +56,21 @@ fn extract_likert_probabilities(logprobs: &[LogprobContent], mapping: &[f64; 5],
 
     let tokens: Vec<&str> = logprobs.iter().map(|lp| lp.token.as_str()).collect();
 
-    // Find "Verdict" marker in logprob tokens
+    // Find the LAST "Verdict" marker in logprob tokens. The analysis prose can
+    // contain the word "verdict" (e.g. "reach a fair verdict"), so matching the
+    // first occurrence latches onto prose; the real marker is the final one.
+    // Mirrors the last-occurrence behavior of parse_response_text.
     let mut search_start = 0;
     for (i, raw_tok) in tokens.iter().enumerate() {
         let t = raw_tok.trim().to_lowercase();
         if t.starts_with("verdict") {
             search_start = i + 1;
-            break;
+            continue;
         }
         if (t == "ver" || t == "verd") && i + 1 < tokens.len() {
             let next_t = tokens[i + 1].trim().to_lowercase();
             if next_t == "dict" || next_t == "dict:" || next_t == "ict" || next_t == "ict:" {
                 search_start = i + 2;
-                break;
             }
         }
     }
@@ -279,6 +281,39 @@ mod tests {
         assert!(result.item1_win_probability.is_some());
         let p = result.item1_win_probability.unwrap();
         assert!(p > 0.7);
+    }
+
+    #[test]
+    fn test_logprob_parse_uses_last_verdict_not_prose() {
+        // Law analyses say "verdict" in prose ("reach a fair verdict") before the
+        // real final "Verdict B:". The parser must use the LAST marker, not the first.
+        let logprobs = vec![
+            LogprobContent { token: "reach".to_string(), top_logprobs: None },
+            LogprobContent { token: " a".to_string(), top_logprobs: None },
+            LogprobContent { token: " fair".to_string(), top_logprobs: None },
+            // Prose "verdict" — first occurrence, must be ignored.
+            LogprobContent { token: " verdict".to_string(), top_logprobs: None },
+            LogprobContent { token: ".".to_string(), top_logprobs: None },
+            LogprobContent { token: " Citing".to_string(), top_logprobs: None },
+            LogprobContent { token: " the".to_string(), top_logprobs: None },
+            // The real final marker.
+            LogprobContent { token: "Verdict".to_string(), top_logprobs: None },
+            LogprobContent {
+                token: " B".to_string(),
+                top_logprobs: Some(vec![
+                    TopLogprob { token: "B".to_string(), logprob: -0.05 },
+                    TopLogprob { token: "A".to_string(), logprob: -3.5 },
+                    TopLogprob { token: "C".to_string(), logprob: -4.0 },
+                    TopLogprob { token: "D".to_string(), logprob: -5.0 },
+                    TopLogprob { token: "E".to_string(), logprob: -6.0 },
+                ]),
+            },
+        ];
+
+        let result = parse_response(&logprobs, DEFAULT_NARROW_WIN, DEFAULT_MIN_LOGPROB_COVERAGE);
+        assert!(result.item1_win_probability.is_some(), "should find the final Verdict B:");
+        let p = result.item1_win_probability.unwrap();
+        assert!(p > 0.7, "B is narrow win for option 1, expected_p1 {p} should be > 0.7");
     }
 
     #[test]
