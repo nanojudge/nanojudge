@@ -47,11 +47,13 @@ Verdict E: Option 2, clearly
 ";
 
 const REQUIRED_VARIABLES: &[&str] = &["$criterion", "$option1", "$option2", "$length"];
+const REQUIRED_VARIABLES_NO_REASONING: &[&str] = &["$criterion", "$option1", "$option2"];
 
 /// Validate that a template contains all required variables.
 /// Returns an error message listing any missing variables.
-pub fn validate_template(template: &str) -> Result<(), String> {
-    let missing: Vec<&&str> = REQUIRED_VARIABLES
+pub fn validate_template(template: &str, reasoning_enabled: bool) -> Result<(), String> {
+    let required = if reasoning_enabled { REQUIRED_VARIABLES } else { REQUIRED_VARIABLES_NO_REASONING };
+    let missing: Vec<&&str> = required
         .iter()
         .filter(|var| !template.contains(**var))
         .collect();
@@ -67,11 +69,11 @@ pub fn validate_template(template: &str) -> Result<(), String> {
 }
 
 /// Load a prompt template from a file path, validate it, and return the contents.
-pub fn load_template(path: &std::path::Path) -> String {
+pub fn load_template(path: &std::path::Path, reasoning_enabled: bool) -> String {
     let content = std::fs::read_to_string(path)
         .unwrap_or_else(|e| bail(format!("Failed to read prompt template {}: {e}", path.display())));
 
-    if let Err(msg) = validate_template(&content) {
+    if let Err(msg) = validate_template(&content, reasoning_enabled) {
         bail(format!("{} (in {})", msg, path.display()));
     }
 
@@ -95,7 +97,7 @@ mod tests {
 
     #[test]
     fn test_default_template_is_valid() {
-        validate_template(DEFAULT_TEMPLATE).unwrap();
+        validate_template(DEFAULT_TEMPLATE, true).unwrap();
     }
 
     #[test]
@@ -119,7 +121,7 @@ mod tests {
 
     #[test]
     fn test_validate_missing_variables() {
-        let result = validate_template("Just $option1 and $option2");
+        let result = validate_template("Just $option1 and $option2", true);
         assert!(result.is_err());
         let msg = result.unwrap_err();
         assert!(msg.contains("$criterion"));
@@ -129,7 +131,7 @@ mod tests {
     #[test]
     fn test_validate_complete_template() {
         let template = "$criterion\n$option1\n$option2\n$length";
-        validate_template(template).unwrap();
+        validate_template(template, true).unwrap();
     }
 
     #[test]

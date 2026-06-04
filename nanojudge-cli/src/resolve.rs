@@ -361,11 +361,8 @@ pub fn resolve_config(shared: &ConfigArgs, cfg: &config::NanojudgeConfig) -> Res
         }
 
         let template_path = cli_path.or(cfg_path);
-        if template_path.is_some() && !reasoning_enabled {
-            bail("Cannot use --reasoning false with a custom prompt template. Custom templates control their own reasoning format.");
-        }
         match template_path {
-            Some(path) => prompt::load_template(&path),
+            Some(path) => prompt::load_template(&path, reasoning_enabled),
             None if reasoning_enabled => prompt::DEFAULT_TEMPLATE.to_string(),
             None => prompt::DEFAULT_TEMPLATE_NO_REASONING.to_string(),
         }
