@@ -97,6 +97,7 @@ pub struct ComparisonResult {
     pub item2_id: i64,
     pub parse_result: ParseResult,
     pub response_text: String,
+    pub prompt: String,
     pub retries_used: usize,
     pub usage: Option<Usage>,
     /// True if the response was truncated due to hitting max_tokens.
@@ -242,6 +243,7 @@ pub async fn compare_pair(
                     item2_id,
                     parse_result,
                     response_text: content,
+                    prompt: prompt.clone(),
                     retries_used: attempt,
                     usage,
                     hit_max_tokens,

@@ -451,6 +451,7 @@ pub async fn run(args: RankArgs) {
                                 "item2": titles[result.item2_id as usize],
                                 "judge_model": judge_models[judge_idx],
                                 "judge_endpoint": judge_endpoints[judge_idx],
+                                "prompt": result.prompt,
                                 "response": result.response_text,
                             });
                             let mut f = file_mutex.lock().unwrap();
