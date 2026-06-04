@@ -628,18 +628,21 @@ pub async fn run(args: RankArgs) {
     }
 
     // Print max_tokens warnings (always, not just verbose)
-    let mut any_max_tokens_hit = false;
-    for (i, judge) in judges.iter().enumerate() {
-        if judge_stats[i].max_tokens_hits > 0 {
-            any_max_tokens_hit = true;
-            eprintln!(
-                "Warning: {} hit max_tokens on {}/{} responses.",
-                judge.display_name, judge_stats[i].max_tokens_hits, judge_stats[i].total_responses,
-            );
+    // Suppressed when reasoning is disabled — max_tokens is intentionally low.
+    if resolved.reasoning_enabled {
+        let mut any_max_tokens_hit = false;
+        for (i, judge) in judges.iter().enumerate() {
+            if judge_stats[i].max_tokens_hits > 0 {
+                any_max_tokens_hit = true;
+                eprintln!(
+                    "Warning: {} hit max_tokens on {}/{} responses.",
+                    judge.display_name, judge_stats[i].max_tokens_hits, judge_stats[i].total_responses,
+                );
+            }
         }
-    }
-    if any_max_tokens_hit {
-        eprintln!("Consider increasing max_tokens or adjusting the length instruction in the prompt.");
+        if any_max_tokens_hit {
+            eprintln!("Consider increasing max_tokens or adjusting the length instruction in the prompt.");
+        }
     }
 
     // Build judge_id → display_name and token count maps for output
