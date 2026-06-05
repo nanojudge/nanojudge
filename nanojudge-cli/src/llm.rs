@@ -5,6 +5,14 @@ use rand::Rng;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 
+fn truncate_for_log(s: &str, max: usize) -> String {
+    if s.len() <= max {
+        return s.to_string();
+    }
+    let truncated = &s[..s.floor_char_boundary(max)];
+    format!("{}...[{} chars truncated]", truncated, s.len() - truncated.len())
+}
+
 /// Configuration for the LLM endpoint.
 pub struct LlmConfig {
     pub endpoint: String,
@@ -255,7 +263,10 @@ pub async fn compare_pair(
                     if verbose {
                         eprintln!(
                             "  Retry {}/{} for {} vs {} [{}]: {}",
-                            attempt + 1, max_retries, item1_name, item2_name, judge_name, last_err
+                            attempt + 1, max_retries,
+                            truncate_for_log(item1_name, 200),
+                            truncate_for_log(item2_name, 200),
+                            judge_name, last_err
                         );
                     }
                     let backoff = std::time::Duration::from_secs(4u64.pow(attempt as u32).min(16));
