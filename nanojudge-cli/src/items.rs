@@ -10,12 +10,15 @@ const TEXT_EXTENSIONS: &[&str] = &[
     "txt", "md", "html", "csv", "json", "xml", "rst", "log", "yaml", "yml", "toml",
 ];
 
-/// Derive a display title from item text: first 20 chars, hard cut.
+/// Derive a display title from item text: up to 20 chars, preferring a word boundary.
 fn title_from_text(text: &str) -> String {
     if text.chars().count() <= TITLE_MAX_LEN {
-        text.to_string()
-    } else {
-        text.chars().take(TITLE_MAX_LEN).collect()
+        return text.to_string();
+    }
+    let truncated: String = text.chars().take(TITLE_MAX_LEN).collect();
+    match truncated.rfind(' ') {
+        Some(pos) => format!("{}...", &truncated[..pos]),
+        None => format!("{truncated}..."),
     }
 }
 
