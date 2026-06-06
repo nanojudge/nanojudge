@@ -231,6 +231,8 @@ pub async fn compare_pair(
     criterion: &str,
     item1_name: &str,
     item2_name: &str,
+    item1_title: &str,
+    item2_title: &str,
     item1_id: i64,
     item2_id: i64,
     narrow_win: f64,
@@ -240,7 +242,7 @@ pub async fn compare_pair(
     verbose: bool,
     judge_name: &str,
 ) -> Result<ComparisonResult, String> {
-    let prompt = build_prompt(template, criterion, item1_name, item2_name, analysis_length);
+    let prompt = build_prompt(template, criterion, item1_name, item2_name, item1_title, item2_title, analysis_length);
 
     let mut last_err = String::new();
     for attempt in 0..=max_retries {

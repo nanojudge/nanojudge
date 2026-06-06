@@ -97,8 +97,8 @@ pub async fn run_benchmark(
 
     let mut tasks: Vec<ComparisonTask> = Vec::with_capacity(total_comparisons);
     for (i, q) in selected.iter().enumerate() {
-        let forward_prompt = build_prompt(template, &q.question, &q.item1, &q.item2, &q.target_length);
-        let reverse_prompt = build_prompt(template, &q.question, &q.item2, &q.item1, &q.target_length);
+        let forward_prompt = build_prompt(template, &q.question, &q.item1, &q.item2, "", "", &q.target_length);
+        let reverse_prompt = build_prompt(template, &q.question, &q.item2, &q.item1, "", "", &q.target_length);
         tasks.push(ComparisonTask { pair_index: i, is_forward: true, prompt: forward_prompt });
         tasks.push(ComparisonTask { pair_index: i, is_forward: false, prompt: reverse_prompt });
     }

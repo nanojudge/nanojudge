@@ -81,13 +81,15 @@ pub fn load_template(path: &std::path::Path, reasoning_enabled: bool) -> String 
 }
 
 /// Build a comparison prompt by substituting variables into a template.
-pub fn build_prompt(template: &str, criterion: &str, option1: &str, option2: &str, analysis_length: &str) -> String {
+pub fn build_prompt(template: &str, criterion: &str, option1: &str, option2: &str, name1: &str, name2: &str, analysis_length: &str) -> String {
     // Trim trailing "s" from length descriptor for grammar ("3-5 paragraph" not "3-5 paragraphs")
     let length = analysis_length.trim_end_matches('s');
     template
         .replace("$criterion", criterion)
         .replace("$option1", option1)
         .replace("$option2", option2)
+        .replace("$name1", name1)
+        .replace("$name2", name2)
         .replace("$length", length)
 }
 
@@ -102,7 +104,7 @@ mod tests {
 
     #[test]
     fn test_build_prompt_with_default_template() {
-        let prompt = build_prompt(DEFAULT_TEMPLATE, "Which is tastier?", "Pizza", "Sushi", "2 paragraphs");
+        let prompt = build_prompt(DEFAULT_TEMPLATE, "Which is tastier?", "Pizza", "Sushi", "pizza", "sushi", "2 paragraphs");
         assert!(prompt.starts_with("Which is tastier?"));
         assert!(prompt.contains("Option 1:\nPizza"));
         assert!(prompt.contains("Option 2:\nSushi"));
@@ -115,7 +117,7 @@ mod tests {
     #[test]
     fn test_custom_template() {
         let template = "Compare $option1 vs $option2 for $criterion. Be $length.";
-        let prompt = build_prompt(template, "taste", "Pizza", "Sushi", "brief");
+        let prompt = build_prompt(template, "taste", "Pizza", "Sushi", "pizza", "sushi", "brief");
         assert_eq!(prompt, "Compare Pizza vs Sushi for taste. Be brief.");
     }
 
@@ -147,7 +149,7 @@ mod tests {
 
     #[test]
     fn test_build_prompt_no_reasoning() {
-        let prompt = build_prompt(DEFAULT_TEMPLATE_NO_REASONING, "Which is tastier?", "Pizza", "Sushi", "ignored");
+        let prompt = build_prompt(DEFAULT_TEMPLATE_NO_REASONING, "Which is tastier?", "Pizza", "Sushi", "pizza", "sushi", "ignored");
         assert!(prompt.contains("Option 1:\nPizza"));
         assert!(prompt.contains("Option 2:\nSushi"));
         assert!(prompt.contains("Respond with one of these lines verbatim:"));

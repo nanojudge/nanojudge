@@ -187,6 +187,19 @@ pub async fn run(args: RankArgs) {
 
     let prompt_template = Arc::new(resolved.prompt_template.clone());
 
+    if prompt_template.contains("$name1") || prompt_template.contains("$name2") {
+        let mut seen = HashMap::new();
+        for (i, title) in titles.iter().enumerate() {
+            if let Some(prev) = seen.insert(title.as_str(), i) {
+                bail(format!(
+                    "Template uses $name1/$name2 but items {} and {} have the same name {:?}. \
+                     Rename one so the LLM can distinguish them in verdict lines.",
+                    prev + 1, i + 1, title,
+                ));
+            }
+        }
+    }
+
     let client = Client::new();
     let titles = Arc::new(titles);
     let texts = Arc::new(texts);
@@ -349,6 +362,7 @@ pub async fn run(args: RankArgs) {
             let client = client.clone();
             let llm_config = judge_llm_configs[judge_idx].clone();
             let texts = texts.clone();
+            let titles = titles.clone();
             let criterion = criteria[criterion_assignments[pair_idx]].clone();
             let analysis_length = analysis_length.clone();
             let template = prompt_template.clone();
@@ -369,6 +383,8 @@ pub async fn run(args: RankArgs) {
                     &criterion,
                     &texts[id_a as usize],
                     &texts[id_b as usize],
+                    &titles[id_a as usize],
+                    &titles[id_b as usize],
                     id_a,
                     id_b,
                     narrow_win,
