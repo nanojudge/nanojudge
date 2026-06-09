@@ -195,12 +195,15 @@ impl GaussianBT {
             log_strengths: vec![prior_mu; num_items],
             regularization_strength: options.regularization_strength,
             num_judges,
-            center: vec![options.bias_prior_logit; num_judges],
+            // bias_prior_logit is P(item1 favored) in logit space, but the
+            // cutpoint center works in the opposite direction (center > 0
+            // penalizes item1) — so the center prior is the NEGATED bias prior.
+            center: vec![-options.bias_prior_logit; num_judges],
             lg1: vec![LG1_PRIOR_MEAN; num_judges], // g1 = 1.0
             lg2: vec![LG2_PRIOR_MEAN; num_judges], // g2 = 2.0
             lg3: vec![LG3_PRIOR_MEAN; num_judges], // g3 = 1.0
             comparisons_per_judge,
-            center_prior_mu: options.bias_prior_logit,
+            center_prior_mu: -options.bias_prior_logit,
             prior_mu,
             prior_tau2: options.prior_tau2,
             proposal_std: options.proposal_std,

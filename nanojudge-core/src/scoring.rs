@@ -180,6 +180,27 @@ mod tests {
     }
 
     #[test]
+    fn test_bias_prior_direction() {
+        // bias_prior > 0.5 means "judges favor the first-listed item". With NO
+        // comparisons the posterior equals the prior, so the reported
+        // positional bias must land on the same side of 0.5 as the prior.
+        // Regression test for a sign flip where the prior was installed as the
+        // cutpoint center without negation, inverting its direction.
+        let mut opts = default_scoring_options();
+        opts.bias_prior_logit = (0.8_f64 / 0.2).ln(); // bias_prior = 0.8
+        opts.iterations = 5000;
+        opts.burn_in = 1000;
+
+        let ji = single_judge_info();
+        let result = run_scoring(&[1, 2], &[], &opts, &ji);
+        let bias = result.judge_analytics[0].positional_bias;
+        assert!(
+            bias > 0.55,
+            "bias_prior 0.8 with no data must report positional_bias well above 0.5, got {bias:.4}"
+        );
+    }
+
+    #[test]
     fn test_cold_start_scoring() {
         let item_ids = vec![100, 200, 300];
         let comparisons: Vec<ComparisonInput> = [
