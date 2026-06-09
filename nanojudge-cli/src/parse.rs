@@ -46,8 +46,8 @@ fn letter_to_index(c: char) -> Option<usize> {
 }
 
 /// Extract the judge's categorical verdict distribution `[P(A)..P(E)]` from
-/// logprobs. Returns None if extraction fails or the A-E mass is below the
-/// coverage threshold.
+/// logprobs. Returns None if no "Verdict" marker is present, extraction fails,
+/// or the A-E mass is below the coverage threshold.
 fn extract_likert_probabilities(logprobs: &[LogprobContent], min_logprob_coverage: f64) -> Option<[f64; 5]> {
     if logprobs.is_empty() {
         return None;
@@ -55,25 +55,46 @@ fn extract_likert_probabilities(logprobs: &[LogprobContent], min_logprob_coverag
 
     let tokens: Vec<&str> = logprobs.iter().map(|lp| lp.token.as_str()).collect();
 
-    // Find the LAST "Verdict" marker in logprob tokens. The analysis prose can
-    // contain the word "verdict" (e.g. "reach a fair verdict"), so matching the
-    // first occurrence latches onto prose; the real marker is the final one.
-    // Mirrors the last-occurrence behavior of parse_response_text.
-    let mut search_start = 0;
+    // Collect every "Verdict" marker position. The analysis prose can contain
+    // the word "verdict" (e.g. "reach a fair verdict") before or after the
+    // real "Verdict: x" line, so we attempt extraction after each marker and
+    // keep the LAST successful one. Mirrors parse_response_text, which keeps
+    // the last marker that actually yields a letter.
+    // No marker at all means the judge ignored the required "Verdict: x"
+    // format — discard rather than scan the response start for stray letters.
+    let mut marker_starts = Vec::new();
     for (i, raw_tok) in tokens.iter().enumerate() {
         let t = raw_tok.trim().to_lowercase();
         if t.starts_with("verdict") {
-            search_start = i + 1;
+            marker_starts.push(i + 1);
             continue;
         }
         if (t == "ver" || t == "verd") && i + 1 < tokens.len() {
             let next_t = tokens[i + 1].trim().to_lowercase();
             if next_t == "dict" || next_t == "dict:" || next_t == "ict" || next_t == "ict:" {
-                search_start = i + 2;
+                marker_starts.push(i + 2);
             }
         }
     }
 
+    let mut result = None;
+    for start in marker_starts {
+        if let Some(probs) = extract_at_marker(logprobs, &tokens, start, min_logprob_coverage) {
+            result = Some(probs);
+        }
+    }
+    result
+}
+
+/// Scan the 10 tokens following one "Verdict" marker for the verdict letter
+/// and build the A-E distribution from its top_logprobs. Returns None if no
+/// letter token is found or the A-E mass is below the coverage threshold.
+fn extract_at_marker(
+    logprobs: &[LogprobContent],
+    tokens: &[&str],
+    search_start: usize,
+    min_logprob_coverage: f64,
+) -> Option<[f64; 5]> {
     let search_end = (search_start + 10).min(tokens.len());
 
     for i in search_start..search_end {
@@ -172,6 +193,17 @@ pub fn parse_response_text(text: &str) -> ParseResult {
                         // verdict; lowercase 'a' only counts after a colon.
                         let is_lower_a = c == 'a' && orig_bytes[after_verdict + byte_off] != b'A';
                         if is_lower_a && !saw_colon {
+                            break;
+                        }
+                        // Word-boundary check: the letter must stand alone.
+                        // "Verdict: Draw" is not Verdict D, "Verdict: Both"
+                        // is not Verdict B.
+                        let next_byte = after_verdict + byte_off + c.len_utf8();
+                        let followed_by_word = lower[next_byte..]
+                            .chars()
+                            .next()
+                            .is_some_and(|nc| nc.is_alphanumeric());
+                        if followed_by_word {
                             break;
                         }
                         result = Some(idx);
@@ -413,5 +445,68 @@ mod tests {
     fn test_text_parse_heading_verdict() {
         let text = "Analysis.\n\n## Verdict D: Option 2, marginally";
         assert_eq!(parse_response_text(text).category_probs, Some(one_hot(3)));
+    }
+
+    #[test]
+    fn test_text_parse_rejects_word_starting_with_letter() {
+        // A verdict line starting with a WORD that begins with A-E must not
+        // parse as that letter. "Draw" is the dangerous one: it plausibly
+        // means C (draw) but starts with D (narrow loss).
+        assert!(parse_response_text("Analysis.\n\nVerdict: Draw").category_probs.is_none());
+        assert!(parse_response_text("Analysis.\n\nVerdict: Both are good").category_probs.is_none());
+        assert!(parse_response_text("Analysis.\n\nVerdict: apple wins").category_probs.is_none());
+    }
+
+    #[test]
+    fn test_text_parse_letter_followed_by_punctuation_still_parses() {
+        assert_eq!(parse_response_text("Analysis.\n\nVerdict: B.").category_probs, Some(one_hot(1)));
+        assert_eq!(parse_response_text("Analysis.\n\nVerdict: A, clearly").category_probs, Some(one_hot(0)));
+    }
+
+    #[test]
+    fn test_logprob_parse_prose_verdict_after_real_verdict() {
+        // The real "Verdict: B" comes first; prose containing "verdict"
+        // follows. The parser must keep the successful extraction instead of
+        // latching onto the later prose marker and discarding everything.
+        let logprobs = vec![
+            LogprobContent { token: "Verdict".to_string(), top_logprobs: None },
+            LogprobContent { token: ":".to_string(), top_logprobs: None },
+            LogprobContent {
+                token: " B".to_string(),
+                top_logprobs: Some(vec![
+                    TopLogprob { token: "B".to_string(), logprob: -0.05 },
+                    TopLogprob { token: "A".to_string(), logprob: -3.5 },
+                    TopLogprob { token: "C".to_string(), logprob: -4.0 },
+                    TopLogprob { token: "D".to_string(), logprob: -5.0 },
+                    TopLogprob { token: "E".to_string(), logprob: -6.0 },
+                ]),
+            },
+            LogprobContent { token: "\n".to_string(), top_logprobs: None },
+            LogprobContent { token: "This".to_string(), top_logprobs: None },
+            LogprobContent { token: " verdict".to_string(), top_logprobs: None },
+            LogprobContent { token: " reflects".to_string(), top_logprobs: None },
+            LogprobContent { token: " the".to_string(), top_logprobs: None },
+            LogprobContent { token: " analysis".to_string(), top_logprobs: None },
+            LogprobContent { token: ".".to_string(), top_logprobs: None },
+        ];
+
+        let probs = parse_response(&logprobs, DEFAULT_MIN_LOGPROB_COVERAGE).category_probs
+            .expect("the real Verdict: B must survive trailing prose mentioning 'verdict'");
+        assert!(probs[1] > 0.9, "P(B) {} should dominate", probs[1]);
+    }
+
+    #[test]
+    fn test_logprob_parse_no_verdict_marker_discards() {
+        // The judge is instructed to write "Verdict: x" — a bare letter with
+        // no marker anywhere must be discarded, not scanned for.
+        let logprobs = vec![
+            LogprobContent { token: "B".to_string(), top_logprobs: Some(vec![
+                TopLogprob { token: "B".to_string(), logprob: -0.05 },
+                TopLogprob { token: "A".to_string(), logprob: -3.5 },
+            ]) },
+            LogprobContent { token: " is".to_string(), top_logprobs: None },
+            LogprobContent { token: " better".to_string(), top_logprobs: None },
+        ];
+        assert!(parse_response(&logprobs, DEFAULT_MIN_LOGPROB_COVERAGE).category_probs.is_none());
     }
 }
