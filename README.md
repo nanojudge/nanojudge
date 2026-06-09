@@ -197,7 +197,7 @@ Every time an AI agent makes a decision, a travel app recommends an itinerary, o
 
 ### Scales with AI progress
 
-NanoJudge is model-agnostic. It uses whatever LLM you point it at as a raw compute engine. That means it surfs the wave of AI progress directly: as models get faster, cheaper, and smarter, NanoJudge inherits every one of those gains and becomes a more powerful engine.
+NanoJudge is model-agnostic. It uses whatever LLM you point it at as a raw compute engine. That means it surfs the wave of AI progress directly: when a faster, cheaper, smarter LLM releases, changing one config line is all that's needed to make NanoJudge stronger.
 
 ## Benchmark
 
