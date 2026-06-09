@@ -116,10 +116,6 @@ pub struct SamplesResult {
     pub bias_logit_samples: Vec<Vec<f64>>,
     /// Per-judge positional-bias means in logit space.
     pub bias_logit_means: Vec<f64>,
-    /// Unused in the ordinal model (kept for API stability). Always empty.
-    pub log_decisiveness_samples: Vec<Vec<f64>>,
-    /// Unused in the ordinal model (kept for API stability). Always empty.
-    pub log_decisiveness_means: Vec<f64>,
     /// Number of comparisons per judge.
     pub comparisons_per_judge: Vec<usize>,
 }
@@ -400,8 +396,6 @@ impl GaussianBT {
             top_k_probs: top_k_count.map(|c| c.iter().map(|&v| v as f64 / iterations as f64).collect()),
             bias_logit_samples: bias_samples,
             bias_logit_means,
-            log_decisiveness_samples: Vec::new(),
-            log_decisiveness_means: Vec::new(),
             comparisons_per_judge: self.comparisons_per_judge.clone(),
         }
     }
@@ -435,17 +429,11 @@ impl GaussianBT {
             .collect()
     }
 
-    /// Unused in the ordinal model (kept for API stability). Always empty.
-    pub fn get_current_log_decisiveness(&self, _judge_info: &JudgeInfo) -> Vec<(u64, f64)> {
-        Vec::new()
-    }
-
     /// Warm-start MCMC returning raw sorted samples.
     pub fn calculate_incremental_with_samples(
         &mut self,
         previous_strengths: &[f64],
         previous_biases: &[(u64, f64)],
-        _previous_log_decisiveness: &[(u64, f64)],
         judge_id_to_idx: &HashMap<u64, usize>,
         new_iterations: usize,
         burn_in: usize,
@@ -559,13 +547,10 @@ mod tests {
             warm_start: None,
             regularization_strength: 0.01,
             prior_tau2: 10.0,
-            sigma2: 1.0,
             proposal_std: 0.3,
             bias_prior_tau2: 2.0,
             bias_proposal_std: 0.15,
             bias_prior_logit: 0.0,
-            decisiveness_prior_tau2: 1.0,
-            decisiveness_proposal_std: 0.1,
         }
     }
 
@@ -604,10 +589,9 @@ mod tests {
 
         let judge_id_to_idx: HashMap<u64, usize> = ji.judge_ids.iter().enumerate().map(|(i, &id)| (id, i)).collect();
         let biases = mcmc.get_current_biases(&ji);
-        let log_d = mcmc.get_current_log_decisiveness(&ji);
 
         let mut mcmc2 = GaussianBT::new(3, &results, &opts, &ji);
-        let result2 = mcmc2.calculate_incremental_with_samples(&state, &biases, &log_d, &judge_id_to_idx, 50, 0, 0);
+        let result2 = mcmc2.calculate_incremental_with_samples(&state, &biases, &judge_id_to_idx, 50, 0, 0);
 
         assert_eq!(result2.means.len(), 3);
     }
@@ -671,7 +655,6 @@ mod tests {
 
         assert_eq!(result.means.len(), 3);
         assert_eq!(result.bias_logit_means.len(), 2);
-        assert!(result.log_decisiveness_means.is_empty());
         assert_eq!(result.comparisons_per_judge.len(), 2);
     }
 }

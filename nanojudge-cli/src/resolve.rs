@@ -52,12 +52,9 @@ pub struct ResolvedConfig {
     pub matchmaking_sharpness: f64,
     pub min_games_before_strategy: usize,
     pub prior_tau2: f64,
-    pub sigma2: f64,
     pub proposal_std: f64,
     pub bias_prior_tau2: f64,
     pub bias_proposal_std: f64,
-    pub decisiveness_prior_tau2: f64,
-    pub decisiveness_proposal_std: f64,
     pub live_top: Option<usize>,
     pub save_comparisons: Option<PathBuf>,
     pub json: bool,
@@ -276,18 +273,12 @@ pub fn resolve_config(shared: &ConfigArgs, cfg: &config::NanojudgeConfig) -> Res
         .unwrap_or(3);
     let prior_tau2 = merge_opt(shared.prior_tau2, cfg.prior_tau2, "prior-tau2")
         .unwrap_or(10.0);
-    let sigma2 = merge_opt(shared.sigma2, cfg.sigma2, "sigma2")
-        .unwrap_or(1.0);
     let proposal_std = merge_opt(shared.proposal_std, cfg.proposal_std, "proposal-std")
         .unwrap_or(0.3);
     let bias_prior_tau2 = merge_opt(shared.bias_prior_tau2, cfg.bias_prior_tau2, "bias-prior-tau2")
         .unwrap_or(2.0);
     let bias_proposal_std = merge_opt(shared.bias_proposal_std, cfg.bias_proposal_std, "bias-proposal-std")
         .unwrap_or(0.15);
-    let decisiveness_prior_tau2 = merge_opt(shared.decisiveness_prior_tau2, cfg.decisiveness_prior_tau2, "decisiveness-prior-tau2")
-        .unwrap_or(1.0);
-    let decisiveness_proposal_std = merge_opt(shared.decisiveness_proposal_std, cfg.decisiveness_proposal_std, "decisiveness-proposal-std")
-        .unwrap_or(0.1);
 
     let live_top = merge_opt(shared.live_top, cfg.live_top, "live-top");
     let save_comparisons = match (shared.save_comparisons.clone(), cfg.save_comparisons.clone()) {
@@ -367,12 +358,9 @@ pub fn resolve_config(shared: &ConfigArgs, cfg: &config::NanojudgeConfig) -> Res
         matchmaking_sharpness,
         min_games_before_strategy,
         prior_tau2,
-        sigma2,
         proposal_std,
         bias_prior_tau2,
         bias_proposal_std,
-        decisiveness_prior_tau2,
-        decisiveness_proposal_std,
         live_top,
         save_comparisons,
         json,
@@ -408,12 +396,9 @@ mod tests {
             matchmaking_sharpness: None,
             min_games: None,
             prior_tau2: None,
-            sigma2: None,
             proposal_std: None,
             bias_prior_tau2: None,
             bias_proposal_std: None,
-            decisiveness_prior_tau2: None,
-            decisiveness_proposal_std: None,
             live_top: None,
             save_comparisons: None,
             json: None,

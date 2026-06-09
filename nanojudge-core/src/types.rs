@@ -40,7 +40,8 @@ pub struct JudgeInfo {
     /// The set of judge IDs present in this tournament.
     /// Order determines the internal index used for parameter arrays.
     pub judge_ids: Vec<u64>,
-    /// Whether judges provide logprobs (enables decisiveness estimation).
+    /// Whether judges provide logprobs (full category distributions rather
+    /// than one-hot verdicts).
     pub logprobs_mode: bool,
 }
 
@@ -52,10 +53,6 @@ pub struct JudgeAnalytics {
     /// Positional bias in probability space. 0.5 = no bias, >0.5 = favors first item.
     pub positional_bias: f64,
     pub positional_bias_ci: (f64, f64),
-    /// Decisiveness relative to panel average. 1.0 = average, >1 = more decisive, <1 = more hesitant.
-    /// None in no-logprobs mode.
-    pub decisiveness: Option<f64>,
-    pub decisiveness_ci: Option<(f64, f64)>,
     /// Number of comparisons this judge contributed.
     pub num_comparisons: usize,
 }
@@ -66,10 +63,9 @@ pub struct JudgeAnalytics {
 pub struct WarmStartState {
     /// Item strengths (exp of log-strengths), same order as item_ids.
     pub item_strengths: Vec<f64>,
-    /// Per-judge positional bias in logit space, keyed by judge_id hash.
+    /// Per-judge cutpoint centers, keyed by judge_id hash. Note this is the
+    /// NEGATED positional-bias logit (center > 0 penalizes item1).
     pub judge_biases: Vec<(u64, f64)>,
-    /// Per-judge log-decisiveness, keyed by judge_id hash. Empty in no-logprobs mode.
-    pub judge_log_decisiveness: Vec<(u64, f64)>,
 }
 
 /// A ranked item with point estimate and confidence interval bounds.
@@ -104,8 +100,6 @@ pub struct ScoringOptions {
     pub regularization_strength: f64,
     /// Prior variance on log-strengths. Default: 10.0.
     pub prior_tau2: f64,
-    /// Observation noise variance. Default: 1.0.
-    pub sigma2: f64,
     /// MH proposal step size for strengths. Default: 0.3.
     pub proposal_std: f64,
     /// Prior variance on positional bias (logit space). Default: 2.0.
@@ -114,13 +108,6 @@ pub struct ScoringOptions {
     pub bias_proposal_std: f64,
     /// Prior mean for positional bias in logit space. Default: 0.0 (= 0.5 probability = no bias).
     pub bias_prior_logit: f64,
-    /// Prior variance on decisiveness in log space. Default: 1.0.
-    /// Controls how far D_k can drift from 1.0 before the prior pulls it back.
-    /// Ignored in no-logprobs mode.
-    pub decisiveness_prior_tau2: f64,
-    /// MH proposal step size for decisiveness (log space). Default: 0.1.
-    /// Ignored in no-logprobs mode.
-    pub decisiveness_proposal_std: f64,
 }
 
 /// Result from `run_scoring()`.

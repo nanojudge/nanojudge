@@ -19,9 +19,6 @@ struct JsonJudgeAnalytics {
     positional_bias: f64,
     positional_bias_ci_low: f64,
     positional_bias_ci_high: f64,
-    decisiveness: Option<f64>,
-    decisiveness_ci_low: Option<f64>,
-    decisiveness_ci_high: Option<f64>,
     num_comparisons: usize,
 }
 
@@ -132,7 +129,6 @@ fn print_judge_panel_analytics(
     judge_tokens: &HashMap<u64, (u64, u64)>,
     judge_avg_wall_time: &HashMap<u64, f64>,
 ) {
-    let has_decisiveness = analytics.iter().any(|ja| ja.decisiveness.is_some());
     let has_tokens = analytics.iter().any(|ja| {
         judge_tokens
             .get(&ja.judge_id)
@@ -166,10 +162,6 @@ fn print_judge_panel_analytics(
         "\u{2500}".repeat(15)
     );
 
-    if has_decisiveness {
-        header += &format!("   {:>18}", "Decisiveness");
-        separator += &format!("   {:>18}", "\u{2500}".repeat(18));
-    }
     if has_tokens {
         header += &format!("   {:>13}   {:>13}", "Input tokens", "Output tokens");
         separator += &format!(
@@ -203,16 +195,6 @@ fn print_judge_panel_analytics(
             bias_str,
         );
 
-        if has_decisiveness {
-            let dec_str = if let Some(d) = ja.decisiveness {
-                let (lo, hi) = ja.decisiveness_ci.unwrap_or((d, d));
-                format!("{:.2} [{:.2}-{:.2}]", d, lo, hi)
-            } else {
-                "n/a".to_string()
-            };
-            line += &format!("   {:>18}", dec_str);
-        }
-
         if has_tokens {
             let (input, output) = judge_tokens.get(&ja.judge_id).copied().unwrap_or((0, 0));
             line += &format!(
@@ -231,10 +213,6 @@ fn print_judge_panel_analytics(
         }
 
         println!("{line}");
-    }
-
-    if has_decisiveness {
-        println!("\n  Panel average decisiveness: 1.00 (by definition)");
     }
 }
 
@@ -341,9 +319,6 @@ fn build_json(
             positional_bias: ja.positional_bias,
             positional_bias_ci_low: ja.positional_bias_ci.0,
             positional_bias_ci_high: ja.positional_bias_ci.1,
-            decisiveness: ja.decisiveness,
-            decisiveness_ci_low: ja.decisiveness_ci.map(|c| c.0),
-            decisiveness_ci_high: ja.decisiveness_ci.map(|c| c.1),
             num_comparisons: ja.num_comparisons,
         })
         .collect();
@@ -413,8 +388,6 @@ mod tests {
             judge_id: 42,
             positional_bias: 0.523,
             positional_bias_ci: (0.481, 0.567),
-            decisiveness: Some(1.0),
-            decisiveness_ci: Some((0.9, 1.1)),
             num_comparisons: 30,
         }]
     }

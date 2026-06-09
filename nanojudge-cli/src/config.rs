@@ -48,12 +48,9 @@ pub struct NanojudgeConfig {
     pub matchmaking_sharpness: Option<f64>,
     pub min_games: Option<usize>,
     pub prior_tau2: Option<f64>,
-    pub sigma2: Option<f64>,
     pub proposal_std: Option<f64>,
     pub bias_prior_tau2: Option<f64>,
     pub bias_proposal_std: Option<f64>,
-    pub decisiveness_prior_tau2: Option<f64>,
-    pub decisiveness_proposal_std: Option<f64>,
     pub reasoning_enabled: Option<bool>,
     pub min_logprob_coverage: Option<f64>,
     pub live_top: Option<usize>,
@@ -201,9 +198,6 @@ temperature = 0.7
 # Prior variance on log-strengths. Default: 10.0.
 # prior_tau2 = 10.0
 
-# Observation noise variance. Default: 1.0.
-# sigma2 = 1.0
-
 # MH proposal step size for strengths. Default: 0.3.
 # proposal_std = 0.3
 
@@ -212,12 +206,6 @@ temperature = 0.7
 
 # MH proposal step size for bias. Default: 0.15.
 # bias_proposal_std = 0.15
-
-# Prior variance on log-decisiveness (logprobs mode only). Default: 1.0.
-# decisiveness_prior_tau2 = 1.0
-
-# MH proposal step size for log-decisiveness (logprobs mode only). Default: 0.1.
-# decisiveness_proposal_std = 0.1
 ";
 
 /// Returns the default config path.

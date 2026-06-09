@@ -113,10 +113,6 @@ pub struct ConfigArgs {
     #[arg(long)]
     pub prior_tau2: Option<f64>,
 
-    /// Observation noise variance. Default: 1.0.
-    #[arg(long)]
-    pub sigma2: Option<f64>,
-
     /// MH proposal step size for strengths. Default: 0.3.
     #[arg(long)]
     pub proposal_std: Option<f64>,
@@ -128,14 +124,6 @@ pub struct ConfigArgs {
     /// MH proposal step size for bias. Default: 0.15.
     #[arg(long)]
     pub bias_proposal_std: Option<f64>,
-
-    /// Prior variance on log-decisiveness (logprobs mode). Default: 1.0.
-    #[arg(long)]
-    pub decisiveness_prior_tau2: Option<f64>,
-
-    /// MH proposal step size for log-decisiveness (logprobs mode). Default: 0.1.
-    #[arg(long)]
-    pub decisiveness_proposal_std: Option<f64>,
 
     /// Print a live ranking table after each round.
     /// With no value: prints all items. With a number: prints top N only.

@@ -69,7 +69,6 @@ pub fn run_scoring(
         mcmc.calculate_incremental_with_samples(
             &warm_start.item_strengths,
             &warm_start.judge_biases,
-            &warm_start.judge_log_decisiveness,
             &judge_id_to_idx,
             options.iterations,
             options.burn_in,
@@ -99,16 +98,10 @@ pub fn run_scoring(
             options.confidence_level,
         );
 
-        // Decisiveness is no longer a separate parameter in the ordinal model
-        // (subsumed into the per-judge cutpoint spacing).
-        let (decisiveness, decisiveness_ci) = (None, None);
-
         judge_analytics.push(JudgeAnalytics {
             judge_id,
             positional_bias: bias_prob,
             positional_bias_ci: bias_ci,
-            decisiveness,
-            decisiveness_ci,
             num_comparisons: samples_result.comparisons_per_judge[j],
         });
     }
@@ -117,7 +110,6 @@ pub fn run_scoring(
     let warm_start_state = WarmStartState {
         item_strengths: mcmc.get_current_state(),
         judge_biases: mcmc.get_current_biases(judge_info),
-        judge_log_decisiveness: mcmc.get_current_log_decisiveness(judge_info),
     };
 
     ScoringResult {
@@ -169,13 +161,10 @@ mod tests {
             warm_start: None,
             regularization_strength: 0.01,
             prior_tau2: 10.0,
-            sigma2: 1.0,
             proposal_std: 0.3,
             bias_prior_tau2: 2.0,
             bias_proposal_std: 0.15,
             bias_prior_logit: 0.0,
-            decisiveness_prior_tau2: 1.0,
-            decisiveness_proposal_std: 0.1,
         }
     }
 
@@ -219,7 +208,6 @@ mod tests {
         assert_eq!(result.sample_size, 200);
         assert_eq!(result.judge_analytics.len(), 1);
         assert_eq!(result.judge_analytics[0].judge_id, 42);
-        assert!(result.judge_analytics[0].decisiveness.is_none());
     }
 
     #[test]
@@ -256,7 +244,6 @@ mod tests {
         opts.warm_start = Some(WarmStartState {
             item_strengths: vec![1.0, 1.0], // Wrong length: 2 instead of 3
             judge_biases: vec![],
-            judge_log_decisiveness: vec![],
         });
 
         run_scoring(&item_ids, &comparisons, &opts, &ji);
@@ -349,8 +336,6 @@ mod tests {
         assert_eq!(result.judge_analytics.len(), 2);
         assert_eq!(result.judge_analytics[0].judge_id, judge_a);
         assert_eq!(result.judge_analytics[1].judge_id, judge_b);
-        assert!(result.judge_analytics[0].decisiveness.is_none());
-        assert!(result.judge_analytics[1].decisiveness.is_none());
         assert_eq!(result.judge_analytics[0].num_comparisons + result.judge_analytics[1].num_comparisons, 6);
     }
 
@@ -371,7 +356,5 @@ mod tests {
 
         assert_eq!(result.rankings.len(), 3);
         assert_eq!(result.judge_analytics.len(), 1);
-        assert!(result.judge_analytics[0].decisiveness.is_none());
-        assert!(result.judge_analytics[0].decisiveness_ci.is_none());
     }
 }
