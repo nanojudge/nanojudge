@@ -24,9 +24,11 @@ pub struct ComparisonInput {
     pub item1: i64,
     /// ID of second item.
     pub item2: i64,
-    /// P(item1 wins) from logprob extraction, 0.0 to 1.0.
-    /// Caller is responsible for filtering out failed comparisons before passing data in.
-    pub item1_win_probability: f64,
+    /// Categorical verdict distribution from item1's perspective:
+    /// `[P(A clear win), P(B narrow win), P(C draw), P(D narrow loss), P(E clear loss)]`.
+    /// Sums to ~1. In text mode this is a one-hot vector; in logprobs mode it is the
+    /// judge's full per-bucket distribution. Caller filters out failed comparisons first.
+    pub category_probs: [f64; 5],
     /// Hash of endpoint+model identifying which judge produced this comparison.
     pub judge_id: u64,
 }
@@ -143,8 +145,8 @@ pub struct ScoringResult {
 pub type Pair = (i64, i64);
 
 /// Internal indexed comparison (usize indices, not caller IDs).
-/// (item1_idx, item2_idx, probability, judge_internal_idx)
-pub(crate) type IndexedComparison = (usize, usize, f64, usize);
+/// (item1_idx, item2_idx, category_probs, judge_internal_idx)
+pub(crate) type IndexedComparison = (usize, usize, [f64; 5], usize);
 
 /// Internal indexed pair (usize indices, not caller IDs).
 pub(crate) type IndexedPair = (usize, usize);
@@ -185,7 +187,7 @@ impl IdMap {
         comparisons.iter().map(|c| {
             let judge_idx = *judge_id_to_idx.get(&c.judge_id)
                 .unwrap_or_else(|| panic!("Unknown judge_id: {}", c.judge_id));
-            (self.to_idx(c.item1), self.to_idx(c.item2), c.item1_win_probability, judge_idx)
+            (self.to_idx(c.item1), self.to_idx(c.item2), c.category_probs, judge_idx)
         }).collect()
     }
 }

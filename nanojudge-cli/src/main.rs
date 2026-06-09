@@ -68,7 +68,6 @@ async fn run_benchmark_cmd(args: BenchmarkArgs) {
             &judge.display_name,
             args.num_pairs,
             judge.concurrency,
-            judge.narrow_win,
             judge.min_logprob_coverage,
             template,
         ).await;

@@ -151,7 +151,6 @@ pub async fn send_comparison_request(
     client: &Client,
     config: &LlmConfig,
     prompt: &str,
-    narrow_win: f64,
     min_logprob_coverage: f64,
 ) -> Result<(ParseResult, String, Option<Usage>, bool), String> {
     let request = ChatCompletionRequest {
@@ -212,9 +211,9 @@ pub async fn send_comparison_request(
             crate::bail(format!("{} returned no logprobs. If your endpoint does not support logprobs, disable logprobs in your config.", config.model));
         }
 
-        parse_response(&logprobs, narrow_win, min_logprob_coverage)
+        parse_response(&logprobs, min_logprob_coverage)
     } else {
-        parse_response_text(&content, narrow_win)
+        parse_response_text(&content)
     };
 
     Ok((parse_result, content, data.usage, hit_max_tokens))
@@ -235,7 +234,6 @@ pub async fn compare_pair(
     item2_title: &str,
     item1_id: i64,
     item2_id: i64,
-    narrow_win: f64,
     min_logprob_coverage: f64,
     analysis_length: &str,
     max_retries: usize,
@@ -246,7 +244,7 @@ pub async fn compare_pair(
 
     let mut last_err = String::new();
     for attempt in 0..=max_retries {
-        match send_comparison_request(client, config, &prompt, narrow_win, min_logprob_coverage).await {
+        match send_comparison_request(client, config, &prompt, min_logprob_coverage).await {
             Ok((parse_result, content, usage, hit_max_tokens)) => {
                 return Ok(ComparisonResult {
                     item1_id,

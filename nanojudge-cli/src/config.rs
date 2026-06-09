@@ -19,7 +19,6 @@ pub struct JudgeConfig {
     pub temperature_jitter: Option<f64>,
     pub presence_penalty: Option<f64>,
     pub top_p: Option<f64>,
-    pub narrow_win: Option<f64>,
     pub min_logprob_coverage: Option<f64>,
     pub api_key_env: Option<String>,
     pub max_tokens: Option<u32>,
@@ -56,7 +55,6 @@ pub struct NanojudgeConfig {
     pub decisiveness_prior_tau2: Option<f64>,
     pub decisiveness_proposal_std: Option<f64>,
     pub reasoning_enabled: Option<bool>,
-    pub narrow_win: Option<f64>,
     pub min_logprob_coverage: Option<f64>,
     pub live_top: Option<usize>,
     pub save_comparisons: Option<PathBuf>,
@@ -109,10 +107,6 @@ const DEFAULT_CONFIG_TEMPLATE: &str = "\
 # Default: sqrt(n) * 3, clamped to n-1. Only used with strategy = \"top-heavy\".
 # top_k = 10
 
-# Win probability for a narrow verdict (B or D on the likert scale).
-# Must be > 0.5 and < 1.0. Can be overridden per-judge.
-# narrow_win = 0.8
-
 # Minimum fraction of A-E probability mass the top-logprobs must cover for a
 # logprob-based verdict to be trusted (logprobs mode only). Below this, the
 # comparison is treated as unparseable. Must be > 0.0 and <= 1.0.
@@ -157,7 +151,6 @@ const DEFAULT_CONFIG_TEMPLATE: &str = "\
 #   temperature_jitter     - Std dev of N(1.0, jitter) temperature multiplier (default: 0)
 #   presence_penalty       - Penalizes repeated tokens, range -2.0 to 2.0
 #   top_p                  - Nucleus sampling threshold, range 0.0 to 1.0
-#   narrow_win             - Win probability for narrow verdicts, > 0.5 and < 1.0 (default: 0.8)
 #   min_logprob_coverage   - Min A-E logprob mass to trust a verdict, > 0.0 and <= 1.0 (default: 0.95)
 #   max_tokens             - Maximum tokens in LLM response (default: 2048, or average of specified judges)
 #   api_key_env            - Environment variable name containing the API key

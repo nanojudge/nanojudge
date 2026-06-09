@@ -12,6 +12,14 @@ use crate::pairing::{
 };
 use crate::types::{ComparisonInput, IdMap, Pair};
 
+/// Collapse a categorical verdict distribution into a scalar P(item1 wins) for the
+/// classic Bradley-Terry matchmaking fit. This is a win/draw/loss reduction (A and B
+/// count as a win, C as a half, D and E as a loss) used only to pick the next pairs —
+/// the final ordinal scoring consumes the full distribution, not this scalar.
+fn matchmaking_win_prob(probs: &[f64; 5]) -> f64 {
+    probs[0] + probs[1] + 0.5 * probs[2]
+}
+
 /// Configuration for the ranking engine.
 #[derive(Debug, Clone)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
@@ -142,7 +150,7 @@ impl RankingEngine {
 
         let num_items = self.id_map.len();
         let indexed: Vec<(usize, usize, f64)> = self.completed_comparisons.iter().map(|c| {
-            (self.id_map.to_idx(c.item1), self.id_map.to_idx(c.item2), c.item1_win_probability)
+            (self.id_map.to_idx(c.item1), self.id_map.to_idx(c.item2), matchmaking_win_prob(&c.category_probs))
         }).collect();
         let mut bt = BradleyTerry::new(num_items, &indexed, 0.01);
         bt.calculate_scores(30);
@@ -209,7 +217,13 @@ mod tests {
     }
 
     fn make_input(id1: i64, id2: i64, prob: f64) -> ComparisonInput {
-        ComparisonInput { item1: id1, item2: id2, item1_win_probability: prob, judge_id: 0 }
+        // One-hot the scalar into the five ordinal buckets for these structural tests.
+        let category_probs = if prob > 0.9 { [1.0, 0.0, 0.0, 0.0, 0.0] }
+            else if prob > 0.65 { [0.0, 1.0, 0.0, 0.0, 0.0] }
+            else if prob > 0.35 { [0.0, 0.0, 1.0, 0.0, 0.0] }
+            else if prob > 0.1 { [0.0, 0.0, 0.0, 1.0, 0.0] }
+            else { [0.0, 0.0, 0.0, 0.0, 1.0] };
+        ComparisonInput { item1: id1, item2: id2, category_probs, judge_id: 0 }
     }
 
     #[test]

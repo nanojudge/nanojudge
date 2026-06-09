@@ -5,22 +5,20 @@
 /// - Text mode (--no-logprobs): extracts discrete verdict letter from response text.
 use serde::Deserialize;
 
-/// Default narrow-win probability (B and D on the likert scale).
-pub const DEFAULT_NARROW_WIN: f64 = 0.8;
-
 /// Default minimum fraction of A-E probability mass the top-logprobs must
-/// cover before the logprob-derived probability is trusted. Below this, the
+/// cover before the logprob-derived distribution is trusted. Below this, the
 /// comparison parse fails (returns None).
 pub const DEFAULT_MIN_LOGPROB_COVERAGE: f64 = 0.95;
 
-/// Build likert mapping from a narrow-win value.
-/// A=1.0, B=narrow_win, C=0.5, D=1.0-narrow_win, E=0.0.
-fn likert_mapping(narrow_win: f64) -> [f64; 5] {
-    [1.0, narrow_win, 0.5, 1.0 - narrow_win, 0.0]
-}
-
-/// The 5 likert letters in order.
+/// The 5 likert letters in order (A clear win … E clear loss).
 const LIKERT_LETTERS: [char; 5] = ['A', 'B', 'C', 'D', 'E'];
+
+/// One-hot category distribution for a single chosen letter index.
+fn one_hot(idx: usize) -> [f64; 5] {
+    let mut v = [0.0; 5];
+    v[idx] = 1.0;
+    v
+}
 
 /// A single top-logprob entry from the OpenAI response.
 #[derive(Debug, Deserialize)]
@@ -38,20 +36,21 @@ pub struct LogprobContent {
 
 /// Result of parsing a comparison response.
 pub struct ParseResult {
-    /// P(item1 wins), 0.0 to 1.0. None if extraction failed.
-    pub item1_win_probability: Option<f64>,
+    /// Categorical verdict distribution `[P(A),P(B),P(C),P(D),P(E)]` from item1's
+    /// perspective. None if extraction failed.
+    pub category_probs: Option<[f64; 5]>,
 }
 
 fn letter_to_index(c: char) -> Option<usize> {
     LIKERT_LETTERS.iter().position(|&l| l == c.to_ascii_uppercase())
 }
 
-/// Extract likert choice probabilities from logprobs.
-///
-/// Returns (choice_probs, expected_p1) or (None, None) if extraction fails.
-fn extract_likert_probabilities(logprobs: &[LogprobContent], mapping: &[f64; 5], min_logprob_coverage: f64) -> (Option<[f64; 5]>, Option<f64>) {
+/// Extract the judge's categorical verdict distribution `[P(A)..P(E)]` from
+/// logprobs. Returns None if extraction fails or the A-E mass is below the
+/// coverage threshold.
+fn extract_likert_probabilities(logprobs: &[LogprobContent], min_logprob_coverage: f64) -> Option<[f64; 5]> {
     if logprobs.is_empty() {
-        return (None, None);
+        return None;
     }
 
     let tokens: Vec<&str> = logprobs.iter().map(|lp| lp.token.as_str()).collect();
@@ -102,7 +101,7 @@ fn extract_likert_probabilities(logprobs: &[LogprobContent], mapping: &[f64; 5],
 
         let top_logprobs = match &logprobs[i].top_logprobs {
             Some(tlps) if !tlps.is_empty() => tlps,
-            _ => return (None, None),
+            _ => return None,
         };
 
         let mut choice_probs = [0.0_f64; 5];
@@ -118,44 +117,35 @@ fn extract_likert_probabilities(logprobs: &[LogprobContent], mapping: &[f64; 5],
 
         let prob_sum: f64 = choice_probs.iter().sum();
         if prob_sum >= min_logprob_coverage {
-            // Normalize
+            // Normalize into a proper distribution over A-E.
             for p in &mut choice_probs {
                 *p /= prob_sum;
             }
-            let expected_p1: f64 = choice_probs
-                .iter()
-                .zip(mapping.iter())
-                .map(|(p, m)| p * m)
-                .sum();
-            return (Some(choice_probs), Some(expected_p1));
+            return Some(choice_probs);
         } else {
-            // Logprobs don't cover enough of the A-E space — fall through to text
-            return (None, None);
+            // Logprobs don't cover enough of the A-E space — parse fails.
+            return None;
         }
     }
 
-    (None, None)
+    None
 }
 
-/// Parse a comparison response into a win probability.
+/// Parse a comparison response into the judge's categorical verdict distribution.
 ///
 /// Logprobs only — no text fallback. Returns None if logprob extraction fails.
-pub fn parse_response(logprobs: &[LogprobContent], narrow_win: f64, min_logprob_coverage: f64) -> ParseResult {
-    let mapping = likert_mapping(narrow_win);
-    let (_, expected_p1) = extract_likert_probabilities(logprobs, &mapping, min_logprob_coverage);
-
+pub fn parse_response(logprobs: &[LogprobContent], min_logprob_coverage: f64) -> ParseResult {
     ParseResult {
-        item1_win_probability: expected_p1,
+        category_probs: extract_likert_probabilities(logprobs, min_logprob_coverage),
     }
 }
 
 /// Parse a verdict letter from response text (for --no-logprobs mode).
 ///
-/// Finds the last "Verdict [A-E]" in the text and maps the letter to a
-/// win probability using the likert scale. Uses the last occurrence to
-/// handle cases where "verdict" appears in the analysis before the final verdict.
-pub fn parse_response_text(text: &str, narrow_win: f64) -> ParseResult {
-    let mapping = likert_mapping(narrow_win);
+/// Finds the last "Verdict [A-E]" in the text and returns a one-hot distribution
+/// over the five categories. Uses the last occurrence to handle cases where
+/// "verdict" appears in the analysis before the final verdict.
+pub fn parse_response_text(text: &str) -> ParseResult {
     // Use ASCII lowercase so byte offsets stay aligned with the original text —
     // we need that alignment below to check the original character's case.
     let lower = text.to_ascii_lowercase();
@@ -184,7 +174,7 @@ pub fn parse_response_text(text: &str, narrow_win: f64) -> ParseResult {
                         if is_lower_a && !saw_colon {
                             break;
                         }
-                        result = Some(mapping[idx]);
+                        result = Some(idx);
                     }
                     break;
                 }
@@ -194,7 +184,7 @@ pub fn parse_response_text(text: &str, narrow_win: f64) -> ParseResult {
     }
 
     ParseResult {
-        item1_win_probability: result,
+        category_probs: result.map(one_hot),
     }
 }
 
@@ -239,15 +229,11 @@ mod tests {
             },
         ];
 
-        let mapping = likert_mapping(DEFAULT_NARROW_WIN);
-        let (choice_probs, expected_p1) = extract_likert_probabilities(&logprobs, &mapping, DEFAULT_MIN_LOGPROB_COVERAGE);
-        assert!(choice_probs.is_some(), "choice_probs should be Some");
-        assert!(expected_p1.is_some(), "expected_p1 should be Some");
-
-        let p1 = expected_p1.unwrap();
-        // B is dominant (0.8 mapping), so expected_p1 should be close to 0.8
-        assert!(p1 > 0.7, "expected_p1 {p1} should be > 0.7");
-        assert!(p1 < 0.9, "expected_p1 {p1} should be < 0.9");
+        let probs = extract_likert_probabilities(&logprobs, DEFAULT_MIN_LOGPROB_COVERAGE)
+            .expect("distribution should be Some");
+        // B dominates, so P(B) (index 1) should carry almost all the mass.
+        assert!(probs[1] > 0.9, "P(B) {} should be > 0.9", probs[1]);
+        assert!((probs.iter().sum::<f64>() - 1.0).abs() < 1e-9, "distribution should normalize");
     }
 
     #[test]
@@ -277,10 +263,9 @@ mod tests {
             },
         ];
 
-        let result = parse_response(&logprobs, DEFAULT_NARROW_WIN, DEFAULT_MIN_LOGPROB_COVERAGE);
-        assert!(result.item1_win_probability.is_some());
-        let p = result.item1_win_probability.unwrap();
-        assert!(p > 0.7);
+        let probs = parse_response(&logprobs, DEFAULT_MIN_LOGPROB_COVERAGE).category_probs
+            .expect("should parse");
+        assert!(probs[1] > probs[0], "B should outweigh A");
     }
 
     #[test]
@@ -310,10 +295,9 @@ mod tests {
             },
         ];
 
-        let result = parse_response(&logprobs, DEFAULT_NARROW_WIN, DEFAULT_MIN_LOGPROB_COVERAGE);
-        assert!(result.item1_win_probability.is_some(), "should find the final Verdict B:");
-        let p = result.item1_win_probability.unwrap();
-        assert!(p > 0.7, "B is narrow win for option 1, expected_p1 {p} should be > 0.7");
+        let probs = parse_response(&logprobs, DEFAULT_MIN_LOGPROB_COVERAGE).category_probs
+            .expect("should find the final Verdict B:");
+        assert!(probs[1] > probs[0], "B at the final marker should dominate A");
     }
 
     #[test]
@@ -332,33 +316,16 @@ mod tests {
         ];
 
         // 0.96 coverage clears the 0.95 threshold.
-        let result = parse_response(&logprobs, DEFAULT_NARROW_WIN, 0.95);
-        assert!(result.item1_win_probability.is_some());
+        assert!(parse_response(&logprobs, 0.95).category_probs.is_some());
 
         // ...but not a stricter 0.99 threshold.
-        let result = parse_response(&logprobs, DEFAULT_NARROW_WIN, 0.99);
-        assert!(result.item1_win_probability.is_none());
+        assert!(parse_response(&logprobs, 0.99).category_probs.is_none());
     }
 
     #[test]
     fn test_parse_response_no_logprobs_returns_none() {
-        let result = parse_response(&[], DEFAULT_NARROW_WIN, DEFAULT_MIN_LOGPROB_COVERAGE);
-        assert!(result.item1_win_probability.is_none());
-    }
-
-    #[test]
-    fn test_parse_response_unparseable() {
-        let result = parse_response(&[], DEFAULT_NARROW_WIN, DEFAULT_MIN_LOGPROB_COVERAGE);
-        assert!(result.item1_win_probability.is_none());
-    }
-
-    #[test]
-    fn test_custom_narrow_win_no_logprobs_returns_none() {
-        let result = parse_response(&[], 0.7, DEFAULT_MIN_LOGPROB_COVERAGE);
-        assert!(result.item1_win_probability.is_none());
-
-        let result = parse_response(&[], 0.7, DEFAULT_MIN_LOGPROB_COVERAGE);
-        assert!(result.item1_win_probability.is_none());
+        let result = parse_response(&[], DEFAULT_MIN_LOGPROB_COVERAGE);
+        assert!(result.category_probs.is_none());
     }
 
     // --- Text-based parsing tests (--no-logprobs mode) ---
@@ -366,101 +333,85 @@ mod tests {
     #[test]
     fn test_text_parse_verdict_b() {
         let text = "Some analysis.\n\nVerdict B: Option 1, marginally";
-        let result = parse_response_text(text, DEFAULT_NARROW_WIN);
-        assert_eq!(result.item1_win_probability, Some(0.8));
+        assert_eq!(parse_response_text(text).category_probs, Some(one_hot(1)));
     }
 
     #[test]
     fn test_text_parse_verdict_a() {
         let text = "Analysis here.\n\nVerdict A: Option 1, clearly";
-        let result = parse_response_text(text, DEFAULT_NARROW_WIN);
-        assert_eq!(result.item1_win_probability, Some(1.0));
+        assert_eq!(parse_response_text(text).category_probs, Some(one_hot(0)));
     }
 
     #[test]
     fn test_text_parse_verdict_e() {
         let text = "Analysis here.\n\nVerdict E: Option 2, clearly";
-        let result = parse_response_text(text, DEFAULT_NARROW_WIN);
-        assert_eq!(result.item1_win_probability, Some(0.0));
+        assert_eq!(parse_response_text(text).category_probs, Some(one_hot(4)));
     }
 
     #[test]
     fn test_text_parse_verdict_c_draw() {
         let text = "Analysis here.\n\nVerdict C: Too close to call";
-        let result = parse_response_text(text, DEFAULT_NARROW_WIN);
-        assert_eq!(result.item1_win_probability, Some(0.5));
+        assert_eq!(parse_response_text(text).category_probs, Some(one_hot(2)));
     }
 
     #[test]
-    fn test_text_parse_verdict_d_with_custom_narrow_win() {
+    fn test_text_parse_verdict_d() {
         let text = "Analysis.\n\nVerdict D: Option 2, marginally";
-        let result = parse_response_text(text, 0.7);
-        let p = result.item1_win_probability.unwrap();
-        assert!((p - 0.3).abs() < 1e-10, "expected ~0.3, got {p}"); // 1.0 - 0.7
+        assert_eq!(parse_response_text(text).category_probs, Some(one_hot(3)));
     }
 
     #[test]
     fn test_text_parse_verdict_with_colon_separator() {
         let text = "Analysis.\n\nVerdict: B: Option 1, marginally";
-        let result = parse_response_text(text, DEFAULT_NARROW_WIN);
-        assert_eq!(result.item1_win_probability, Some(0.8));
+        assert_eq!(parse_response_text(text).category_probs, Some(one_hot(1)));
     }
 
     #[test]
     fn test_text_parse_uses_last_verdict() {
         // "verdict" appears in the analysis, but we want the final one
         let text = "The verdict on flavor is mixed.\n\nVerdict D: Option 2, marginally";
-        let result = parse_response_text(text, DEFAULT_NARROW_WIN);
-        let p = result.item1_win_probability.unwrap();
-        assert!((p - 0.2).abs() < 1e-10, "expected ~0.2, got {p}");
+        assert_eq!(parse_response_text(text).category_probs, Some(one_hot(3)));
     }
 
     #[test]
     fn test_text_parse_no_verdict_returns_none() {
         let text = "Some analysis without a final answer.";
-        let result = parse_response_text(text, DEFAULT_NARROW_WIN);
-        assert!(result.item1_win_probability.is_none());
+        assert!(parse_response_text(text).category_probs.is_none());
     }
 
     #[test]
     fn test_text_parse_case_insensitive() {
         let text = "Analysis.\n\nVERDICT B: Option 1, marginally";
-        let result = parse_response_text(text, DEFAULT_NARROW_WIN);
-        assert_eq!(result.item1_win_probability, Some(0.8));
+        assert_eq!(parse_response_text(text).category_probs, Some(one_hot(1)));
     }
 
     #[test]
     fn test_text_parse_lowercase_verdict_letter() {
         let text = "Analysis.\n\nVerdict b: Option 1, marginally";
-        let result = parse_response_text(text, DEFAULT_NARROW_WIN);
-        assert_eq!(result.item1_win_probability, Some(0.8));
+        assert_eq!(parse_response_text(text).category_probs, Some(one_hot(1)));
     }
 
     #[test]
     fn test_text_parse_bold_wrapped_verdict() {
         let text = "Analysis.\n\n**Verdict E**";
-        let result = parse_response_text(text, DEFAULT_NARROW_WIN);
-        assert_eq!(result.item1_win_probability, Some(0.0));
+        assert_eq!(parse_response_text(text).category_probs, Some(one_hot(4)));
     }
 
     #[test]
     fn test_text_parse_bold_verdict_with_colon() {
         let text = "Analysis.\n\n**Verdict B:** Option 1, marginally";
-        let result = parse_response_text(text, DEFAULT_NARROW_WIN);
-        assert_eq!(result.item1_win_probability, Some(0.8));
+        assert_eq!(parse_response_text(text).category_probs, Some(one_hot(1)));
     }
 
     #[test]
     fn test_text_parse_bold_only_keyword() {
         let text = "Analysis.\n\n**Verdict** A";
-        let result = parse_response_text(text, DEFAULT_NARROW_WIN);
-        assert_eq!(result.item1_win_probability, Some(1.0));
+        assert_eq!(parse_response_text(text).category_probs, Some(one_hot(0)));
     }
 
     #[test]
     fn test_text_parse_heading_verdict() {
         let text = "Analysis.\n\n## Verdict D: Option 2, marginally";
-        let result = parse_response_text(text, DEFAULT_NARROW_WIN);
-        assert_eq!(result.item1_win_probability, Some(1.0 - DEFAULT_NARROW_WIN));
+        assert_eq!(parse_response_text(text).category_probs, Some(one_hot(3)));
     }
 }

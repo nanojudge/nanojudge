@@ -168,8 +168,6 @@ pub async fn run(args: RankArgs) {
     // Compute normalized weights for pair assignment
     let total_weight: f64 = judges.iter().map(|j| j.weight).sum();
     let normalized_weights: Vec<f64> = judges.iter().map(|j| j.weight / total_weight).collect();
-    // Per-judge narrow_win values
-    let judge_narrow_wins: Vec<f64> = judges.iter().map(|j| j.narrow_win).collect();
     // Per-judge min_logprob_coverage values
     let judge_min_logprob_coverages: Vec<f64> = judges.iter().map(|j| j.min_logprob_coverage).collect();
 
@@ -368,7 +366,6 @@ pub async fn run(args: RankArgs) {
             let template = prompt_template.clone();
             let id_a = *id_a;
             let id_b = *id_b;
-            let narrow_win = judge_narrow_wins[judge_idx];
             let min_logprob_coverage = judge_min_logprob_coverages[judge_idx];
             let assigned_judge_id = judge_ids[judge_idx];
             let judge_name = judge_display_names[judge_idx].clone();
@@ -387,7 +384,6 @@ pub async fn run(args: RankArgs) {
                     &titles[id_b as usize],
                     id_a,
                     id_b,
-                    narrow_win,
                     min_logprob_coverage,
                     &analysis_length,
                     max_retries,
@@ -436,13 +432,13 @@ pub async fn run(args: RankArgs) {
                         judge_stats[judge_idx].input_tokens += usage.prompt_tokens;
                         judge_stats[judge_idx].output_tokens += usage.completion_tokens;
                     }
-                    if let Some(p) = result.parse_result.item1_win_probability {
+                    if let Some(category_probs) = result.parse_result.category_probs {
                         if let Some(ref file_mutex) = save_file {
                             let line = serde_json::json!({
                                 "round": round + 1,
                                 "item1": titles[result.item1_id as usize],
                                 "item2": titles[result.item2_id as usize],
-                                "probability": p,
+                                "category_probs": category_probs,
                                 "judge_model": judge_models[judge_idx],
                                 "judge_endpoint": judge_endpoints[judge_idx],
                                 "response": result.response_text,
@@ -455,7 +451,7 @@ pub async fn run(args: RankArgs) {
                         round_results.push(ComparisonInput {
                             item1: result.item1_id,
                             item2: result.item2_id,
-                            item1_win_probability: p,
+                            category_probs,
                             judge_id: assigned_judge_id,
                         });
                     } else {

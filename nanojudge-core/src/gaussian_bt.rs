@@ -1,24 +1,109 @@
-/// Gaussian Bradley-Terry MCMC sampler with multi-judge support.
+/// Ordinal (cumulative-link) Bradley-Terry MCMC sampler with per-judge cutpoints.
 ///
-/// Uses logit(P) as direct observation of strength difference.
-/// Metropolis-Hastings within Gibbs sampling for posterior inference.
+/// Each comparison is an ordinal verdict on a 5-point scale
+/// (A=clear win, B=narrow win, C=draw, D=narrow loss, E=clear loss), supplied by
+/// the caller as a per-bucket probability distribution `category_probs`. A judge's
+/// full categorical distribution (logprobs mode) or a one-hot vector (text mode) is
+/// used directly as a soft observation — nothing is bucketed away. The latent gap is
+/// `Δ = θ_i − θ_j`, and each judge owns four free cutpoints `c₁<c₂<c₃<c₄` that
+/// slice that axis into the five categories:
 ///
-/// Two modes:
-/// - **Logprobs mode**: Per-judge decisiveness D_k and positional bias γ_k.
-/// - **No-logprobs mode**: Per-judge positional bias γ_k only, no D_k.
+/// ```text
+/// P(E) = σ(c₁ − Δ)
+/// P(D) = σ(c₂ − Δ) − σ(c₁ − Δ)
+/// P(C) = σ(c₃ − Δ) − σ(c₂ − Δ)
+/// P(B) = σ(c₄ − Δ) − σ(c₃ − Δ)
+/// P(A) = 1 − σ(c₄ − Δ)
+/// ```
 ///
-/// Internal module — operates on pre-mapped `usize` indices, not caller IDs.
+/// The *center* of a judge's cutpoints absorbs positional bias (no separate bias
+/// term); the *spacing* absorbs decisiveness and narrow-vs-clear scale usage. See
+/// `benchmark/ORDINAL_MODEL_V2.md`.
+///
+/// Metropolis-Hastings within Gibbs sampling. Internal module — operates on
+/// pre-mapped `usize` indices, not caller IDs.
 use std::collections::HashMap;
 use rand::Rng;
 
 use crate::types::{IndexedComparison, JudgeInfo, RankedItem, ScoringOptions};
 
-/// Internal representation of a comparison in logit space.
-struct LogitComparison {
+/// Numerically stable `log(sigmoid(x))`.
+fn log_sigmoid(x: f64) -> f64 {
+    if x > 0.0 {
+        -((-x).exp().ln_1p())
+    } else {
+        x - x.exp().ln_1p()
+    }
+}
+
+/// Numerically stable `log(1 − exp(−x))` for `x > 0` (Mächler's log1mexp).
+fn log1mexp(x: f64) -> f64 {
+    if x <= 0.0 {
+        f64::NEG_INFINITY
+    } else if x < std::f64::consts::LN_2 {
+        (-(-x).exp_m1()).ln()
+    } else {
+        (-(-x).exp()).ln_1p()
+    }
+}
+
+/// Ordinal verdict on the 5-point scale, from item1's perspective.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Verdict {
+    A, // clear win
+    B, // narrow win
+    C, // draw
+    D, // narrow loss
+    E, // clear loss
+}
+
+/// The five categories in fixed order, indexing `category_probs`.
+const VERDICTS: [Verdict; 5] = [Verdict::A, Verdict::B, Verdict::C, Verdict::D, Verdict::E];
+
+/// Soft log-likelihood of a categorical verdict distribution `probs`
+/// (`[P(A),P(B),P(C),P(D),P(E)]`) given the latent gap and cutpoints. This is the
+/// expected per-category log-probability `Σ_k probs[k]·log P(category k)`, so the
+/// judge's full distribution informs the fit with nothing thrown away.
+fn dist_loglik(probs: &[f64; 5], delta: f64, c1: f64, c2: f64, c3: f64, c4: f64) -> f64 {
+    let mut ll = 0.0;
+    for (k, &w) in probs.iter().enumerate() {
+        if w > 0.0 {
+            ll += w * log_prob_verdict(VERDICTS[k], delta, c1, c2, c3, c4);
+        }
+    }
+    ll
+}
+
+/// log P(observed verdict) given the latent gap `delta` and four ordered
+/// cutpoints. Differences of sigmoids are expanded via
+/// `log(σ(a)−σ(b)) = logσ(a) + logσ(−b) + log1mexp(a−b)` to stay stable.
+fn log_prob_verdict(v: Verdict, delta: f64, c1: f64, c2: f64, c3: f64, c4: f64) -> f64 {
+    match v {
+        Verdict::A => log_sigmoid(delta - c4),
+        Verdict::B => log_sigmoid(c4 - delta) + log_sigmoid(delta - c3) + log1mexp(c4 - c3),
+        Verdict::C => log_sigmoid(c3 - delta) + log_sigmoid(delta - c2) + log1mexp(c3 - c2),
+        Verdict::D => log_sigmoid(c2 - delta) + log_sigmoid(delta - c1) + log1mexp(c2 - c1),
+        Verdict::E => log_sigmoid(c1 - delta),
+    }
+}
+
+// Model constants for the per-judge cutpoint gaps. Cutpoints are parameterized as
+// a center `m` plus three positive gaps in log-space:
+//   g1 = c2−c1 (narrow-loss band), g2 = c3−c2 (draw width), g3 = c4−c3 (narrow-win band).
+// Log-normal priors: g1,g3 median 1, g2 median 2 (weakly informative).
+const LG1_PRIOR_MEAN: f64 = 0.0;
+const LG2_PRIOR_MEAN: f64 = std::f64::consts::LN_2;
+const LG3_PRIOR_MEAN: f64 = 0.0;
+const LG_PRIOR_SD: f64 = 1.0;
+const GAP_PROPOSAL_STD: f64 = 0.15;
+
+/// Internal representation of a comparison: a categorical verdict distribution
+/// from a judge, `[P(A),P(B),P(C),P(D),P(E)]` from item1's perspective.
+struct Comparison {
     idx1: usize,
     idx2: usize,
-    logit_y: f64,
-    /// Internal judge index (into biases/decisiveness vecs).
+    probs: [f64; 5],
+    /// Internal judge index (into the per-judge parameter vecs).
     judge_idx: usize,
 }
 
@@ -27,57 +112,50 @@ pub struct SamplesResult {
     pub sorted_samples: Vec<Vec<f64>>,
     pub means: Vec<f64>,
     pub top_k_probs: Option<Vec<f64>>,
-    /// Per-judge bias samples in logit space. Outer vec indexed by judge.
+    /// Per-judge positional-bias samples in logit space. Outer vec indexed by judge.
     pub bias_logit_samples: Vec<Vec<f64>>,
-    /// Per-judge bias means in logit space.
+    /// Per-judge positional-bias means in logit space.
     pub bias_logit_means: Vec<f64>,
-    /// Per-judge decisiveness samples in log space (ln(D_k)). Empty vecs in no-logprobs mode.
+    /// Unused in the ordinal model (kept for API stability). Always empty.
     pub log_decisiveness_samples: Vec<Vec<f64>>,
-    /// Per-judge decisiveness means in log space. Empty in no-logprobs mode.
+    /// Unused in the ordinal model (kept for API stability). Always empty.
     pub log_decisiveness_means: Vec<f64>,
     /// Number of comparisons per judge.
     pub comparisons_per_judge: Vec<usize>,
 }
 
 pub struct GaussianBT {
-    /// Number of real items (excluding ghost).
+    /// Number of items.
     num_items: usize,
-    /// Ghost player index.
-    ghost_idx: usize,
-    /// Comparisons in logit space (raw, not de-biased).
-    comparisons: Vec<LogitComparison>,
+    /// Comparisons (ordinal verdicts).
+    comparisons: Vec<Comparison>,
     /// Adjacency list: item_idx -> indices into `comparisons`.
     item_comparisons: Vec<Vec<usize>>,
     /// Current log-strengths (theta values).
     log_strengths: Vec<f64>,
-    /// Regularization strength for ghost player.
+    /// Strength regularization: quadratic shrinkage toward 0 (`-0.5·reg·θ²`).
     regularization_strength: f64,
-    /// Number of real (non-ghost) comparisons.
-    num_real_comparisons: usize,
 
     /// Number of judges.
     num_judges: usize,
-    /// Whether we're in logprobs mode (with decisiveness).
-    logprobs_mode: bool,
-    /// Per-judge positional bias (logit space). Length = num_judges.
-    biases: Vec<f64>,
-    /// Per-judge log-decisiveness (ln(D_k)). Empty in no-logprobs mode.
-    decisiveness: Vec<f64>,
-    /// Number of comparisons per judge (real only, not ghost).
+    /// Per-judge cutpoint center (replaces the old positional bias term).
+    center: Vec<f64>,
+    /// Per-judge log-gaps (c2−c1, c3−c2, c4−c3).
+    lg1: Vec<f64>,
+    lg2: Vec<f64>,
+    lg3: Vec<f64>,
+    /// Number of comparisons per judge.
     comparisons_per_judge: Vec<usize>,
 
-    /// Prior mean for positional bias (logit space).
-    bias_prior_mu: f64,
+    /// Prior on the cutpoint center (logit space).
+    center_prior_mu: f64,
 
     // Hyperparameters (fixed)
     prior_mu: f64,
     prior_tau2: f64,
-    sigma2: f64,
     proposal_std: f64,
-    bias_prior_tau2: f64,
-    bias_proposal_std: f64,
-    decisiveness_prior_tau2: f64,
-    decisiveness_proposal_std: f64,
+    center_prior_tau2: f64,
+    center_proposal_std: f64,
 }
 
 impl GaussianBT {
@@ -87,29 +165,22 @@ impl GaussianBT {
         options: &ScoringOptions,
         judge_info: &JudgeInfo,
     ) -> Self {
-        let ghost_idx = num_items;
-        let total = num_items + 1;
         let prior_mu = 0.0;
         let num_judges = judge_info.judge_ids.len();
 
-        // Build comparisons — store raw logits, bias is estimated jointly
         let mut comparisons = Vec::new();
-        let mut item_comparisons: Vec<Vec<usize>> = (0..total).map(|_| Vec::new()).collect();
+        let mut item_comparisons: Vec<Vec<usize>> = (0..num_items).map(|_| Vec::new()).collect();
         let mut comparisons_per_judge = vec![0usize; num_judges];
 
-        for &(idx1, idx2, prob, judge_idx) in results {
+        for &(idx1, idx2, probs, judge_idx) in results {
             assert!(idx1 < num_items, "item1 index {} out of range (num_items = {})", idx1, num_items);
             assert!(idx2 < num_items, "item2 index {} out of range (num_items = {})", idx2, num_items);
 
-            // Clamp to avoid infinity — raw logit, no de-biasing
-            let clamped_p = prob.clamp(0.001, 0.999);
-            let logit_y = (clamped_p / (1.0 - clamped_p)).ln();
-
             let comp_idx = comparisons.len();
-            comparisons.push(LogitComparison {
+            comparisons.push(Comparison {
                 idx1,
                 idx2,
-                logit_y,
+                probs,
                 judge_idx,
             });
             item_comparisons[idx1].push(comp_idx);
@@ -117,95 +188,57 @@ impl GaussianBT {
             comparisons_per_judge[judge_idx] += 1;
         }
 
-        let num_real_comparisons = comparisons.len();
-
-        // Ghost regularization comparisons — use judge_idx 0 but it doesn't matter
-        // because ghost comparisons are exempt from judge parameters
-        if options.regularization_strength > 0.0 {
-            for i in 0..num_items {
-                let comp_idx = comparisons.len();
-                comparisons.push(LogitComparison {
-                    idx1: i,
-                    idx2: ghost_idx,
-                    logit_y: 0.0,
-                    judge_idx: 0, // unused for ghost
-                });
-                item_comparisons[i].push(comp_idx);
-                item_comparisons[ghost_idx].push(comp_idx);
-            }
-        }
-
-        // Initialize per-judge parameters
-        let biases = vec![options.bias_prior_logit; num_judges];
-        let decisiveness = if judge_info.logprobs_mode {
-            vec![0.0; num_judges] // ln(1.0) = 0.0
-        } else {
-            Vec::new()
-        };
-
         GaussianBT {
             num_items,
-            ghost_idx,
             comparisons,
             item_comparisons,
-            log_strengths: vec![prior_mu; total],
+            log_strengths: vec![prior_mu; num_items],
             regularization_strength: options.regularization_strength,
-            num_real_comparisons,
             num_judges,
-            logprobs_mode: judge_info.logprobs_mode,
-            biases,
-            decisiveness,
+            center: vec![options.bias_prior_logit; num_judges],
+            lg1: vec![LG1_PRIOR_MEAN; num_judges], // g1 = 1.0
+            lg2: vec![LG2_PRIOR_MEAN; num_judges], // g2 = 2.0
+            lg3: vec![LG3_PRIOR_MEAN; num_judges], // g3 = 1.0
             comparisons_per_judge,
-            bias_prior_mu: options.bias_prior_logit,
+            center_prior_mu: options.bias_prior_logit,
             prior_mu,
             prior_tau2: options.prior_tau2,
-            sigma2: options.sigma2,
             proposal_std: options.proposal_std,
-            bias_prior_tau2: options.bias_prior_tau2,
-            bias_proposal_std: options.bias_proposal_std,
-            decisiveness_prior_tau2: options.decisiveness_prior_tau2,
-            decisiveness_proposal_std: options.decisiveness_proposal_std,
+            center_prior_tau2: options.bias_prior_tau2,
+            center_proposal_std: options.bias_proposal_std,
         }
     }
 
-    /// Compute the predicted logit value using a hypothetical strength for one item.
-    fn predicted_logit_with_strength(&self, comp: &LogitComparison, is_ghost: bool, item_idx: usize, log_strength: f64) -> f64 {
-        let strength_diff = if comp.idx1 == item_idx {
-            log_strength - self.log_strengths[comp.idx2]
-        } else {
-            self.log_strengths[comp.idx1] - log_strength
-        };
+    /// Build the four ordered cutpoints from a center and three log-gaps. The
+    /// cutpoints are placed so their mean equals `center`.
+    fn cutpoints_from(center: f64, lg1: f64, lg2: f64, lg3: f64) -> (f64, f64, f64, f64) {
+        let g1 = lg1.exp();
+        let g2 = lg2.exp();
+        let g3 = lg3.exp();
+        let c1 = center - (3.0 * g1 + 2.0 * g2 + g3) / 4.0;
+        let c2 = c1 + g1;
+        let c3 = c2 + g2;
+        let c4 = c3 + g3;
+        (c1, c2, c3, c4)
+    }
 
-        if is_ghost {
-            strength_diff
-        } else if self.logprobs_mode {
-            let d_k = self.decisiveness[comp.judge_idx].exp();
-            let gamma_k = self.biases[comp.judge_idx];
-            d_k * strength_diff + gamma_k
-        } else {
-            let gamma_k = self.biases[comp.judge_idx];
-            strength_diff + gamma_k
-        }
+    fn cutpoints(&self, j: usize) -> (f64, f64, f64, f64) {
+        Self::cutpoints_from(self.center[j], self.lg1[j], self.lg2[j], self.lg3[j])
     }
 
     fn log_posterior(&self, item_idx: usize, log_strength: f64) -> f64 {
+        // Strength prior N(0, prior_tau2) plus quadratic shrinkage regularization.
         let prior_diff = log_strength - self.prior_mu;
-        let mut log_prob = -0.5 * prior_diff * prior_diff / self.prior_tau2;
+        let mut log_prob = -0.5 * prior_diff * prior_diff / self.prior_tau2
+            - 0.5 * self.regularization_strength * log_strength * log_strength;
 
         for &comp_idx in &self.item_comparisons[item_idx] {
             let comp = &self.comparisons[comp_idx];
-            let is_ghost = comp.idx1 == self.ghost_idx || comp.idx2 == self.ghost_idx;
-
-            let predicted = self.predicted_logit_with_strength(comp, is_ghost, item_idx, log_strength);
-            let residual = comp.logit_y - predicted;
-
-            let effective_sigma2 = if is_ghost {
-                self.sigma2 / self.regularization_strength
-            } else {
-                self.sigma2
-            };
-
-            log_prob += -0.5 * residual * residual / effective_sigma2;
+            let s1 = if comp.idx1 == item_idx { log_strength } else { self.log_strengths[comp.idx1] };
+            let s2 = if comp.idx2 == item_idx { log_strength } else { self.log_strengths[comp.idx2] };
+            let delta = s1 - s2;
+            let (c1, c2, c3, c4) = self.cutpoints(comp.judge_idx);
+            log_prob += dist_loglik(&comp.probs, delta, c1, c2, c3, c4);
         }
 
         log_prob
@@ -223,117 +256,81 @@ impl GaussianBT {
         }
     }
 
-    /// Log-posterior for a judge's positional bias parameter.
-    /// Iterates over real comparisons only (not ghost).
-    fn log_posterior_bias(&self, judge_idx: usize, bias: f64) -> f64 {
-        let bias_diff = bias - self.bias_prior_mu;
-        let mut log_prob = -0.5 * bias_diff * bias_diff / self.bias_prior_tau2;
-
-        for comp in &self.comparisons[..self.num_real_comparisons] {
+    /// Judge log-likelihood for given cutpoints (built from center + log-gaps).
+    fn judge_loglik(&self, judge_idx: usize, center: f64, lg1: f64, lg2: f64, lg3: f64) -> f64 {
+        let (c1, c2, c3, c4) = Self::cutpoints_from(center, lg1, lg2, lg3);
+        let mut ll = 0.0;
+        for comp in &self.comparisons {
             if comp.judge_idx != judge_idx {
                 continue;
             }
-
-            let strength_diff = self.log_strengths[comp.idx1] - self.log_strengths[comp.idx2];
-            let predicted = if self.logprobs_mode {
-                let d_k = self.decisiveness[judge_idx].exp();
-                d_k * strength_diff + bias
-            } else {
-                strength_diff + bias
-            };
-            let residual = comp.logit_y - predicted;
-            log_prob += -0.5 * residual * residual / self.sigma2;
+            let delta = self.log_strengths[comp.idx1] - self.log_strengths[comp.idx2];
+            ll += dist_loglik(&comp.probs, delta, c1, c2, c3, c4);
         }
-
-        log_prob
+        ll
     }
 
-    fn update_bias(&mut self, judge_idx: usize, rng: &mut impl Rng) {
-        let current = self.biases[judge_idx];
-        let proposed = current + (rng.random::<f64>() - 0.5) * 2.0 * self.bias_proposal_std;
-
-        let log_post_current = self.log_posterior_bias(judge_idx, current);
-        let log_post_proposed = self.log_posterior_bias(judge_idx, proposed);
-
-        if rng.random::<f64>().ln() < (log_post_proposed - log_post_current) {
-            self.biases[judge_idx] = proposed;
-        }
+    fn center_log_prior(&self, center: f64) -> f64 {
+        let diff = center - self.center_prior_mu;
+        -0.5 * diff * diff / self.center_prior_tau2
     }
 
-    /// Log-posterior for a judge's log-decisiveness parameter (logprobs mode only).
-    fn log_posterior_decisiveness(&self, judge_idx: usize, log_d: f64) -> f64 {
-        // Prior: N(0, decisiveness_prior_tau2) in log space
-        let mut log_prob = -0.5 * log_d * log_d / self.decisiveness_prior_tau2;
-
-        let d_k = log_d.exp();
-
-        for comp in &self.comparisons[..self.num_real_comparisons] {
-            if comp.judge_idx != judge_idx {
-                continue;
-            }
-
-            let strength_diff = self.log_strengths[comp.idx1] - self.log_strengths[comp.idx2];
-            let predicted = d_k * strength_diff + self.biases[judge_idx];
-            let residual = comp.logit_y - predicted;
-            log_prob += -0.5 * residual * residual / self.sigma2;
-        }
-
-        log_prob
+    fn gaps_log_prior(lg1: f64, lg2: f64, lg3: f64) -> f64 {
+        let a = (lg1 - LG1_PRIOR_MEAN) / LG_PRIOR_SD;
+        let b = (lg2 - LG2_PRIOR_MEAN) / LG_PRIOR_SD;
+        let c = (lg3 - LG3_PRIOR_MEAN) / LG_PRIOR_SD;
+        -0.5 * (a * a + b * b + c * c)
     }
 
-    fn update_decisiveness(&mut self, judge_idx: usize, rng: &mut impl Rng) {
-        let current = self.decisiveness[judge_idx];
-        let proposed = current + (rng.random::<f64>() - 0.5) * 2.0 * self.decisiveness_proposal_std;
+    fn update_center(&mut self, judge_idx: usize, rng: &mut impl Rng) {
+        let current = self.center[judge_idx];
+        let proposed = current + (rng.random::<f64>() - 0.5) * 2.0 * self.center_proposal_std;
+        let (lg1, lg2, lg3) = (self.lg1[judge_idx], self.lg2[judge_idx], self.lg3[judge_idx]);
 
-        let log_post_current = self.log_posterior_decisiveness(judge_idx, current);
-        let log_post_proposed = self.log_posterior_decisiveness(judge_idx, proposed);
+        let lp_current = self.center_log_prior(current) + self.judge_loglik(judge_idx, current, lg1, lg2, lg3);
+        let lp_proposed = self.center_log_prior(proposed) + self.judge_loglik(judge_idx, proposed, lg1, lg2, lg3);
 
-        if rng.random::<f64>().ln() < (log_post_proposed - log_post_current) {
-            self.decisiveness[judge_idx] = proposed;
+        if rng.random::<f64>().ln() < (lp_proposed - lp_current) {
+            self.center[judge_idx] = proposed;
         }
     }
 
-    /// Normalize decisiveness: subtract mean of ln(D_k) values to enforce ∏ D_k = 1.
-    fn normalize_decisiveness(&mut self) {
-        if self.decisiveness.is_empty() {
-            return;
-        }
-        let mean = self.decisiveness.iter().sum::<f64>() / self.decisiveness.len() as f64;
-        for val in &mut self.decisiveness {
-            *val -= mean;
+    fn update_gaps(&mut self, judge_idx: usize, rng: &mut impl Rng) {
+        let m = self.center[judge_idx];
+        let (c1, c2, c3) = (self.lg1[judge_idx], self.lg2[judge_idx], self.lg3[judge_idx]);
+        let p1 = c1 + (rng.random::<f64>() - 0.5) * 2.0 * GAP_PROPOSAL_STD;
+        let p2 = c2 + (rng.random::<f64>() - 0.5) * 2.0 * GAP_PROPOSAL_STD;
+        let p3 = c3 + (rng.random::<f64>() - 0.5) * 2.0 * GAP_PROPOSAL_STD;
+
+        let lp_current = Self::gaps_log_prior(c1, c2, c3) + self.judge_loglik(judge_idx, m, c1, c2, c3);
+        let lp_proposed = Self::gaps_log_prior(p1, p2, p3) + self.judge_loglik(judge_idx, m, p1, p2, p3);
+
+        if rng.random::<f64>().ln() < (lp_proposed - lp_current) {
+            self.lg1[judge_idx] = p1;
+            self.lg2[judge_idx] = p2;
+            self.lg3[judge_idx] = p3;
         }
     }
 
     fn normalize_log_strengths(&mut self) {
-        // Ghost is a fixed anchor at 0 — exclude it from the mean and leave it untouched.
-        let mean = self.log_strengths[..self.num_items].iter().sum::<f64>() / self.num_items as f64;
-        for val in &mut self.log_strengths[..self.num_items] {
+        // Center strengths at mean 0 for identifiability.
+        let mean = self.log_strengths.iter().sum::<f64>() / self.num_items as f64;
+        for val in &mut self.log_strengths {
             *val -= mean;
         }
-        self.log_strengths[self.ghost_idx] = 0.0;
     }
 
     fn gibbs_iteration(&mut self, rng: &mut impl Rng) {
-        // Step 1: Update each item's log-strength (ghost is a fixed anchor, skip it)
+        // Step 1: Update each item's log-strength.
         for i in 0..self.num_items {
             self.update_strength(i, rng);
         }
 
-        // Step 2: Update each judge's positional bias
+        // Step 2: Update each judge's cutpoints (center, then the three gaps).
         for k in 0..self.num_judges {
-            self.update_bias(k, rng);
+            self.update_center(k, rng);
+            self.update_gaps(k, rng);
         }
-
-        // Step 3 (logprobs mode only): Update each judge's decisiveness
-        if self.logprobs_mode {
-            for k in 0..self.num_judges {
-                self.update_decisiveness(k, rng);
-            }
-            // Step 4: Normalize decisiveness (geometric mean anchor)
-            self.normalize_decisiveness();
-        }
-
-        // Step 5: Normalize log-strengths (done by collect_samples after each iteration)
     }
 
     /// Run MCMC sampling loop and collect results. Shared by cold-start and warm-start paths.
@@ -351,11 +348,6 @@ impl GaussianBT {
 
         let mut samples_per_item: Vec<Vec<f64>> = (0..n).map(|_| Vec::with_capacity(iterations)).collect();
         let mut bias_samples: Vec<Vec<f64>> = (0..k).map(|_| Vec::with_capacity(iterations)).collect();
-        let mut log_d_samples: Vec<Vec<f64>> = if self.logprobs_mode {
-            (0..k).map(|_| Vec::with_capacity(iterations)).collect()
-        } else {
-            Vec::new()
-        };
 
         for _ in 0..iterations {
             self.gibbs_iteration(rng);
@@ -365,14 +357,11 @@ impl GaussianBT {
                 samples_per_item[idx].push(self.log_strengths[idx]);
             }
 
+            // Positional bias = negated center: center>0 leans toward item2, so
+            // -center as a logit gives P(item1 wins | equal strength) > 0.5 when
+            // the judge favors the first item.
             for j in 0..k {
-                bias_samples[j].push(self.biases[j]);
-            }
-
-            if self.logprobs_mode {
-                for j in 0..k {
-                    log_d_samples[j].push(self.decisiveness[j]);
-                }
+                bias_samples[j].push(-self.center[j]);
             }
 
             if let Some(ref mut counts) = top_k_count {
@@ -396,20 +385,10 @@ impl GaussianBT {
             sorted_samples.push(std::mem::take(samples));
         }
 
-        // Compute per-judge bias means and sort samples
         let mut bias_logit_means = Vec::with_capacity(k);
         for j in 0..k {
             bias_logit_means.push(bias_samples[j].iter().sum::<f64>() / bias_samples[j].len() as f64);
             bias_samples[j].sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-        }
-
-        // Compute per-judge decisiveness means and sort samples (logprobs mode only)
-        let mut log_d_means = Vec::new();
-        if self.logprobs_mode {
-            for j in 0..k {
-                log_d_means.push(log_d_samples[j].iter().sum::<f64>() / log_d_samples[j].len() as f64);
-                log_d_samples[j].sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-            }
         }
 
         SamplesResult {
@@ -418,8 +397,8 @@ impl GaussianBT {
             top_k_probs: top_k_count.map(|c| c.iter().map(|&v| v as f64 / iterations as f64).collect()),
             bias_logit_samples: bias_samples,
             bias_logit_means,
-            log_decisiveness_samples: log_d_samples,
-            log_decisiveness_means: log_d_means,
+            log_decisiveness_samples: Vec::new(),
+            log_decisiveness_means: Vec::new(),
             comparisons_per_judge: self.comparisons_per_judge.clone(),
         }
     }
@@ -446,21 +425,16 @@ impl GaussianBT {
         self.log_strengths[..self.num_items].to_vec()
     }
 
-    /// Get current per-judge biases (keyed by judge_id from the info).
+    /// Get current per-judge cutpoint centers (keyed by judge_id from the info).
     pub fn get_current_biases(&self, judge_info: &JudgeInfo) -> Vec<(u64, f64)> {
         judge_info.judge_ids.iter().enumerate()
-            .map(|(idx, &id)| (id, self.biases[idx]))
+            .map(|(idx, &id)| (id, self.center[idx]))
             .collect()
     }
 
-    /// Get current per-judge log-decisiveness (keyed by judge_id). Empty in no-logprobs mode.
-    pub fn get_current_log_decisiveness(&self, judge_info: &JudgeInfo) -> Vec<(u64, f64)> {
-        if !self.logprobs_mode {
-            return Vec::new();
-        }
-        judge_info.judge_ids.iter().enumerate()
-            .map(|(idx, &id)| (id, self.decisiveness[idx]))
-            .collect()
+    /// Unused in the ordinal model (kept for API stability). Always empty.
+    pub fn get_current_log_decisiveness(&self, _judge_info: &JudgeInfo) -> Vec<(u64, f64)> {
+        Vec::new()
     }
 
     /// Warm-start MCMC returning raw sorted samples.
@@ -468,7 +442,7 @@ impl GaussianBT {
         &mut self,
         previous_strengths: &[f64],
         previous_biases: &[(u64, f64)],
-        previous_log_decisiveness: &[(u64, f64)],
+        _previous_log_decisiveness: &[(u64, f64)],
         judge_id_to_idx: &HashMap<u64, usize>,
         new_iterations: usize,
         burn_in: usize,
@@ -481,21 +455,11 @@ impl GaussianBT {
         for i in 0..n {
             self.log_strengths[i] = previous_strengths[i];
         }
-        self.log_strengths[self.ghost_idx] = 0.0;
 
-        // Restore per-judge biases
-        for &(judge_id, bias) in previous_biases {
+        // Restore per-judge cutpoint centers (gaps re-burn from defaults).
+        for &(judge_id, center) in previous_biases {
             if let Some(&idx) = judge_id_to_idx.get(&judge_id) {
-                self.biases[idx] = bias;
-            }
-        }
-
-        // Restore per-judge decisiveness (logprobs mode only)
-        if self.logprobs_mode {
-            for &(judge_id, log_d) in previous_log_decisiveness {
-                if let Some(&idx) = judge_id_to_idx.get(&judge_id) {
-                    self.decisiveness[idx] = log_d;
-                }
+                self.center[idx] = center;
             }
         }
 
@@ -563,14 +527,24 @@ mod tests {
     fn single_judge_info() -> JudgeInfo {
         JudgeInfo {
             judge_ids: vec![0],
-            logprobs_mode: true,
+            logprobs_mode: false,
         }
+    }
+
+    /// One-hot category distribution for a scalar win probability, mirroring the
+    /// five ordinal buckets. Lets the scalar-based tests express discrete verdicts.
+    fn dist(p: f64) -> [f64; 5] {
+        if p > 0.9 { [1.0, 0.0, 0.0, 0.0, 0.0] }
+        else if p > 0.65 { [0.0, 1.0, 0.0, 0.0, 0.0] }
+        else if p > 0.35 { [0.0, 0.0, 1.0, 0.0, 0.0] }
+        else if p > 0.1 { [0.0, 0.0, 0.0, 1.0, 0.0] }
+        else { [0.0, 0.0, 0.0, 0.0, 1.0] }
     }
 
     /// Returns both position orders for a matchup. In production, the pairing
     /// code's 50/50 coin flip achieves this naturally.
     fn make_pair(i1: usize, i2: usize, prob: f64) -> [IndexedComparison; 2] {
-        [(i1, i2, prob, 0), (i2, i1, 1.0 - prob, 0)]
+        [(i1, i2, dist(prob), 0), (i2, i1, dist(1.0 - prob), 0)]
     }
 
     fn default_options() -> ScoringOptions {
@@ -603,7 +577,7 @@ mod tests {
         let opts = default_options();
         let ji = single_judge_info();
         let mut mcmc = GaussianBT::new(3, &results, &opts, &ji);
-        let samples = mcmc.calculate_with_samples(500, 200, 0);
+        let samples = mcmc.calculate_with_samples(20000, 500, 0);
         let ranked = GaussianBT::compute_confidence_intervals_from_sorted_samples(
             &samples.sorted_samples, &samples.means, 0.95,
         );
@@ -653,7 +627,6 @@ mod tests {
 
         let probs = result.top_k_probs.unwrap();
         assert_eq!(probs.len(), 4);
-        // Item 0 (strongest) should have highest P(top 2)
         assert!(probs[0] > probs[3], "Item 0 should have higher P(top K) than item 3");
     }
 
@@ -674,69 +647,16 @@ mod tests {
     }
 
     #[test]
-    fn test_no_logprobs_mode() {
-        let results: Vec<IndexedComparison> = [
-            make_pair(0, 1, 0.9),
-            make_pair(0, 2, 0.8),
-            make_pair(1, 2, 0.7),
-        ].into_iter().flatten().collect();
-
-        let opts = default_options();
-        let ji = JudgeInfo {
-            judge_ids: vec![0],
-            logprobs_mode: false,
-        };
-        let mut mcmc = GaussianBT::new(3, &results, &opts, &ji);
-        let samples = mcmc.calculate_with_samples(2000, 200, 0);
-        let ranked = GaussianBT::compute_confidence_intervals_from_sorted_samples(
-            &samples.sorted_samples, &samples.means, 0.95,
-        );
-
-        assert_eq!(ranked[0].item, 0);
-        assert_eq!(ranked[2].item, 2);
-        assert!(mcmc.decisiveness.is_empty());
-    }
-
-    #[test]
-    fn test_multi_judge_logprobs() {
-        // Two judges, judge 0 is more decisive (wider logprob gaps)
+    fn test_multi_judge() {
         let mut results: Vec<IndexedComparison> = Vec::new();
-        // Judge 0: strong opinions
-        results.push((0, 1, 0.95, 0));
-        results.push((1, 0, 0.05, 0));
-        results.push((0, 2, 0.90, 0));
-        results.push((2, 0, 0.10, 0));
-        // Judge 1: weaker opinions (same direction)
-        results.push((0, 1, 0.70, 1));
-        results.push((1, 0, 0.30, 1));
-        results.push((1, 2, 0.65, 1));
-        results.push((2, 1, 0.35, 1));
-
-        let opts = default_options();
-        let ji = JudgeInfo {
-            judge_ids: vec![100, 200],
-            logprobs_mode: true,
-        };
-        let mut mcmc = GaussianBT::new(3, &results, &opts, &ji);
-        let result = mcmc.calculate_with_samples(500, 200, 0);
-
-        assert_eq!(result.means.len(), 3);
-        assert_eq!(result.bias_logit_means.len(), 2);
-        assert_eq!(result.log_decisiveness_means.len(), 2);
-        assert_eq!(result.comparisons_per_judge.len(), 2);
-    }
-
-    #[test]
-    fn test_multi_judge_no_logprobs() {
-        let mut results: Vec<IndexedComparison> = Vec::new();
-        results.push((0, 1, 0.80, 0));
-        results.push((1, 0, 0.20, 0));
-        results.push((0, 1, 0.75, 1));
-        results.push((1, 0, 0.25, 1));
-        results.push((1, 2, 0.70, 0));
-        results.push((2, 1, 0.30, 0));
-        results.push((1, 2, 0.65, 1));
-        results.push((2, 1, 0.35, 1));
+        results.push((0, 1, dist(0.80), 0));
+        results.push((1, 0, dist(0.20), 0));
+        results.push((0, 1, dist(0.75), 1));
+        results.push((1, 0, dist(0.25), 1));
+        results.push((1, 2, dist(0.70), 0));
+        results.push((2, 1, dist(0.30), 0));
+        results.push((1, 2, dist(0.65), 1));
+        results.push((2, 1, dist(0.35), 1));
 
         let opts = default_options();
         let ji = JudgeInfo {
@@ -749,25 +669,6 @@ mod tests {
         assert_eq!(result.means.len(), 3);
         assert_eq!(result.bias_logit_means.len(), 2);
         assert!(result.log_decisiveness_means.is_empty());
-        assert!(result.log_decisiveness_samples.is_empty());
-    }
-
-    #[test]
-    fn test_single_judge_backward_compat() {
-        // Single judge in logprobs mode should force D_1 = 1.0 (ln(D_1) = 0.0)
-        let results: Vec<IndexedComparison> = [
-            make_pair(0, 1, 0.9),
-            make_pair(1, 2, 0.7),
-        ].into_iter().flatten().collect();
-
-        let opts = default_options();
-        let ji = single_judge_info();
-        let mut mcmc = GaussianBT::new(3, &results, &opts, &ji);
-        let result = mcmc.calculate_with_samples(200, 100, 0);
-
-        // With a single judge, geometric mean normalization forces ln(D) = 0 → D = 1.0
-        assert_eq!(result.log_decisiveness_means.len(), 1);
-        assert!((result.log_decisiveness_means[0]).abs() < 0.01,
-            "Single judge decisiveness should be ~0.0 in log space, got {}", result.log_decisiveness_means[0]);
+        assert_eq!(result.comparisons_per_judge.len(), 2);
     }
 }

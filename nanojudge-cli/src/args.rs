@@ -47,11 +47,6 @@ pub struct ConfigArgs {
     #[arg(long)]
     pub concurrency: Option<usize>,
 
-    /// Win probability assigned to a "narrow win" verdict (B or D on the likert scale).
-    /// Must be > 0.5 and < 1.0. Default: 0.8. "Clear win" (A/E) is always 1.0/0.0.
-    #[arg(long)]
-    pub narrow_win: Option<f64>,
-
     /// Minimum fraction of A-E probability mass the top-logprobs must cover for a
     /// logprob-based verdict to be trusted. Must be > 0.0 and <= 1.0. Default: 0.95.
     #[arg(long)]

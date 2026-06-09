@@ -43,7 +43,6 @@ pub async fn run_benchmark(
     display_name: &str,
     num_pairs: usize,
     concurrency: usize,
-    narrow_win: f64,
     min_logprob_coverage: f64,
     template: &str,
 ) {
@@ -121,7 +120,7 @@ pub async fn run_benchmark(
         let handle = tokio::spawn(async move {
             let _permit = sem.acquire().await.unwrap();
             let start = Instant::now();
-            let result = send_comparison_request(&client, &config, &prompt, narrow_win, min_logprob_coverage).await;
+            let result = send_comparison_request(&client, &config, &prompt, min_logprob_coverage).await;
             let latency = start.elapsed().as_secs_f64();
 
             let single = match result {
@@ -135,16 +134,14 @@ pub async fn run_benchmark(
                         prompt_tokens,
                         completion_tokens,
                         response_len_chars: content.len(),
-                        verdict_letter: parse_result.item1_win_probability.and_then(|p: f64| {
-                            // Map probability back to verdict letter index
-                            if (p - 1.0).abs() < 0.01 { Some(0) }      // A
-                            else if (p - narrow_win).abs() < 0.01 { Some(1) }  // B
-                            else if (p - 0.5).abs() < 0.01 { Some(2) }  // C
-                            else if (p - (1.0 - narrow_win)).abs() < 0.01 { Some(3) }  // D
-                            else if p.abs() < 0.01 { Some(4) }          // E
-                            else { None } // logprob-derived, not a clean letter
+                        verdict_letter: parse_result.category_probs.map(|probs| {
+                            // The judge's verdict is the highest-weight category (A=0 … E=4).
+                            probs.iter().enumerate()
+                                .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
+                                .map(|(i, _)| i)
+                                .unwrap()
                         }),
-                        parseable: parse_result.item1_win_probability.is_some(),
+                        parseable: parse_result.category_probs.is_some(),
                         http_error: false,
                         prompt_text: prompt,
                         response_text: content,
