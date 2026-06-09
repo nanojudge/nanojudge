@@ -4,7 +4,7 @@ NanoJudge quantifies the relative strengths of arbitrary items under a criterion
 
 Instead of overwhelming an LLM with one massive prompt, NanoJudge breaks the task down into a series of head-to-head matchups. Operating like an intelligent matchmaking league, it adaptively pairs items of similar strength against each other as the results come in to efficiently produce an accurate leaderboard. These individual wins and losses are fed into an Elo-style rating system, producing a transparent ranking, all backed by AI explanations.
 
-Works with any OpenAI-compatible API endpoint — local vLLM, OpenAI, Anthropic, etc.
+Works with any OpenAI-compatible API endpoint.
 
 [nanojudge.ai](https://nanojudge.ai) is a hosted version built on this engine, wrapped in a web UI with managed GPU infrastructure.
 
