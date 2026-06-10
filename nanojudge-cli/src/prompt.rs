@@ -22,7 +22,7 @@ Write a $length analysis. You MUST end your response with one of these lines ver
 
 Verdict A: Option 1, clearly
 Verdict B: Option 1, marginally
-Verdict C: Too close to call
+Verdict C: Draw
 Verdict D: Option 2, marginally
 Verdict E: Option 2, clearly
 ";
@@ -41,7 +41,7 @@ Respond with one of these lines verbatim:
 
 Verdict A: Option 1, clearly
 Verdict B: Option 1, marginally
-Verdict C: Too close to call
+Verdict C: Draw
 Verdict D: Option 2, marginally
 Verdict E: Option 2, clearly
 ";

@@ -382,7 +382,7 @@ mod tests {
 
     #[test]
     fn test_text_parse_verdict_c_draw() {
-        let text = "Analysis here.\n\nVerdict C: Too close to call";
+        let text = "Analysis here.\n\nVerdict C: Draw";
         assert_eq!(parse_response_text(text).category_probs, Some(one_hot(2)));
     }
 
