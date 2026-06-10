@@ -37,7 +37,7 @@ Option 2:
 $option2
 
 Instructions:
-Respond with one of these lines verbatim:
+Respond only with one of these lines verbatim:
 
 Verdict A: Option 1, clearly
 Verdict B: Option 1, marginally
@@ -200,7 +200,7 @@ mod tests {
         let prompt = build_prompt(DEFAULT_TEMPLATE_NO_REASONING, "Which is tastier?", "Pizza", "Sushi", "pizza", "sushi", "ignored");
         assert!(prompt.contains("Option 1:\nPizza"));
         assert!(prompt.contains("Option 2:\nSushi"));
-        assert!(prompt.contains("Respond with one of these lines verbatim:"));
+        assert!(prompt.contains("Respond only with one of these lines verbatim:"));
         assert!(!prompt.contains("analysis"));
     }
 }
