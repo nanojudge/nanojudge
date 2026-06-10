@@ -171,7 +171,13 @@ pub fn resolve_judges(
             });
 
         let api_key = if let Some(ref env_name) = jc.api_key_env {
-            std::env::var(env_name).ok()
+            match std::env::var(env_name) {
+                Ok(key) => Some(key),
+                Err(_) => bail(format!(
+                    "Judge {}: api_key_env = \"{}\" but that environment variable is not set.",
+                    jc.model, env_name
+                )),
+            }
         } else {
             cli_api_key.clone()
         };

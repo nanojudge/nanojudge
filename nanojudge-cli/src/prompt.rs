@@ -81,16 +81,38 @@ pub fn load_template(path: &std::path::Path, reasoning_enabled: bool) -> String 
 }
 
 /// Build a comparison prompt by substituting variables into a template.
+///
+/// Single-pass substitution: only variables in the TEMPLATE are replaced.
+/// Substituted values are never rescanned, so item text containing literal
+/// `$option2`, `$length`, etc. (common when ranking code) passes through
+/// untouched instead of being recursively substituted.
 pub fn build_prompt(template: &str, criterion: &str, option1: &str, option2: &str, name1: &str, name2: &str, analysis_length: &str) -> String {
     // Trim trailing "s" from length descriptor for grammar ("3-5 paragraph" not "3-5 paragraphs")
     let length = analysis_length.trim_end_matches('s');
-    template
-        .replace("$criterion", criterion)
-        .replace("$option1", option1)
-        .replace("$option2", option2)
-        .replace("$name1", name1)
-        .replace("$name2", name2)
-        .replace("$length", length)
+    let vars: [(&str, &str); 6] = [
+        ("$criterion", criterion),
+        ("$option1", option1),
+        ("$option2", option2),
+        ("$name1", name1),
+        ("$name2", name2),
+        ("$length", length),
+    ];
+
+    let mut out = String::with_capacity(template.len() + option1.len() + option2.len());
+    let mut rest = template;
+    while let Some(pos) = rest.find('$') {
+        out.push_str(&rest[..pos]);
+        let tail = &rest[pos..];
+        if let Some((var, value)) = vars.iter().find(|(v, _)| tail.starts_with(v)) {
+            out.push_str(value);
+            rest = &tail[var.len()..];
+        } else {
+            out.push('$');
+            rest = &tail[1..];
+        }
+    }
+    out.push_str(rest);
+    out
 }
 
 #[cfg(test)]
@@ -119,6 +141,32 @@ mod tests {
         let template = "Compare $option1 vs $option2 for $criterion. Be $length.";
         let prompt = build_prompt(template, "taste", "Pizza", "Sushi", "pizza", "sushi", "brief");
         assert_eq!(prompt, "Compare Pizza vs Sushi for taste. Be brief.");
+    }
+
+    #[test]
+    fn test_build_prompt_item_text_with_variable_tokens_passes_through() {
+        // Item text containing template-variable tokens (common when ranking
+        // code) must stay literal — not get recursively substituted.
+        let template = "$criterion\n1: $option1\n2: $option2\nBe $length.";
+        let prompt = build_prompt(
+            template,
+            "Which script is cleaner?",
+            "echo $option2 and $length",
+            "print('hi')",
+            "", "",
+            "brief",
+        );
+        assert_eq!(
+            prompt,
+            "Which script is cleaner?\n1: echo $option2 and $length\n2: print('hi')\nBe brief."
+        );
+    }
+
+    #[test]
+    fn test_build_prompt_unknown_dollar_token_kept() {
+        let template = "$criterion costs $5 or $unknown\n$option1 vs $option2 ($length)";
+        let prompt = build_prompt(template, "Cheaper?", "A", "B", "", "", "brief");
+        assert_eq!(prompt, "Cheaper? costs $5 or $unknown\nA vs B (brief)");
     }
 
     #[test]
