@@ -280,12 +280,12 @@ mod tests {
             strategy: Strategy::Balanced,
             matchmaking_sharpness: 1.0,
             min_games_before_strategy: 3,
-            number_of_rounds: Some(114),
+            number_of_rounds: Some(342),
         };
 
         let mut engine = RankingEngine::new(&item_ids, config);
 
-        for round in 0..114 {
+        for round in 0..342 {
             let pairs = engine.generate_pairs_for_round(round);
             let results: Vec<ComparisonInput> = pairs.iter()
                 .map(|(a, b)| make_input(*a, *b, 0.5))
@@ -294,7 +294,7 @@ mod tests {
         }
 
         let total_comparisons: usize = engine.games_played.iter().sum::<usize>() / 2;
-        assert_eq!(total_comparisons, 1140);
+        assert_eq!(total_comparisons, 3420);
 
         for i in 0..engine.num_items() {
             let games = engine.games_played[i];

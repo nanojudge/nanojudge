@@ -179,6 +179,10 @@ mod tests {
         opts.bias_prior_logit = (0.8_f64 / 0.2).ln(); // bias_prior = 0.8
         opts.iterations = 5000;
         opts.burn_in = 1000;
+        // With no likelihood, the center chain samples the prior alone. The
+        // production proposal step (0.15) mixes that wide prior too slowly for
+        // a stable 5000-sample mean; use a step matched to the prior scale.
+        opts.bias_proposal_std = 1.0;
 
         let ji = single_judge_info();
         let result = run_scoring(&[1, 2], &[], &opts, &ji);
@@ -192,20 +196,26 @@ mod tests {
     #[test]
     fn test_cold_start_scoring() {
         let item_ids = vec![100, 200, 300];
+        // Clear wins for item 100 (0.95 -> category A) and enough samples that
+        // the posterior-mean ordering is stable run to run.
         let comparisons: Vec<ComparisonInput> = [
-            make_pair(100, 200, 0.9),
-            make_pair(100, 300, 0.8),
+            make_pair(100, 200, 0.95),
+            make_pair(100, 300, 0.95),
             make_pair(200, 300, 0.7),
         ].into_iter().flatten().collect();
 
+        let mut opts = default_scoring_options();
+        opts.iterations = 2000;
+        opts.burn_in = 300;
+
         let ji = single_judge_info();
-        let result = run_scoring(&item_ids, &comparisons, &default_scoring_options(), &ji);
+        let result = run_scoring(&item_ids, &comparisons, &opts, &ji);
 
         assert_eq!(result.rankings.len(), 3);
         assert_eq!(result.rankings[0].item, 100);
         assert!(result.top_k_probs.is_none());
         assert_eq!(result.warm_start_state.item_strengths.len(), 3);
-        assert_eq!(result.sample_size, 200);
+        assert_eq!(result.sample_size, 2000);
         assert_eq!(result.judge_analytics.len(), 1);
         assert_eq!(result.judge_analytics[0].judge_id, 42);
     }

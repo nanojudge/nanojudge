@@ -184,7 +184,7 @@ pub async fn send_comparison_request(
     if !resp.status().is_success() {
         let status = resp.status();
         let body = resp.text().await.unwrap_or_default();
-        return Err(format!("LLM API returned {status}: {}", &body[..body.len().min(500)]));
+        return Err(format!("LLM API returned {status}: {}", truncate_for_log(&body, 500)));
     }
 
     let data: ChatCompletionResponse = resp
