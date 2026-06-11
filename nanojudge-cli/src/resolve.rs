@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 
 use nanojudge_core::{ComparisonDistribution, stable_hash};
 
-use crate::args::ConfigArgs;
+use crate::args::{ConfigArgs, OutputFormat};
 use crate::bail;
 use crate::config;
 use crate::parse;
@@ -57,7 +57,7 @@ pub struct ResolvedConfig {
     pub bias_proposal_std: f64,
     pub live_top: Option<usize>,
     pub save_comparisons: Option<PathBuf>,
-    pub json: bool,
+    pub output_format: OutputFormat,
     pub verbose: bool,
     pub save_failures: Option<PathBuf>,
 }
@@ -298,7 +298,7 @@ pub fn resolve_config(shared: &ConfigArgs, cfg: &config::NanojudgeConfig) -> Res
         (c @ Some(_), None) => c,
         (None, f) => f,
     };
-    let json = merge_opt(shared.json, cfg.json, "json").unwrap_or(false);
+    let output_format = merge_opt(shared.output_format, cfg.output_format, "output-format").unwrap_or(OutputFormat::Table);
     let verbose = merge_opt(shared.verbose, cfg.verbose, "verbose").unwrap_or(false);
     let save_failures = match (shared.save_failures.clone(), cfg.save_failures.clone()) {
         (Some(c), Some(f)) => {
@@ -369,7 +369,7 @@ pub fn resolve_config(shared: &ConfigArgs, cfg: &config::NanojudgeConfig) -> Res
         bias_proposal_std,
         live_top,
         save_comparisons,
-        json,
+        output_format,
         verbose,
         save_failures,
     }
@@ -407,7 +407,7 @@ mod tests {
             bias_proposal_std: None,
             live_top: None,
             save_comparisons: None,
-            json: None,
+            output_format: None,
             verbose: None,
             save_failures: None,
         }

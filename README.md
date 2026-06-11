@@ -99,7 +99,7 @@ Output with criterion "Which of these fruits is healthiest?":
 20 | starfruit     | -4.4602 |      -5.00 |       -3.85 |          13 | 12
 ```
 
-Add `--json` for machine-readable output. Add `-v` for progress during execution.
+Add `--output-format json` for machine-readable output. Add `-v` for progress during execution.
 
 ### Saving comparisons for inspection
 

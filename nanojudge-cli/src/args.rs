@@ -1,7 +1,24 @@
-use clap::Parser;
+use clap::{Parser, ValueEnum};
 use std::path::PathBuf;
 
 use crate::DEFAULT_BENCHMARK_PAIRS;
+
+/// Output format for the final ranking results.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum OutputFormat {
+    Table,
+    Json,
+}
+
+impl std::fmt::Display for OutputFormat {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            OutputFormat::Table => write!(f, "table"),
+            OutputFormat::Json => write!(f, "json"),
+        }
+    }
+}
 
 #[derive(Parser)]
 #[command(name = "nanojudge", version, about = "Rank items using LLM pairwise comparisons")]
@@ -136,9 +153,9 @@ pub struct ConfigArgs {
     #[arg(long, num_args = 0..=1, default_missing_value = ".")]
     pub save_comparisons: Option<PathBuf>,
 
-    /// Output JSON instead of table.
-    #[arg(long, num_args = 0..=1, default_missing_value = "true")]
-    pub json: Option<bool>,
+    /// Output format for final results: "table" or "json". Default: table.
+    #[arg(long, value_enum)]
+    pub output_format: Option<OutputFormat>,
 
     /// Show progress during execution.
     #[arg(short, long, num_args = 0..=1, default_missing_value = "true")]

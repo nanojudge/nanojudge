@@ -11,7 +11,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use crate::args::RankArgs;
+use crate::args::{OutputFormat, RankArgs};
 use crate::bail;
 use crate::config;
 use crate::items::load_items;
@@ -669,10 +669,9 @@ pub async fn run(args: RankArgs) {
         })
         .collect();
 
-    if resolved.json {
-        output::print_json(&scoring_result.rankings, &titles, rounds, total_comparisons, &scoring_result.judge_analytics);
-    } else {
-        output::print_table(
+    match resolved.output_format {
+        OutputFormat::Json => output::print_json(&scoring_result.rankings, &titles, rounds, total_comparisons, &scoring_result.judge_analytics),
+        OutputFormat::Table => output::print_table(
             &scoring_result.rankings,
             &titles,
             &engine.games_played,
@@ -683,7 +682,7 @@ pub async fn run(args: RankArgs) {
             &judge_names,
             &judge_tokens,
             &judge_avg_wall_time,
-        );
+        ),
     }
 }
 

@@ -5,6 +5,7 @@
 use serde::Deserialize;
 use std::path::{Path, PathBuf};
 
+use crate::args::OutputFormat;
 use crate::bail;
 
 /// Per-judge configuration from a [[judge]] TOML block.
@@ -55,7 +56,7 @@ pub struct NanojudgeConfig {
     pub min_logprob_coverage: Option<f64>,
     pub live_top: Option<usize>,
     pub save_comparisons: Option<PathBuf>,
-    pub json: Option<bool>,
+    pub output_format: Option<OutputFormat>,
     pub verbose: Option<bool>,
     pub save_failures: Option<PathBuf>,
     /// Judge panel configuration. At least one [[judge]] block is required.
@@ -120,8 +121,8 @@ const DEFAULT_CONFIG_TEMPLATE: &str = "\
 # Omit or comment out to disable.
 # save_comparisons = \".\"
 
-# Output JSON instead of table.
-# json = false
+# Output format for final results: \"table\" or \"json\".
+# output_format = \"table\"
 
 # Show progress during execution.
 # verbose = false
