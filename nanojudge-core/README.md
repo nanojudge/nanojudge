@@ -37,13 +37,13 @@ for r in &result.rankings {
 For iterative ranking (compare, score, pick next pairs, repeat):
 
 ```rust
-use nanojudge_core::{RankingEngine, EngineConfig, Strategy, ComparisonInput, run_scoring, ScoringOptions};
+use nanojudge_core::{RankingEngine, EngineConfig, ComparisonDistribution, ComparisonInput, run_scoring, ScoringOptions};
 
 let item_ids: Vec<i64> = vec![10, 20, 30, 40];
 let config = EngineConfig {
-    strategy: Strategy::TopHeavy,
+    comparison_distribution: ComparisonDistribution::TopHeavy,
     matchmaking_sharpness: 1.0,
-    min_games_before_strategy: 3,
+    min_uniform_games: 3,
     number_of_rounds: Some(20),
 };
 
@@ -92,21 +92,21 @@ for round in 0..20 {
 |---|---|
 | `scoring` | `run_scoring()` — unified MCMC wrapper, the main entry point |
 | `engine` | `RankingEngine` — multi-round orchestrator with smart pair selection |
-| `pairing` | Balanced and top-heavy pairing strategies |
+| `pairing` | Uniform and top-heavy comparison distributions |
 | `gaussian_bt` | Bayesian MCMC sampler (Metropolis-Hastings within Gibbs) |
 | `bradley_terry` | Fast iterative MLE for quick rating updates between rounds |
 | `types` | `ComparisonInput`, `ScoringOptions`, `ScoringResult`, `RankedItem` |
 
-## Pairing strategies
+## Comparison distributions
 
-**Balanced**: Every item gets equal comparison time. Good when you care about the full ranking.
+**Uniform**: Every item gets equal comparison time. Good when you care about the full ranking.
 
-**Top-heavy**: Focuses comparisons on items most likely to be in the top K. Bottom items get the bootstrap minimum while top contenders get 10-50x more. Good for large lists where you mainly care about finding the best items.
+**Top-heavy**: Focuses comparisons on items most likely to be in the top K. Bottom items get the warm-up minimum while top contenders get 10-50x more. Good for large lists where you mainly care about finding the best items.
 
 The engine handles three stages automatically:
-1. **Bootstrap** (first few rounds): balanced pairing until every item has minimum games
-2. **Main phase**: your chosen strategy
-3. **Smoothing** (last round): reverts to balanced so every item gets fresh data
+1. **Warm-up** (first few rounds): uniform pairing until every item has minimum games
+2. **Main phase**: your chosen distribution
+3. **Smoothing** (last round): reverts to uniform so every item gets fresh data
 
 ## Key concepts
 

@@ -37,7 +37,7 @@ pub struct NanojudgeConfig {
     pub prompt_template: Option<String>,
     pub logprobs: Option<bool>,
     pub analysis_length: Option<String>,
-    pub strategy: Option<String>,
+    pub comparison_distribution: Option<String>,
     pub top_k: Option<usize>,
     pub retries: Option<usize>,
     pub confidence_level: Option<f64>,
@@ -46,7 +46,7 @@ pub struct NanojudgeConfig {
     pub mcmc_burn_in: Option<usize>,
     pub bias_prior: Option<f64>,
     pub matchmaking_sharpness: Option<f64>,
-    pub min_games: Option<usize>,
+    pub min_uniform_games: Option<usize>,
     pub prior_tau2: Option<f64>,
     pub proposal_std: Option<f64>,
     pub bias_prior_tau2: Option<f64>,
@@ -96,12 +96,12 @@ const DEFAULT_CONFIG_TEMPLATE: &str = "\
 # Cannot be used with a custom prompt_template.
 # reasoning_enabled = true
 
-# Pairing strategy: \"balanced\" or \"top-heavy\".
-# Balanced gives equal attention to all items. Top-heavy focuses on contenders.
-# strategy = \"balanced\"
+# Comparison distribution: \"uniform\" or \"top-heavy\".
+# Uniform gives equal attention to all items. Top-heavy focuses on contenders.
+# comparison_distribution = \"uniform\"
 
-# How many top positions to track for the top-heavy strategy.
-# Default: sqrt(n) * 3, clamped to n-1. Only used with strategy = \"top-heavy\".
+# How many top positions to track for the top-heavy distribution.
+# Default: sqrt(n) * 3, clamped to n-1. Only used with comparison_distribution = \"top-heavy\".
 # top_k = 10
 
 # Minimum fraction of A-E probability mass the top-logprobs must cover for a
@@ -192,8 +192,8 @@ temperature = 0.7
 # Info-gain exponent for matchmaking. Higher = more exploitation. Default: 1.0.
 # matchmaking_sharpness = 1.0
 
-# Minimum games per item before using top-heavy strategy. Default: 3.
-# min_games = 3
+# Minimum games per item before the top-heavy distribution kicks in. Default: 3.
+# min_uniform_games = 3
 
 # Prior variance on log-strengths. Default: 10.0.
 # prior_tau2 = 10.0
@@ -417,12 +417,12 @@ rounds = 5
 [[judge]]
 endpoint = "http://localhost:8000"
 model = "test"
-strategy = "top-heavy"
+comparison_distribution = "top-heavy"
 "#;
         let result: Result<NanojudgeConfig, _> = toml::from_str(input);
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
-        assert!(err.contains("strategy"), "error should name the bad field: {err}");
+        assert!(err.contains("comparison_distribution"), "error should name the bad field: {err}");
     }
 
     #[test]

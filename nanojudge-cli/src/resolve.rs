@@ -1,7 +1,7 @@
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
-use nanojudge_core::{Strategy, stable_hash};
+use nanojudge_core::{ComparisonDistribution, stable_hash};
 
 use crate::args::ConfigArgs;
 use crate::bail;
@@ -38,7 +38,7 @@ fn merge_opt<T: PartialEq + std::fmt::Display>(
 pub struct ResolvedConfig {
     pub rounds: Option<usize>,
     pub comparisons: Option<usize>,
-    pub strategy: Strategy,
+    pub comparison_distribution: ComparisonDistribution,
     pub top_k: Option<usize>,
     pub retries: usize,
     pub analysis_length: String,
@@ -50,7 +50,7 @@ pub struct ResolvedConfig {
     pub mcmc_burn_in: usize,
     pub bias_prior_logit: f64,
     pub matchmaking_sharpness: f64,
-    pub min_games_before_strategy: usize,
+    pub min_uniform_games: usize,
     pub prior_tau2: f64,
     pub proposal_std: f64,
     pub bias_prior_tau2: f64,
@@ -251,12 +251,12 @@ pub fn resolve_config(shared: &ConfigArgs, cfg: &config::NanojudgeConfig) -> Res
         bail("Specify --rounds or --comparisons, not both.");
     }
 
-    let strategy_str = merge_opt(shared.strategy.clone(), cfg.strategy.clone(), "strategy")
-        .unwrap_or_else(|| "balanced".to_string());
-    let strategy = match strategy_str.as_str() {
-        "balanced" => Strategy::Balanced,
-        "top-heavy" => Strategy::TopHeavy,
-        other => bail(format!("Unknown strategy \"{other}\". Use \"balanced\" or \"top-heavy\".")),
+    let comparison_distribution_str = merge_opt(shared.comparison_distribution.clone(), cfg.comparison_distribution.clone(), "comparison-distribution")
+        .unwrap_or_else(|| "uniform".to_string());
+    let comparison_distribution = match comparison_distribution_str.as_str() {
+        "uniform" => ComparisonDistribution::Uniform,
+        "top-heavy" => ComparisonDistribution::TopHeavy,
+        other => bail(format!("Unknown comparison distribution \"{other}\". Use \"uniform\" or \"top-heavy\".")),
     };
 
     let top_k = merge_opt(shared.top_k, cfg.top_k, "top-k");
@@ -275,7 +275,7 @@ pub fn resolve_config(shared: &ConfigArgs, cfg: &config::NanojudgeConfig) -> Res
         .unwrap_or(500);
     let matchmaking_sharpness = merge_opt(shared.matchmaking_sharpness, cfg.matchmaking_sharpness, "matchmaking-sharpness")
         .unwrap_or(1.0);
-    let min_games_before_strategy = merge_opt(shared.min_games, cfg.min_games, "min-games")
+    let min_uniform_games = merge_opt(shared.min_uniform_games, cfg.min_uniform_games, "min-uniform-games")
         .unwrap_or(3);
     let prior_tau2 = merge_opt(shared.prior_tau2, cfg.prior_tau2, "prior-tau2")
         .unwrap_or(10.0);
@@ -350,7 +350,7 @@ pub fn resolve_config(shared: &ConfigArgs, cfg: &config::NanojudgeConfig) -> Res
     ResolvedConfig {
         rounds,
         comparisons,
-        strategy,
+        comparison_distribution,
         top_k,
         retries,
         analysis_length,
@@ -362,7 +362,7 @@ pub fn resolve_config(shared: &ConfigArgs, cfg: &config::NanojudgeConfig) -> Res
         mcmc_burn_in,
         bias_prior_logit,
         matchmaking_sharpness,
-        min_games_before_strategy,
+        min_uniform_games,
         prior_tau2,
         proposal_std,
         bias_prior_tau2,
@@ -388,7 +388,7 @@ mod tests {
             comparisons: None,
             concurrency: None,
             min_logprob_coverage: None,
-            strategy: None,
+            comparison_distribution: None,
             top_k: None,
             retries: None,
             analysis_length: None,
@@ -400,7 +400,7 @@ mod tests {
             mcmc_burn_in: None,
             bias_prior: None,
             matchmaking_sharpness: None,
-            min_games: None,
+            min_uniform_games: None,
             prior_tau2: None,
             proposal_std: None,
             bias_prior_tau2: None,

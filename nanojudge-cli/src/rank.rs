@@ -1,5 +1,5 @@
 use nanojudge_core::{
-    ComparisonInput, EngineConfig, JudgeInfo, RankingEngine, ScoringOptions, Strategy,
+    ComparisonInput, EngineConfig, JudgeInfo, RankingEngine, ScoringOptions, ComparisonDistribution,
     calculate_pairs_for_round, calculate_rounds_for_target_comparisons,
     calculate_total_expected_comparisons, run_scoring,
 };
@@ -274,10 +274,10 @@ pub async fn run(args: RankArgs) {
         None
     };
 
-    let strategy = resolved.strategy;
+    let comparison_distribution = resolved.comparison_distribution;
 
-    if resolved.top_k.is_some() && matches!(strategy, Strategy::Balanced) {
-        eprintln!("Warning: --top-k has no effect with the balanced strategy. It only applies to --strategy top-heavy.");
+    if resolved.top_k.is_some() && matches!(comparison_distribution, ComparisonDistribution::Uniform) {
+        eprintln!("Warning: --top-k has no effect with the uniform distribution. It only applies to --comparison-distribution top-heavy.");
     }
 
     // Pure heuristic — no empirical basis. Just a guess at how many top
@@ -287,9 +287,9 @@ pub async fn run(args: RankArgs) {
     }).min(texts.len() - 1);
 
     let engine_config = EngineConfig {
-        strategy,
+        comparison_distribution,
         matchmaking_sharpness: resolved.matchmaking_sharpness,
-        min_games_before_strategy: resolved.min_games_before_strategy,
+        min_uniform_games: resolved.min_uniform_games,
         number_of_rounds: Some(rounds),
     };
     let mut engine = RankingEngine::new(&item_ids, engine_config);
@@ -552,7 +552,7 @@ pub async fn run(args: RankArgs) {
         engine.record_results(&round_results);
         engine.update_current_ratings();
 
-        let need_interim = matches!(strategy, Strategy::TopHeavy) || resolved.live_top.is_some();
+        let need_interim = matches!(comparison_distribution, ComparisonDistribution::TopHeavy) || resolved.live_top.is_some();
         if need_interim && !engine.completed_comparisons.is_empty() {
             let interim = run_scoring(
                 &item_ids,
@@ -572,7 +572,7 @@ pub async fn run(args: RankArgs) {
                 },
                 &judge_info,
             );
-            if matches!(strategy, Strategy::TopHeavy) {
+            if matches!(comparison_distribution, ComparisonDistribution::TopHeavy) {
                 engine.mcmc_top_k_probs = interim.top_k_probs;
                 engine.mcmc_sample_means = interim.sample_means;
             }

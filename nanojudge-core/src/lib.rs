@@ -58,8 +58,8 @@ pub use engine::{
     calculate_total_expected_comparisons, EngineConfig, RankingEngine,
 };
 pub use pairing::{
-    calculate_info_gain, generate_balanced_pairings, generate_top_heavy_pairings,
-    get_effective_strategy, Strategy,
+    calculate_info_gain, generate_uniform_pairings, generate_top_heavy_pairings,
+    get_effective_comparison_distribution, ComparisonDistribution,
 };
 pub use scoring::run_scoring;
 pub use types::{

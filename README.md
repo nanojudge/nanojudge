@@ -131,7 +131,7 @@ Key settings:
 |---|---|
 | `rounds` | Number of comparison rounds |
 | `logprobs` | `true` to extract logprobs for continuous confidence (requires endpoint support, e.g. vLLM). `false` for text-based verdict parsing (works everywhere, but needs more rounds). |
-| `strategy` | `"balanced"` (default) or `"top-heavy"` |
+| `comparison_distribution` | `"uniform"` (default) or `"top-heavy"` |
 
 Per-judge settings (in `[[judge]]` blocks):
 
@@ -153,8 +153,8 @@ Per-judge settings (in `[[judge]]` blocks):
 
 2. **Bradley-Terry scoring** — all pairwise probabilities are combined into global scores using Bayesian MCMC inference (Gaussian Bradley-Terry with Metropolis-Hastings sampling). This produces point estimates plus confidence intervals.
 
-3. **Adaptive pairing** — the engine uses the results of previous comparisons to decide what to compare next, maximizing information gain. Two strategies:
-   - **Balanced**: every item gets equal comparison time (good for full rankings)
+3. **Adaptive pairing** — the engine uses the results of previous comparisons to decide what to compare next, maximizing information gain. Two comparison distributions:
+   - **Uniform**: every item gets equal comparison time (good for full rankings)
    - **Top-heavy**: focuses comparisons on top contenders (good for large lists where you mainly want the best items)
 
 4. **Positional bias correction** — LLMs tend to favor whichever option is shown first. The MCMC sampler jointly estimates this bias and corrects for it automatically.

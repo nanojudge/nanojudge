@@ -7,8 +7,8 @@
 use crate::bradley_terry::BradleyTerry;
 use crate::constants::INITIAL_BRADLEY_TERRY_RATING;
 use crate::pairing::{
-    generate_balanced_pairings_indexed, generate_top_heavy_pairings_indexed,
-    get_effective_strategy, Strategy,
+    generate_uniform_pairings_indexed, generate_top_heavy_pairings_indexed,
+    get_effective_comparison_distribution, ComparisonDistribution,
 };
 use crate::types::{ComparisonInput, IdMap, Pair};
 
@@ -24,9 +24,9 @@ fn matchmaking_win_prob(probs: &[f64; 5]) -> f64 {
 #[derive(Debug, Clone)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct EngineConfig {
-    pub strategy: Strategy,
+    pub comparison_distribution: ComparisonDistribution,
     pub matchmaking_sharpness: f64,
-    pub min_games_before_strategy: usize,
+    pub min_uniform_games: usize,
     pub number_of_rounds: Option<usize>,
 }
 
@@ -50,7 +50,7 @@ pub struct RankingEngine {
 
     /// MCMC data for top-heavy pairing (indexed 0..num_items, same order as item_ids).
     /// Caller MUST set these before calling `generate_pairs_for_round()` when using
-    /// TopHeavy strategy. The engine will panic if missing.
+    /// the TopHeavy distribution. The engine will panic if missing.
     pub mcmc_sample_means: Option<Vec<f64>>,
     pub mcmc_top_k_probs: Option<Vec<f64>>,
 
@@ -87,17 +87,17 @@ impl RankingEngine {
         let num_items = self.id_map.len();
         let pairs_count = calculate_pairs_for_round(num_items);
 
-        let effective_strategy = get_effective_strategy(
-            self.config.strategy,
+        let effective_comparison_distribution = get_effective_comparison_distribution(
+            self.config.comparison_distribution,
             num_items,
             &self.games_played,
             self.current_round_number,
-            self.config.min_games_before_strategy,
+            self.config.min_uniform_games,
             self.config.number_of_rounds,
         );
 
-        let index_pairs = match effective_strategy {
-            Strategy::Balanced => generate_balanced_pairings_indexed(
+        let index_pairs = match effective_comparison_distribution {
+            ComparisonDistribution::Uniform => generate_uniform_pairings_indexed(
                 num_items,
                 pairs_count,
                 &self.current_ratings,
@@ -105,11 +105,11 @@ impl RankingEngine {
                 &self.first_position_count,
                 &self.games_played,
             ),
-            Strategy::TopHeavy => {
+            ComparisonDistribution::TopHeavy => {
                 let top_k_probs = self.mcmc_top_k_probs.as_ref()
-                    .expect("TopHeavy strategy requires mcmc_top_k_probs to be set before generating pairs");
+                    .expect("TopHeavy distribution requires mcmc_top_k_probs to be set before generating pairs");
                 let sample_means = self.mcmc_sample_means.as_ref()
-                    .expect("TopHeavy strategy requires mcmc_sample_means to be set before generating pairs");
+                    .expect("TopHeavy distribution requires mcmc_sample_means to be set before generating pairs");
 
                 generate_top_heavy_pairings_indexed(
                     num_items,
@@ -230,9 +230,9 @@ mod tests {
     fn test_engine_basic_workflow() {
         let item_ids = vec![10, 20, 30, 40];
         let config = EngineConfig {
-            strategy: Strategy::Balanced,
+            comparison_distribution: ComparisonDistribution::Uniform,
             matchmaking_sharpness: 1.0,
-            min_games_before_strategy: 3,
+            min_uniform_games: 3,
             number_of_rounds: Some(5),
         };
 
@@ -261,9 +261,9 @@ mod tests {
     #[should_panic(expected = "at least two items")]
     fn test_engine_requires_two_items() {
         let config = EngineConfig {
-            strategy: Strategy::Balanced,
+            comparison_distribution: ComparisonDistribution::Uniform,
             matchmaking_sharpness: 1.0,
-            min_games_before_strategy: 3,
+            min_uniform_games: 3,
             number_of_rounds: None,
         };
         let _ = RankingEngine::new(&[1], config);
@@ -277,9 +277,9 @@ mod tests {
         // that would degrade balancing (e.g. accidentally stop tracking).
         let item_ids: Vec<i64> = (1..=20).collect();
         let config = EngineConfig {
-            strategy: Strategy::Balanced,
+            comparison_distribution: ComparisonDistribution::Uniform,
             matchmaking_sharpness: 1.0,
-            min_games_before_strategy: 3,
+            min_uniform_games: 3,
             number_of_rounds: Some(342),
         };
 
@@ -310,9 +310,9 @@ mod tests {
     #[should_panic(expected = "Duplicate item ID")]
     fn test_engine_rejects_duplicate_ids() {
         let config = EngineConfig {
-            strategy: Strategy::Balanced,
+            comparison_distribution: ComparisonDistribution::Uniform,
             matchmaking_sharpness: 1.0,
-            min_games_before_strategy: 3,
+            min_uniform_games: 3,
             number_of_rounds: None,
         };
         let _ = RankingEngine::new(&[1, 2, 1], config);

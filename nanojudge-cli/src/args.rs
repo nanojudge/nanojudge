@@ -52,12 +52,12 @@ pub struct ConfigArgs {
     #[arg(long)]
     pub min_logprob_coverage: Option<f64>,
 
-    /// Pairing strategy: "balanced" or "top-heavy"
+    /// Comparison distribution: "uniform" or "top-heavy"
     #[arg(long)]
-    pub strategy: Option<String>,
+    pub comparison_distribution: Option<String>,
 
-    /// How many top positions to track for the top-heavy strategy.
-    /// Default: sqrt(n) * 3, clamped to n-1. Only used with --strategy top-heavy.
+    /// How many top positions to track for the top-heavy distribution.
+    /// Default: sqrt(n) * 3, clamped to n-1. Only used with --comparison-distribution top-heavy.
     #[arg(long)]
     pub top_k: Option<usize>,
 
@@ -105,9 +105,9 @@ pub struct ConfigArgs {
     #[arg(long)]
     pub matchmaking_sharpness: Option<f64>,
 
-    /// Minimum games per item before using top-heavy strategy. Default: 3.
+    /// Minimum games per item before the top-heavy distribution kicks in. Default: 3.
     #[arg(long)]
-    pub min_games: Option<usize>,
+    pub min_uniform_games: Option<usize>,
 
     /// Prior variance on log-strengths. Default: 10.0.
     #[arg(long)]

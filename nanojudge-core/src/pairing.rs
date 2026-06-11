@@ -1,4 +1,4 @@
-/// Pairing strategies for pairwise comparison tournaments.
+/// Comparison distributions for pairwise comparison tournaments.
 ///
 /// Public functions accept `item_ids: &[i64]` and return `Pair` (i64, i64).
 /// Internal functions use `usize` indices for efficient array indexing.
@@ -7,11 +7,11 @@ use rand::Rng;
 use crate::constants::OPPONENT_WINDOW_SIZE;
 use crate::types::{IndexedPair, Pair};
 
-/// Pairing strategy enum.
+/// Comparison distribution enum.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
-pub enum Strategy {
-    Balanced,
+pub enum ComparisonDistribution {
+    Uniform,
     TopHeavy,
 }
 
@@ -38,51 +38,51 @@ fn position_probability(
     ratio_b / (ratio_a + ratio_b)
 }
 
-/// Determine the effective strategy to use for this round.
+/// Determine the effective comparison distribution to use for this round.
 ///
 /// Three stages:
-///   Stage 1 (Bootstrap): Balanced until every item has >= min_games.
+///   Stage 1 (Warm-up): Uniform until every item has >= min_uniform_games.
 ///   Stage 2 (P(top K)): Top-heavy — the main phase.
-///   Stage 3 (Smoothing): Last round reverts to balanced.
-pub fn get_effective_strategy(
-    user_strategy: Strategy,
+///   Stage 3 (Smoothing): Last round reverts to uniform.
+pub fn get_effective_comparison_distribution(
+    user_comparison_distribution: ComparisonDistribution,
     num_items: usize,
     games_played: &[usize],
     current_round_number: usize,
-    min_games_before_strategy: usize,
+    min_uniform_games: usize,
     number_of_rounds: Option<usize>,
-) -> Strategy {
-    if user_strategy == Strategy::Balanced {
-        return Strategy::Balanced;
+) -> ComparisonDistribution {
+    if user_comparison_distribution == ComparisonDistribution::Uniform {
+        return ComparisonDistribution::Uniform;
     }
 
-    // Stage 1: Bootstrap
+    // Stage 1: Warm-up
     for i in 0..num_items {
-        if games_played[i] < min_games_before_strategy {
-            return Strategy::Balanced;
+        if games_played[i] < min_uniform_games {
+            return ComparisonDistribution::Uniform;
         }
     }
 
     // Stage 3: Smoothing — last round
     if let Some(total_rounds) = number_of_rounds {
         if current_round_number >= total_rounds - 1 {
-            return Strategy::Balanced;
+            return ComparisonDistribution::Uniform;
         }
     }
 
     // Stage 2
-    Strategy::TopHeavy
+    ComparisonDistribution::TopHeavy
 }
 
 // ---------------------------------------------------------------------------
 // Public pairing functions (work with i64 IDs)
 // ---------------------------------------------------------------------------
 
-/// Generate balanced pairings for a round.
+/// Generate uniform pairings for a round.
 ///
 /// `current_ratings[i]` is the rating for `item_ids[i]`.
 /// Returns pairs of item IDs.
-pub fn generate_balanced_pairings(
+pub fn generate_uniform_pairings(
     item_ids: &[i64],
     pairs_count: usize,
     current_ratings: &[f64],
@@ -90,7 +90,7 @@ pub fn generate_balanced_pairings(
 ) -> Vec<Pair> {
     let n = item_ids.len();
     let zeros = vec![0usize; n];
-    let index_pairs = generate_balanced_pairings_indexed(
+    let index_pairs = generate_uniform_pairings_indexed(
         n,
         pairs_count,
         current_ratings,
@@ -130,7 +130,7 @@ pub fn generate_top_heavy_pairings(
 // Internal indexed pairing functions (work with usize indices)
 // ---------------------------------------------------------------------------
 
-pub(crate) fn generate_balanced_pairings_indexed(
+pub(crate) fn generate_uniform_pairings_indexed(
     num_items: usize,
     pairs_count: usize,
     current_ratings: &[f64],
@@ -151,7 +151,7 @@ pub(crate) fn generate_balanced_pairings_indexed(
     let mut local_first_counts: Vec<usize> = first_position_counts.to_vec();
     let mut local_games: Vec<usize> = games_played.to_vec();
 
-    generate_balanced_iteration(
+    generate_uniform_iteration(
         num_items, current_ratings, sharpness, pairs_count,
         &mut pairings, &mut rng,
         &mut local_first_counts, &mut local_games,
@@ -160,7 +160,7 @@ pub(crate) fn generate_balanced_pairings_indexed(
     pairings
 }
 
-fn generate_balanced_iteration(
+fn generate_uniform_iteration(
     num_items: usize,
     current_ratings: &[f64],
     sharpness: f64,
@@ -398,38 +398,38 @@ mod tests {
     }
 
     #[test]
-    fn test_effective_strategy_balanced_user_choice() {
+    fn test_effective_comparison_distribution_uniform_user_choice() {
         let games = vec![10, 10];
-        let result = get_effective_strategy(Strategy::Balanced, 2, &games, 5, 3, Some(10));
-        assert_eq!(result, Strategy::Balanced);
+        let result = get_effective_comparison_distribution(ComparisonDistribution::Uniform, 2, &games, 5, 3, Some(10));
+        assert_eq!(result, ComparisonDistribution::Uniform);
     }
 
     #[test]
-    fn test_effective_strategy_bootstrap_stage() {
+    fn test_effective_comparison_distribution_warmup_stage() {
         let games = vec![1, 10]; // Item 0 below minimum
-        let result = get_effective_strategy(Strategy::TopHeavy, 2, &games, 5, 3, Some(10));
-        assert_eq!(result, Strategy::Balanced);
+        let result = get_effective_comparison_distribution(ComparisonDistribution::TopHeavy, 2, &games, 5, 3, Some(10));
+        assert_eq!(result, ComparisonDistribution::Uniform);
     }
 
     #[test]
-    fn test_effective_strategy_smoothing_stage() {
+    fn test_effective_comparison_distribution_smoothing_stage() {
         let games = vec![10, 10];
-        let result = get_effective_strategy(Strategy::TopHeavy, 2, &games, 9, 3, Some(10));
-        assert_eq!(result, Strategy::Balanced);
+        let result = get_effective_comparison_distribution(ComparisonDistribution::TopHeavy, 2, &games, 9, 3, Some(10));
+        assert_eq!(result, ComparisonDistribution::Uniform);
     }
 
     #[test]
-    fn test_effective_strategy_main_phase() {
+    fn test_effective_comparison_distribution_main_phase() {
         let games = vec![10, 10];
-        let result = get_effective_strategy(Strategy::TopHeavy, 2, &games, 5, 3, Some(10));
-        assert_eq!(result, Strategy::TopHeavy);
+        let result = get_effective_comparison_distribution(ComparisonDistribution::TopHeavy, 2, &games, 5, 3, Some(10));
+        assert_eq!(result, ComparisonDistribution::TopHeavy);
     }
 
     #[test]
-    fn test_balanced_pairings_coverage() {
+    fn test_uniform_pairings_coverage() {
         let item_ids: Vec<i64> = (100..110).collect(); // IDs 100-109
         let ratings = vec![1.0; 10];
-        let pairs = generate_balanced_pairings(&item_ids, 5, &ratings, 1.0);
+        let pairs = generate_uniform_pairings(&item_ids, 5, &ratings, 1.0);
 
         assert_eq!(pairs.len(), 5);
 
