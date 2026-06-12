@@ -670,7 +670,15 @@ pub async fn run(args: RankArgs) {
         .collect();
 
     match resolved.output_format {
-        OutputFormat::Json => output::print_json(&scoring_result.rankings, &titles, rounds, total_comparisons, &scoring_result.judge_analytics),
+        OutputFormat::Json => output::print_json(
+            &scoring_result.rankings,
+            &titles,
+            rounds,
+            total_comparisons,
+            &scoring_result.judge_analytics,
+            scoring_result.panel_positional_bias,
+            scoring_result.panel_positional_bias_ci,
+        ),
         OutputFormat::Table => output::print_table(
             &scoring_result.rankings,
             &titles,

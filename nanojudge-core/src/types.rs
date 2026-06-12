@@ -126,6 +126,15 @@ pub struct ScoringResult {
     pub sample_size: usize,
     /// Per-judge analytics. One entry per judge, same order as `JudgeInfo.judge_ids`.
     pub judge_analytics: Vec<JudgeAnalytics>,
+    /// Panel-level positional bias: posterior mean of the comparison-count-weighted
+    /// average of the judges' bias probabilities (equal weights when there are no
+    /// comparisons).
+    pub panel_positional_bias: f64,
+    /// Credible interval for `panel_positional_bias`, computed from per-iteration
+    /// posterior samples of the weighted average — not by averaging per-judge
+    /// interval endpoints, which would be too wide. With a single judge this
+    /// equals that judge's `positional_bias_ci`.
+    pub panel_positional_bias_ci: (f64, f64),
 }
 
 /// A pairing: two item IDs to be compared.

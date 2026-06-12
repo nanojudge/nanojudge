@@ -116,6 +116,12 @@ pub struct SamplesResult {
     pub bias_logit_samples: Vec<Vec<f64>>,
     /// Per-judge positional-bias means in logit space.
     pub bias_logit_means: Vec<f64>,
+    /// Panel-level positional-bias samples in probability space, sorted ascending.
+    /// Each sample is the comparison-count-weighted average of the judges' bias
+    /// probabilities at one MCMC iteration (equal weights when there are no
+    /// comparisons). Must be built from iteration-aligned samples, so it cannot
+    /// be reconstructed from the sorted per-judge samples.
+    pub panel_bias_samples: Vec<f64>,
     /// Number of comparisons per judge.
     pub comparisons_per_judge: Vec<usize>,
 }
@@ -348,6 +354,16 @@ impl GaussianBT {
         let mut samples_per_item: Vec<Vec<f64>> = (0..n).map(|_| Vec::with_capacity(iterations)).collect();
         let mut bias_samples: Vec<Vec<f64>> = (0..k).map(|_| Vec::with_capacity(iterations)).collect();
 
+        // Panel-level bias weights: comparison counts, or equal weights when
+        // there is no data yet (posterior = prior for every judge).
+        let total_judge_comparisons: usize = self.comparisons_per_judge.iter().sum();
+        let panel_weights: Vec<f64> = if total_judge_comparisons > 0 {
+            self.comparisons_per_judge.iter().map(|&c| c as f64 / total_judge_comparisons as f64).collect()
+        } else {
+            vec![1.0 / k as f64; k]
+        };
+        let mut panel_bias_samples: Vec<f64> = Vec::with_capacity(iterations);
+
         for _ in 0..iterations {
             self.gibbs_iteration(rng);
             self.normalize_log_strengths();
@@ -358,10 +374,15 @@ impl GaussianBT {
 
             // Positional bias = negated center: center>0 leans toward item2, so
             // -center as a logit gives P(item1 wins | equal strength) > 0.5 when
-            // the judge favors the first item.
+            // the judge favors the first item. The panel aggregate is the
+            // weighted average in probability space at this same iteration.
+            let mut panel_prob = 0.0;
             for j in 0..k {
-                bias_samples[j].push(-self.center[j]);
+                let bias_logit = -self.center[j];
+                bias_samples[j].push(bias_logit);
+                panel_prob += panel_weights[j] / (1.0 + (-bias_logit).exp());
             }
+            panel_bias_samples.push(panel_prob);
 
             if let Some(ref mut counts) = top_k_count {
                 for j in 0..n { sort_indices[j] = j; }
@@ -390,12 +411,15 @@ impl GaussianBT {
             bias_samples[j].sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
         }
 
+        panel_bias_samples.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+
         SamplesResult {
             sorted_samples,
             means,
             top_k_probs: top_k_count.map(|c| c.iter().map(|&v| v as f64 / iterations as f64).collect()),
             bias_logit_samples: bias_samples,
             bias_logit_means,
+            panel_bias_samples,
             comparisons_per_judge: self.comparisons_per_judge.clone(),
         }
     }

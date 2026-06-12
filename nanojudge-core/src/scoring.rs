@@ -106,6 +106,13 @@ pub fn run_scoring(
         });
     }
 
+    // Panel-level bias: posterior mean and quantiles of the per-iteration
+    // weighted average of judge biases (probability space).
+    let panel_samples = &samples_result.panel_bias_samples;
+    let panel_positional_bias =
+        panel_samples.iter().sum::<f64>() / panel_samples.len() as f64;
+    let panel_positional_bias_ci = ci_from_sorted(panel_samples, options.confidence_level);
+
     // Build warm start state
     let warm_start_state = WarmStartState {
         item_strengths: mcmc.get_current_state(),
@@ -119,6 +126,8 @@ pub fn run_scoring(
         warm_start_state,
         sample_size: options.iterations,
         judge_analytics,
+        panel_positional_bias,
+        panel_positional_bias_ci,
     }
 }
 
@@ -347,6 +356,61 @@ mod tests {
         assert_eq!(result.judge_analytics[0].judge_id, judge_a);
         assert_eq!(result.judge_analytics[1].judge_id, judge_b);
         assert_eq!(result.judge_analytics[0].num_comparisons + result.judge_analytics[1].num_comparisons, 6);
+    }
+
+    #[test]
+    fn test_single_judge_panel_bias_matches_judge() {
+        // With one judge the panel aggregate is that judge's own posterior.
+        // The CI must match exactly: quantiles commute with the monotone
+        // logit->probability transform, so the same sample ranks are picked.
+        let item_ids = vec![100, 200, 300];
+        let comparisons: Vec<ComparisonInput> = [
+            make_pair(100, 200, 0.9),
+            make_pair(200, 300, 0.7),
+        ].into_iter().flatten().collect();
+
+        let ji = single_judge_info();
+        let result = run_scoring(&item_ids, &comparisons, &default_scoring_options(), &ji);
+
+        let ja = &result.judge_analytics[0];
+        assert!((result.panel_positional_bias_ci.0 - ja.positional_bias_ci.0).abs() < 1e-12);
+        assert!((result.panel_positional_bias_ci.1 - ja.positional_bias_ci.1).abs() < 1e-12);
+        // Point estimates differ only by mean-of-sigmoid vs sigmoid-of-mean.
+        assert!((result.panel_positional_bias - ja.positional_bias).abs() < 0.05);
+    }
+
+    #[test]
+    fn test_multi_judge_panel_bias_within_bounds() {
+        let item_ids = vec![100, 200, 300];
+        let judge_a = 111;
+        let judge_b = 222;
+
+        let comparisons = vec![
+            ComparisonInput { item1: 100, item2: 200, category_probs: dist(0.9), judge_id: judge_a },
+            ComparisonInput { item1: 200, item2: 100, category_probs: dist(0.1), judge_id: judge_a },
+            ComparisonInput { item1: 100, item2: 300, category_probs: dist(0.8), judge_id: judge_b },
+            ComparisonInput { item1: 300, item2: 100, category_probs: dist(0.2), judge_id: judge_b },
+        ];
+
+        let ji = JudgeInfo {
+            judge_ids: vec![judge_a, judge_b],
+            logprobs_mode: true,
+        };
+
+        let mut opts = default_scoring_options();
+        opts.iterations = 2000;
+        opts.burn_in = 300;
+        let result = run_scoring(&item_ids, &comparisons, &opts, &ji);
+
+        let (lo, hi) = result.panel_positional_bias_ci;
+        assert!(lo <= result.panel_positional_bias && result.panel_positional_bias <= hi);
+        assert!(0.0 < lo && hi < 1.0);
+        // The weighted average of independent biases concentrates: the panel CI
+        // must not be wider than the widest per-judge CI.
+        let max_judge_width = result.judge_analytics.iter()
+            .map(|ja| ja.positional_bias_ci.1 - ja.positional_bias_ci.0)
+            .fold(0.0_f64, f64::max);
+        assert!(hi - lo <= max_judge_width + 1e-12);
     }
 
     #[test]
