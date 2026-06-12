@@ -36,6 +36,15 @@ fn logit_to_prob_ci(sorted_logit_samples: &[f64], mean_logit: f64, confidence_le
 ///
 /// `item_ids` is the full list of item IDs being ranked. The returned state,
 /// `top_k_probs`, and `sample_means` are in the same order as `item_ids`.
+///
+/// # Panics
+///
+/// Panics if caller-supplied data violates the input contract:
+/// - `item_ids` contains a duplicate ID
+/// - a comparison references an item ID not present in `item_ids`
+/// - a comparison's `judge_id` is not present in `judge_info.judge_ids`
+/// - `options.warm_start` is set and its `item_strengths` length does not
+///   match `item_ids.len()`
 pub fn run_scoring(
     item_ids: &[i64],
     comparisons: &[ComparisonInput],

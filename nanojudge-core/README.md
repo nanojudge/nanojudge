@@ -119,6 +119,8 @@ The engine handles three stages automatically:
 
 Every parameter must be explicitly provided. If required data is missing, the crate panics with a clear message — it never silently falls back to defaults or skips bad input.
 
+Invalid input (duplicate IDs, unknown IDs, mismatched lengths) is treated as a programming error in the caller, not a recoverable condition — there is no error type to handle. Validate at your boundary, then trust the call. Each public function documents its exact panic conditions in a `# Panics` section in the API docs.
+
 ## License
 
 MIT

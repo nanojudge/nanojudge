@@ -44,6 +44,10 @@ fn position_probability(
 ///   Stage 1 (Warm-up): Uniform until every item has >= min_uniform_games.
 ///   Stage 2 (P(top K)): Top-heavy — the main phase.
 ///   Stage 3 (Smoothing): Last round reverts to uniform.
+///
+/// # Panics
+///
+/// Panics if `games_played` has fewer than `num_items` entries.
 pub fn get_effective_comparison_distribution(
     user_comparison_distribution: ComparisonDistribution,
     num_items: usize,
@@ -82,6 +86,10 @@ pub fn get_effective_comparison_distribution(
 ///
 /// `current_ratings[i]` is the rating for `item_ids[i]`.
 /// Returns pairs of item IDs.
+///
+/// # Panics
+///
+/// Panics if `current_ratings` has fewer entries than `item_ids`.
 pub fn generate_uniform_pairings(
     item_ids: &[i64],
     pairs_count: usize,
@@ -105,6 +113,10 @@ pub fn generate_uniform_pairings(
 ///
 /// `top_k_probs[i]` and `sample_means[i]` correspond to `item_ids[i]`.
 /// Returns pairs of item IDs.
+///
+/// # Panics
+///
+/// Panics if `top_k_probs` or `sample_means` has fewer entries than `item_ids`.
 pub fn generate_top_heavy_pairings(
     item_ids: &[i64],
     pairs_count: usize,

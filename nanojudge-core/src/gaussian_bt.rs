@@ -161,6 +161,12 @@ pub struct GaussianBT {
 }
 
 impl GaussianBT {
+    /// Build the sampler from pre-indexed comparisons.
+    ///
+    /// # Panics
+    ///
+    /// - if any comparison's item index is `>= num_items`
+    /// - if any comparison's judge index is `>= judge_info.judge_ids.len()`
     pub fn new(
         num_items: usize,
         results: &[IndexedComparison],
@@ -454,6 +460,10 @@ impl GaussianBT {
     }
 
     /// Warm-start MCMC returning raw sorted samples.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `previous_strengths` does not have one entry per item.
     pub fn calculate_incremental_with_samples(
         &mut self,
         previous_strengths: &[f64],

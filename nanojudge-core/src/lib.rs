@@ -6,6 +6,15 @@
 /// Items are identified by caller-provided `i64` IDs. The crate handles the
 /// internal mapping to efficient array indices — callers never think about indices.
 ///
+/// # Panics, not Results
+///
+/// This crate treats invalid caller-supplied data as a programming error, not a
+/// recoverable condition: precondition violations (duplicate IDs, unknown IDs,
+/// mismatched lengths) panic immediately with a message naming the violation.
+/// There is no error type to handle and no silent repair of bad input — validate
+/// at your boundary, then trust the call. Each public function documents its
+/// panic conditions in a `# Panics` section.
+///
 /// # Quick start
 ///
 /// ```rust

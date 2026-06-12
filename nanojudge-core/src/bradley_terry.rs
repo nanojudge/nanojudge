@@ -20,6 +20,11 @@ pub struct BradleyTerry {
 }
 
 impl BradleyTerry {
+    /// Build the wins table from `(item1_idx, item2_idx, item1_win_probability)` triples.
+    ///
+    /// # Panics
+    ///
+    /// Panics if any result's item index is `>= num_items`.
     pub fn new(
         num_items: usize,
         results: &[(usize, usize, f64)],

@@ -58,6 +58,12 @@ pub struct RankingEngine {
 }
 
 impl RankingEngine {
+    /// Create an engine for ranking the given items.
+    ///
+    /// # Panics
+    ///
+    /// - if `item_ids` contains a duplicate ID
+    /// - if there are fewer than two items
     pub fn new(item_ids: &[i64], config: EngineConfig) -> Self {
         let id_map = IdMap::from_ids(item_ids);
         let num_items = id_map.len();
@@ -82,6 +88,17 @@ impl RankingEngine {
     }
 
     /// Generate pairs for a round. Returns pairs of item IDs.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the round's effective distribution is top-heavy and the MCMC
+    /// data is missing or malformed. The effective distribution is top-heavy
+    /// when the engine is configured with `ComparisonDistribution::TopHeavy`,
+    /// every item has reached `min_uniform_games`, and this is not the final
+    /// round (warm-up and smoothing rounds use uniform pairing and need no
+    /// MCMC data). In a top-heavy round:
+    /// - `mcmc_top_k_probs` and `mcmc_sample_means` must be set
+    /// - both must have one entry per item
     pub fn generate_pairs_for_round(&mut self, round_index: usize) -> Vec<Pair> {
         self.current_round_number = round_index;
         let num_items = self.id_map.len();
@@ -130,6 +147,11 @@ impl RankingEngine {
     }
 
     /// Record comparison results from a round.
+    ///
+    /// # Panics
+    ///
+    /// Panics if a result references an item ID that was not in the
+    /// `item_ids` the engine was created with.
     pub fn record_results(&mut self, results: &[ComparisonInput]) {
         for result in results {
             self.completed_comparisons.push(*result);
