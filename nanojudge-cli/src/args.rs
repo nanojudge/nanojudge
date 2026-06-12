@@ -142,6 +142,10 @@ pub struct ConfigArgs {
     #[arg(long)]
     pub bias_proposal_std: Option<f64>,
 
+    /// MH proposal step size for the cutpoint gaps (log space). Default: 0.15.
+    #[arg(long)]
+    pub gap_proposal_std: Option<f64>,
+
     /// Print a live ranking table after each round.
     /// With no value: prints all items. With a number: prints top N only.
     #[arg(long, num_args = 0..=1, default_missing_value = "0")]

@@ -106,6 +106,8 @@ pub struct ScoringOptions {
     pub bias_prior_tau2: f64,
     /// MH proposal step size for bias. Default: 0.15.
     pub bias_proposal_std: f64,
+    /// MH proposal step size for the cutpoint gaps (log space). Default: 0.15.
+    pub gap_proposal_std: f64,
     /// Prior mean for positional bias in logit space. Default: 0.0 (= 0.5 probability = no bias).
     pub bias_prior_logit: f64,
 }

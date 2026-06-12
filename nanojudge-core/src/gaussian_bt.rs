@@ -95,7 +95,6 @@ const LG1_PRIOR_MEAN: f64 = 0.0;
 const LG2_PRIOR_MEAN: f64 = std::f64::consts::LN_2;
 const LG3_PRIOR_MEAN: f64 = 0.0;
 const LG_PRIOR_SD: f64 = 1.0;
-const GAP_PROPOSAL_STD: f64 = 0.15;
 
 /// Internal representation of a comparison: a categorical verdict distribution
 /// from a judge, `[P(A),P(B),P(C),P(D),P(E)]` from item1's perspective.
@@ -158,6 +157,7 @@ pub struct GaussianBT {
     proposal_std: f64,
     center_prior_tau2: f64,
     center_proposal_std: f64,
+    gap_proposal_std: f64,
 }
 
 impl GaussianBT {
@@ -217,6 +217,7 @@ impl GaussianBT {
             proposal_std: options.proposal_std,
             center_prior_tau2: options.bias_prior_tau2,
             center_proposal_std: options.bias_proposal_std,
+            gap_proposal_std: options.gap_proposal_std,
         }
     }
 
@@ -309,9 +310,9 @@ impl GaussianBT {
     fn update_gaps(&mut self, judge_idx: usize, rng: &mut impl Rng) {
         let m = self.center[judge_idx];
         let (c1, c2, c3) = (self.lg1[judge_idx], self.lg2[judge_idx], self.lg3[judge_idx]);
-        let p1 = c1 + (rng.random::<f64>() - 0.5) * 2.0 * GAP_PROPOSAL_STD;
-        let p2 = c2 + (rng.random::<f64>() - 0.5) * 2.0 * GAP_PROPOSAL_STD;
-        let p3 = c3 + (rng.random::<f64>() - 0.5) * 2.0 * GAP_PROPOSAL_STD;
+        let p1 = c1 + (rng.random::<f64>() - 0.5) * 2.0 * self.gap_proposal_std;
+        let p2 = c2 + (rng.random::<f64>() - 0.5) * 2.0 * self.gap_proposal_std;
+        let p3 = c3 + (rng.random::<f64>() - 0.5) * 2.0 * self.gap_proposal_std;
 
         let lp_current = Self::gaps_log_prior(c1, c2, c3) + self.judge_loglik(judge_idx, m, c1, c2, c3);
         let lp_proposed = Self::gaps_log_prior(p1, p2, p3) + self.judge_loglik(judge_idx, m, p1, p2, p3);
@@ -584,6 +585,7 @@ mod tests {
             proposal_std: 0.3,
             bias_prior_tau2: 2.0,
             bias_proposal_std: 0.15,
+            gap_proposal_std: 0.15,
             bias_prior_logit: 0.0,
         }
     }

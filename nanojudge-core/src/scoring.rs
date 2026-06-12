@@ -182,6 +182,7 @@ mod tests {
             proposal_std: 0.3,
             bias_prior_tau2: 2.0,
             bias_proposal_std: 0.15,
+            gap_proposal_std: 0.15,
             bias_prior_logit: 0.0,
         }
     }

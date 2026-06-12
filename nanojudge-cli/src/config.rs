@@ -52,6 +52,7 @@ pub struct NanojudgeConfig {
     pub proposal_std: Option<f64>,
     pub bias_prior_tau2: Option<f64>,
     pub bias_proposal_std: Option<f64>,
+    pub gap_proposal_std: Option<f64>,
     pub reasoning_enabled: Option<bool>,
     pub min_logprob_coverage: Option<f64>,
     pub live_top: Option<usize>,
@@ -207,6 +208,9 @@ temperature = 0.7
 
 # MH proposal step size for bias. Default: 0.15.
 # bias_proposal_std = 0.15
+
+# MH proposal step size for the cutpoint gaps (log space). Default: 0.15.
+# gap_proposal_std = 0.15
 ";
 
 /// Returns the default config path.
