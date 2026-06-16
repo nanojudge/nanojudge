@@ -151,14 +151,11 @@ mod tests {
         }
     }
 
-    /// One-hot category distribution for a scalar win probability, mirroring the
-    /// five ordinal buckets. Lets the scalar-based tests express discrete verdicts.
-    fn dist(p: f64) -> [f64; 5] {
-        if p > 0.9 { [1.0, 0.0, 0.0, 0.0, 0.0] }
-        else if p > 0.65 { [0.0, 1.0, 0.0, 0.0, 0.0] }
-        else if p > 0.35 { [0.0, 0.0, 1.0, 0.0, 0.0] }
-        else if p > 0.1 { [0.0, 0.0, 0.0, 1.0, 0.0] }
-        else { [0.0, 0.0, 0.0, 0.0, 1.0] }
+    fn dist(p: f64) -> [f64; 4] {
+        if p > 0.75 { [1.0, 0.0, 0.0, 0.0] }
+        else if p > 0.5 { [0.0, 1.0, 0.0, 0.0] }
+        else if p > 0.25 { [0.0, 0.0, 1.0, 0.0] }
+        else { [0.0, 0.0, 0.0, 1.0] }
     }
 
     /// Returns both position orders for a matchup. In production, the pairing
@@ -182,7 +179,7 @@ mod tests {
             proposal_std: 0.3,
             bias_prior_tau2: 2.0,
             bias_proposal_std: 0.15,
-            gap_proposal_std: 0.15,
+
             bias_prior_logit: 0.0,
         }
     }

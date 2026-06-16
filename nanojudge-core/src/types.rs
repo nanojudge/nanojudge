@@ -25,10 +25,10 @@ pub struct ComparisonInput {
     /// ID of second item.
     pub item2: i64,
     /// Categorical verdict distribution from item1's perspective:
-    /// `[P(A clear win), P(B narrow win), P(C draw), P(D narrow loss), P(E clear loss)]`.
+    /// `[P(A clear win), P(B narrow win), P(C narrow loss), P(D clear loss)]`.
     /// Sums to ~1. In text mode this is a one-hot vector; in logprobs mode it is the
     /// judge's full per-bucket distribution. Caller filters out failed comparisons first.
-    pub category_probs: [f64; 5],
+    pub category_probs: [f64; 4],
     /// Hash of endpoint+model identifying which judge produced this comparison.
     pub judge_id: u64,
 }
@@ -63,8 +63,8 @@ pub struct JudgeAnalytics {
 pub struct WarmStartState {
     /// Item strengths (exp of log-strengths), same order as item_ids.
     pub item_strengths: Vec<f64>,
-    /// Per-judge cutpoint centers, keyed by judge_id hash. Note this is the
-    /// NEGATED positional-bias logit (center > 0 penalizes item1).
+    /// Per-judge positional bias in logit space, keyed by judge_id hash.
+    /// Positive values mean the judge favors the first-listed item.
     pub judge_biases: Vec<(u64, f64)>,
 }
 
@@ -106,8 +106,6 @@ pub struct ScoringOptions {
     pub bias_prior_tau2: f64,
     /// MH proposal step size for bias. Default: 0.15.
     pub bias_proposal_std: f64,
-    /// MH proposal step size for the cutpoint gaps (log space). Default: 0.15.
-    pub gap_proposal_std: f64,
     /// Prior mean for positional bias in logit space. Default: 0.0 (= 0.5 probability = no bias).
     pub bias_prior_logit: f64,
 }
@@ -143,8 +141,11 @@ pub struct ScoringResult {
 pub type Pair = (i64, i64);
 
 /// Internal indexed comparison (usize indices, not caller IDs).
-/// (item1_idx, item2_idx, category_probs, judge_internal_idx)
-pub(crate) type IndexedComparison = (usize, usize, [f64; 5], usize);
+/// (item1_idx, item2_idx, win_prob, judge_internal_idx)
+///
+/// `win_prob` is P(item1 wins), collapsed from the 4-category distribution:
+/// `probs[0] + probs[1]` (clear win + narrow win).
+pub(crate) type IndexedComparison = (usize, usize, f64, usize);
 
 /// Internal indexed pair (usize indices, not caller IDs).
 pub(crate) type IndexedPair = (usize, usize);
@@ -185,7 +186,9 @@ impl IdMap {
         comparisons.iter().map(|c| {
             let judge_idx = *judge_id_to_idx.get(&c.judge_id)
                 .unwrap_or_else(|| panic!("Unknown judge_id: {}", c.judge_id));
-            (self.to_idx(c.item1), self.to_idx(c.item2), c.category_probs, judge_idx)
+            let p = c.category_probs;
+            let win_prob = p[0] + p[1];
+            (self.to_idx(c.item1), self.to_idx(c.item2), win_prob, judge_idx)
         }).collect()
     }
 }

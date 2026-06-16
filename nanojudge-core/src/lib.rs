@@ -23,10 +23,10 @@
 /// let item_ids = vec![100, 200, 300]; // your IDs — any i64 values
 /// let judge_id = stable_hash("http://localhost:8000\0my-model");
 ///
-/// // category_probs = [P(A clear win), P(B narrow win), P(C draw), P(D narrow loss), P(E clear loss)]
+/// // category_probs = [P(A clear win), P(B narrow win), P(C narrow loss), P(D clear loss)]
 /// let comparisons = vec![
-///     ComparisonInput { item1: 100, item2: 200, category_probs: [0.0, 1.0, 0.0, 0.0, 0.0], judge_id },
-///     ComparisonInput { item1: 200, item2: 300, category_probs: [0.7, 0.3, 0.0, 0.0, 0.0], judge_id },
+///     ComparisonInput { item1: 100, item2: 200, category_probs: [0.0, 1.0, 0.0, 0.0], judge_id },
+///     ComparisonInput { item1: 200, item2: 300, category_probs: [0.7, 0.3, 0.0, 0.0], judge_id },
 /// ];
 ///
 /// let judge_info = JudgeInfo {
@@ -45,7 +45,6 @@
 ///     proposal_std: 0.3,
 ///     bias_prior_tau2: 2.0,
 ///     bias_proposal_std: 0.15,
-///     gap_proposal_std: 0.15,
 ///     bias_prior_logit: 0.0,
 /// }, &judge_info);
 ///

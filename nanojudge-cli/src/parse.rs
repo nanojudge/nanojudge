@@ -5,17 +5,17 @@
 /// - Text mode (--no-logprobs): extracts discrete verdict letter from response text.
 use serde::Deserialize;
 
-/// Default minimum fraction of A-E probability mass the top-logprobs must
+/// Default minimum fraction of A-D probability mass the top-logprobs must
 /// cover before the logprob-derived distribution is trusted. Below this, the
 /// comparison parse fails (returns None).
 pub const DEFAULT_MIN_LOGPROB_COVERAGE: f64 = 0.95;
 
-/// The 5 likert letters in order (A clear win … E clear loss).
-const LIKERT_LETTERS: [char; 5] = ['A', 'B', 'C', 'D', 'E'];
+/// The 4 verdict letters in order (A clear win … D clear loss).
+const LIKERT_LETTERS: [char; 4] = ['A', 'B', 'C', 'D'];
 
 /// One-hot category distribution for a single chosen letter index.
-fn one_hot(idx: usize) -> [f64; 5] {
-    let mut v = [0.0; 5];
+fn one_hot(idx: usize) -> [f64; 4] {
+    let mut v = [0.0; 4];
     v[idx] = 1.0;
     v
 }
@@ -36,19 +36,19 @@ pub struct LogprobContent {
 
 /// Result of parsing a comparison response.
 pub struct ParseResult {
-    /// Categorical verdict distribution `[P(A),P(B),P(C),P(D),P(E)]` from item1's
+    /// Categorical verdict distribution `[P(A),P(B),P(C),P(D)]` from item1's
     /// perspective. None if extraction failed.
-    pub category_probs: Option<[f64; 5]>,
+    pub category_probs: Option<[f64; 4]>,
 }
 
 fn letter_to_index(c: char) -> Option<usize> {
     LIKERT_LETTERS.iter().position(|&l| l == c.to_ascii_uppercase())
 }
 
-/// Extract the judge's categorical verdict distribution `[P(A)..P(E)]` from
+/// Extract the judge's categorical verdict distribution `[P(A)..P(D)]` from
 /// logprobs. Returns None if no "Verdict" marker is present, extraction fails,
-/// or the A-E mass is below the coverage threshold.
-fn extract_likert_probabilities(logprobs: &[LogprobContent], min_logprob_coverage: f64) -> Option<[f64; 5]> {
+/// or the A-D mass is below the coverage threshold.
+fn extract_likert_probabilities(logprobs: &[LogprobContent], min_logprob_coverage: f64) -> Option<[f64; 4]> {
     if logprobs.is_empty() {
         return None;
     }
@@ -87,14 +87,14 @@ fn extract_likert_probabilities(logprobs: &[LogprobContent], min_logprob_coverag
 }
 
 /// Scan the 10 tokens following one "Verdict" marker for the verdict letter
-/// and build the A-E distribution from its top_logprobs. Returns None if no
-/// letter token is found or the A-E mass is below the coverage threshold.
+/// and build the A-D distribution from its top_logprobs. Returns None if no
+/// letter token is found or the A-D mass is below the coverage threshold.
 fn extract_at_marker(
     logprobs: &[LogprobContent],
     tokens: &[&str],
     search_start: usize,
     min_logprob_coverage: f64,
-) -> Option<[f64; 5]> {
+) -> Option<[f64; 4]> {
     let search_end = (search_start + 10).min(tokens.len());
 
     for i in search_start..search_end {
@@ -125,7 +125,7 @@ fn extract_at_marker(
             _ => return None,
         };
 
-        let mut choice_probs = [0.0_f64; 5];
+        let mut choice_probs = [0.0_f64; 4];
 
         for tlp in top_logprobs {
             let clean = tlp.token.trim().trim_end_matches(':');
@@ -138,13 +138,13 @@ fn extract_at_marker(
 
         let prob_sum: f64 = choice_probs.iter().sum();
         if prob_sum >= min_logprob_coverage {
-            // Normalize into a proper distribution over A-E.
+            // Normalize into a proper distribution over A-D.
             for p in &mut choice_probs {
                 *p /= prob_sum;
             }
             return Some(choice_probs);
         } else {
-            // Logprobs don't cover enough of the A-E space — parse fails.
+            // Logprobs don't cover enough of the A-D space — parse fails.
             return None;
         }
     }
@@ -163,8 +163,8 @@ pub fn parse_response(logprobs: &[LogprobContent], min_logprob_coverage: f64) ->
 
 /// Parse a verdict letter from response text (for --no-logprobs mode).
 ///
-/// Finds the last "Verdict [A-E]" in the text and returns a one-hot distribution
-/// over the five categories. Uses the last occurrence to handle cases where
+/// Finds the last "Verdict [A-D]" in the text and returns a one-hot distribution
+/// over the four categories. Uses the last occurrence to handle cases where
 /// "verdict" appears in the analysis before the final verdict.
 pub fn parse_response_text(text: &str) -> ParseResult {
     // Use ASCII lowercase so byte offsets stay aligned with the original text —
@@ -228,7 +228,8 @@ mod tests {
     fn test_letter_to_index() {
         assert_eq!(letter_to_index('A'), Some(0));
         assert_eq!(letter_to_index('a'), Some(0));
-        assert_eq!(letter_to_index('E'), Some(4));
+        assert_eq!(letter_to_index('D'), Some(3));
+        assert_eq!(letter_to_index('E'), None);
         assert_eq!(letter_to_index('F'), None);
     }
 
@@ -334,7 +335,7 @@ mod tests {
 
     #[test]
     fn test_min_logprob_coverage_gates_parsing() {
-        // A-E mass sums to 0.96 (the rest is on a non-letter token).
+        // A-D mass sums to 0.96 (the rest is on a non-letter token).
         let logprobs = vec![
             LogprobContent { token: "Verdict".to_string(), top_logprobs: None },
             LogprobContent { token: ":".to_string(), top_logprobs: None },
@@ -375,21 +376,15 @@ mod tests {
     }
 
     #[test]
-    fn test_text_parse_verdict_e() {
-        let text = "Analysis here.\n\nVerdict E: Option 2, clearly";
-        assert_eq!(parse_response_text(text).category_probs, Some(one_hot(4)));
-    }
-
-    #[test]
-    fn test_text_parse_verdict_c_draw() {
-        let text = "Analysis here.\n\nVerdict C: Draw";
-        assert_eq!(parse_response_text(text).category_probs, Some(one_hot(2)));
-    }
-
-    #[test]
     fn test_text_parse_verdict_d() {
-        let text = "Analysis.\n\nVerdict D: Option 2, marginally";
+        let text = "Analysis here.\n\nVerdict D: Option 2, clearly";
         assert_eq!(parse_response_text(text).category_probs, Some(one_hot(3)));
+    }
+
+    #[test]
+    fn test_text_parse_verdict_c() {
+        let text = "Analysis here.\n\nVerdict C: Option 2, marginally";
+        assert_eq!(parse_response_text(text).category_probs, Some(one_hot(2)));
     }
 
     #[test]
@@ -425,8 +420,8 @@ mod tests {
 
     #[test]
     fn test_text_parse_bold_wrapped_verdict() {
-        let text = "Analysis.\n\n**Verdict E**";
-        assert_eq!(parse_response_text(text).category_probs, Some(one_hot(4)));
+        let text = "Analysis.\n\n**Verdict D**";
+        assert_eq!(parse_response_text(text).category_probs, Some(one_hot(3)));
     }
 
     #[test]
@@ -449,9 +444,8 @@ mod tests {
 
     #[test]
     fn test_text_parse_rejects_word_starting_with_letter() {
-        // A verdict line starting with a WORD that begins with A-E must not
-        // parse as that letter. "Draw" is the dangerous one: it plausibly
-        // means C (draw) but starts with D (narrow loss).
+        // A verdict line starting with a WORD that begins with A-D must not
+        // parse as that letter.
         assert!(parse_response_text("Analysis.\n\nVerdict: Draw").category_probs.is_none());
         assert!(parse_response_text("Analysis.\n\nVerdict: Both are good").category_probs.is_none());
         assert!(parse_response_text("Analysis.\n\nVerdict: apple wins").category_probs.is_none());

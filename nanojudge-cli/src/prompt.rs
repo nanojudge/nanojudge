@@ -1,10 +1,10 @@
 /// Prompt building for pairwise comparisons.
 ///
 /// Supports custom prompt templates with variable substitution.
-/// Required variables: $criterion, $option1, $option2, $length
+/// Required variables: $criterion, $option1, $option2
 ///
 /// If no template is provided, a sensible default is used that produces
-/// a "Verdict:" marker followed by a likert scale letter (A-E).
+/// a "Verdict:" marker followed by a verdict letter (A-D).
 
 use crate::bail;
 
@@ -22,9 +22,8 @@ Write a $length analysis. You MUST end your response with one of these lines ver
 
 Verdict A: Option 1, clearly
 Verdict B: Option 1, marginally
-Verdict C: Draw
-Verdict D: Option 2, marginally
-Verdict E: Option 2, clearly
+Verdict C: Option 2, marginally
+Verdict D: Option 2, clearly
 ";
 
 pub const DEFAULT_TEMPLATE_NO_REASONING: &str = "\
@@ -41,12 +40,11 @@ Respond only with one of these lines verbatim:
 
 Verdict A: Option 1, clearly
 Verdict B: Option 1, marginally
-Verdict C: Draw
-Verdict D: Option 2, marginally
-Verdict E: Option 2, clearly
+Verdict C: Option 2, marginally
+Verdict D: Option 2, clearly
 ";
 
-const REQUIRED_VARIABLES: &[&str] = &["$criterion", "$option1", "$option2", "$length"];
+const REQUIRED_VARIABLES: &[&str] = &["$criterion", "$option1", "$option2"];
 const REQUIRED_VARIABLES_NO_REASONING: &[&str] = &["$criterion", "$option1", "$option2"];
 
 /// Validate that a template contains all required variables.
@@ -133,7 +131,7 @@ mod tests {
         assert!(prompt.contains("2 paragraph"));
         assert!(prompt.contains("Verdict A:"));
         assert!(prompt.contains("Verdict A: Option 1, clearly"));
-        assert!(prompt.contains("E: Option 2, clearly"));
+        assert!(prompt.contains("D: Option 2, clearly"));
     }
 
     #[test]
@@ -175,7 +173,6 @@ mod tests {
         assert!(result.is_err());
         let msg = result.unwrap_err();
         assert!(msg.contains("$criterion"));
-        assert!(msg.contains("$length"));
     }
 
     #[test]
@@ -192,7 +189,7 @@ mod tests {
     #[test]
     fn test_no_reasoning_template_has_verdicts() {
         assert!(DEFAULT_TEMPLATE_NO_REASONING.contains("Verdict A: Option 1, clearly"));
-        assert!(DEFAULT_TEMPLATE_NO_REASONING.contains("Verdict E: Option 2, clearly"));
+        assert!(DEFAULT_TEMPLATE_NO_REASONING.contains("Verdict D: Option 2, clearly"));
     }
 
     #[test]

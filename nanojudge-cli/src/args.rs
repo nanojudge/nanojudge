@@ -64,7 +64,7 @@ pub struct ConfigArgs {
     #[arg(long)]
     pub concurrency: Option<usize>,
 
-    /// Minimum fraction of A-E probability mass the top-logprobs must cover for a
+    /// Minimum fraction of A-D probability mass the top-logprobs must cover for a
     /// logprob-based verdict to be trusted. Must be > 0.0 and <= 1.0. Default: 0.95.
     #[arg(long)]
     pub min_logprob_coverage: Option<f64>,
@@ -93,7 +93,7 @@ pub struct ConfigArgs {
     pub reasoning: Option<bool>,
 
     /// Path to a custom prompt template file.
-    /// The template must contain: $criterion, $option1, $option2, $length
+    /// The template must contain: $criterion, $option1, $option2
     #[arg(long)]
     pub prompt_template: Option<PathBuf>,
 
@@ -141,10 +141,6 @@ pub struct ConfigArgs {
     /// MH proposal step size for bias. Default: 0.15.
     #[arg(long)]
     pub bias_proposal_std: Option<f64>,
-
-    /// MH proposal step size for the cutpoint gaps (log space). Default: 0.15.
-    #[arg(long)]
-    pub gap_proposal_std: Option<f64>,
 
     /// Print a live ranking table after each round.
     /// With no value: prints all items. With a number: prints top N only.

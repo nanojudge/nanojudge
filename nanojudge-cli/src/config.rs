@@ -52,7 +52,6 @@ pub struct NanojudgeConfig {
     pub proposal_std: Option<f64>,
     pub bias_prior_tau2: Option<f64>,
     pub bias_proposal_std: Option<f64>,
-    pub gap_proposal_std: Option<f64>,
     pub reasoning_enabled: Option<bool>,
     pub min_logprob_coverage: Option<f64>,
     pub live_top: Option<usize>,
@@ -79,7 +78,7 @@ const DEFAULT_CONFIG_TEMPLATE: &str = "\
 # concurrency = 16
 
 # Path to a custom prompt template file.
-# The template must contain these variables: $criterion, $option1, $option2, $length
+# The template must contain these variables: $criterion, $option1, $option2
 # If not set, the built-in default prompt is used.
 # prompt_template = \"/path/to/my-prompt.txt\"
 
@@ -106,7 +105,7 @@ const DEFAULT_CONFIG_TEMPLATE: &str = "\
 # Default: sqrt(n) * 3, clamped to n-1. Only used with comparison_distribution = \"top-heavy\".
 # top_k = 10
 
-# Minimum fraction of A-E probability mass the top-logprobs must cover for a
+# Minimum fraction of A-D probability mass the top-logprobs must cover for a
 # logprob-based verdict to be trusted (logprobs mode only). Below this, the
 # comparison is treated as unparseable. Must be > 0.0 and <= 1.0.
 # Can be overridden per-judge.
@@ -150,7 +149,7 @@ const DEFAULT_CONFIG_TEMPLATE: &str = "\
 #   temperature_jitter     - Std dev of N(1.0, jitter) temperature multiplier (default: 0)
 #   presence_penalty       - Penalizes repeated tokens, range -2.0 to 2.0
 #   top_p                  - Nucleus sampling threshold, range 0.0 to 1.0
-#   min_logprob_coverage   - Min A-E logprob mass to trust a verdict, > 0.0 and <= 1.0 (default: 0.95)
+#   min_logprob_coverage   - Min A-D logprob mass to trust a verdict, > 0.0 and <= 1.0 (default: 0.95)
 #   max_tokens             - Maximum tokens in LLM response (default: 2048, or average of specified judges)
 #   api_key_env            - Environment variable name containing the API key
 #   reasoning_effort       - OpenRouter: controls reasoning/thinking mode (e.g. \\\"none\\\" to disable Qwen thinking)
@@ -208,9 +207,6 @@ temperature = 0.7
 
 # MH proposal step size for bias. Default: 0.15.
 # bias_proposal_std = 0.15
-
-# MH proposal step size for the cutpoint gaps (log space). Default: 0.15.
-# gap_proposal_std = 0.15
 ";
 
 /// Returns the default config path.

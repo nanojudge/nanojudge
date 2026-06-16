@@ -13,11 +13,9 @@ use crate::pairing::{
 use crate::types::{ComparisonInput, IdMap, Pair};
 
 /// Collapse a categorical verdict distribution into a scalar P(item1 wins) for the
-/// classic Bradley-Terry matchmaking fit. This is a win/draw/loss reduction (A and B
-/// count as a win, C as a half, D and E as a loss) used only to pick the next pairs —
-/// the final ordinal scoring consumes the full distribution, not this scalar.
-fn matchmaking_win_prob(probs: &[f64; 5]) -> f64 {
-    probs[0] + probs[1] + 0.5 * probs[2]
+/// Bradley-Terry matchmaking fit. A and B count as a win, C and D as a loss.
+fn matchmaking_win_prob(probs: &[f64; 4]) -> f64 {
+    probs[0] + probs[1]
 }
 
 /// Configuration for the ranking engine.
@@ -239,12 +237,10 @@ mod tests {
     }
 
     fn make_input(id1: i64, id2: i64, prob: f64) -> ComparisonInput {
-        // One-hot the scalar into the five ordinal buckets for these structural tests.
-        let category_probs = if prob > 0.9 { [1.0, 0.0, 0.0, 0.0, 0.0] }
-            else if prob > 0.65 { [0.0, 1.0, 0.0, 0.0, 0.0] }
-            else if prob > 0.35 { [0.0, 0.0, 1.0, 0.0, 0.0] }
-            else if prob > 0.1 { [0.0, 0.0, 0.0, 1.0, 0.0] }
-            else { [0.0, 0.0, 0.0, 0.0, 1.0] };
+        let category_probs = if prob > 0.75 { [1.0, 0.0, 0.0, 0.0] }
+            else if prob > 0.5 { [0.0, 1.0, 0.0, 0.0] }
+            else if prob > 0.25 { [0.0, 0.0, 1.0, 0.0] }
+            else { [0.0, 0.0, 0.0, 1.0] };
         ComparisonInput { item1: id1, item2: id2, category_probs, judge_id: 0 }
     }
 

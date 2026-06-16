@@ -55,7 +55,6 @@ pub struct ResolvedConfig {
     pub proposal_std: f64,
     pub bias_prior_tau2: f64,
     pub bias_proposal_std: f64,
-    pub gap_proposal_std: f64,
     pub live_top: Option<usize>,
     pub save_comparisons: Option<PathBuf>,
     pub output_format: OutputFormat,
@@ -286,8 +285,6 @@ pub fn resolve_config(shared: &ConfigArgs, cfg: &config::NanojudgeConfig) -> Res
         .unwrap_or(2.0);
     let bias_proposal_std = merge_opt(shared.bias_proposal_std, cfg.bias_proposal_std, "bias-proposal-std")
         .unwrap_or(0.15);
-    let gap_proposal_std = merge_opt(shared.gap_proposal_std, cfg.gap_proposal_std, "gap-proposal-std")
-        .unwrap_or(0.15);
 
     let live_top = merge_opt(shared.live_top, cfg.live_top, "live-top");
     let save_comparisons = match (shared.save_comparisons.clone(), cfg.save_comparisons.clone()) {
@@ -370,7 +367,6 @@ pub fn resolve_config(shared: &ConfigArgs, cfg: &config::NanojudgeConfig) -> Res
         proposal_std,
         bias_prior_tau2,
         bias_proposal_std,
-        gap_proposal_std,
         live_top,
         save_comparisons,
         output_format,
@@ -409,7 +405,6 @@ mod tests {
             proposal_std: None,
             bias_prior_tau2: None,
             bias_proposal_std: None,
-            gap_proposal_std: None,
             live_top: None,
             save_comparisons: None,
             output_format: None,

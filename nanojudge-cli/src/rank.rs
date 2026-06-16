@@ -568,7 +568,7 @@ pub async fn run(args: RankArgs) {
                     proposal_std: resolved.proposal_std,
                     bias_prior_tau2: resolved.bias_prior_tau2,
                     bias_proposal_std: resolved.bias_proposal_std,
-                    gap_proposal_std: resolved.gap_proposal_std,
+
                     bias_prior_logit: resolved.bias_prior_logit,
                 },
                 &judge_info,
@@ -617,7 +617,6 @@ pub async fn run(args: RankArgs) {
             proposal_std: resolved.proposal_std,
             bias_prior_tau2: resolved.bias_prior_tau2,
             bias_proposal_std: resolved.bias_proposal_std,
-            gap_proposal_std: resolved.gap_proposal_std,
             bias_prior_logit: resolved.bias_prior_logit,
         },
         &judge_info,
