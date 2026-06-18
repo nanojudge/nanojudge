@@ -298,7 +298,13 @@ pub fn resolve_config(shared: &ConfigArgs, cfg: &config::NanojudgeConfig) -> Res
         (c @ Some(_), None) => c,
         (None, f) => f,
     };
-    let output_format = merge_opt(shared.output_format, cfg.output_format, "output-format").unwrap_or(OutputFormat::Table);
+    let output_format = merge_opt(shared.output_format, cfg.output_format, "output-format").unwrap_or_else(|| {
+        if std::io::IsTerminal::is_terminal(&std::io::stdout()) {
+            OutputFormat::Table
+        } else {
+            OutputFormat::Json
+        }
+    });
     let verbose = merge_opt(shared.verbose, cfg.verbose, "verbose").unwrap_or(false);
     let save_failures = match (shared.save_failures.clone(), cfg.save_failures.clone()) {
         (Some(c), Some(f)) => {
