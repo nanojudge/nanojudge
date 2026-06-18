@@ -4,6 +4,7 @@ use crate::prompt::build_prompt;
 use rand::Rng;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 
 fn truncate_for_log(s: &str, max: usize) -> String {
     if s.len() <= max {
@@ -32,6 +33,7 @@ pub struct LlmConfig {
     pub max_tokens: u32,
     /// OpenRouter extension: reasoning effort level (e.g. "none" to disable Qwen thinking).
     pub reasoning_effort: Option<String>,
+    pub chat_template_kwargs: Option<HashMap<String, serde_json::Value>>,
 }
 
 #[derive(Serialize)]
@@ -68,6 +70,8 @@ struct ChatCompletionRequest {
     /// Used to disable chain-of-thought for models like Qwen.
     #[serde(skip_serializing_if = "Option::is_none")]
     reasoning: Option<ReasoningConfig>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    chat_template_kwargs: Option<HashMap<String, serde_json::Value>>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -170,6 +174,7 @@ pub async fn send_comparison_request(
         reasoning: config.reasoning_effort.as_ref().map(|effort| ReasoningConfig {
             effort: effort.clone(),
         }),
+        chat_template_kwargs: config.chat_template_kwargs.clone(),
     };
 
     let url = build_completions_url(&config.endpoint);

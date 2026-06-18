@@ -3,6 +3,7 @@
 /// Config lives at ~/.config/nanojudge/config.toml.
 /// All fields are optional — CLI args override config values.
 use serde::Deserialize;
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use crate::args::OutputFormat;
@@ -27,6 +28,7 @@ pub struct JudgeConfig {
     /// Set to "none" to disable chain-of-thought for models like Qwen
     /// that otherwise produce <think>...</think> blocks.
     pub reasoning_effort: Option<String>,
+    pub chat_template_kwargs: Option<HashMap<String, toml::Value>>,
 }
 
 #[derive(Deserialize, Default, Debug)]
@@ -153,6 +155,7 @@ const DEFAULT_CONFIG_TEMPLATE: &str = "\
 #   max_tokens             - Maximum tokens in LLM response (default: 2048, or average of specified judges)
 #   api_key_env            - Environment variable name containing the API key
 #   reasoning_effort       - OpenRouter: controls reasoning/thinking mode (e.g. \\\"none\\\" to disable Qwen thinking)
+#   chat_template_kwargs   - Extra kwargs passed to the server's chat template (e.g. enable_thinking = false for llama.cpp)
 
 [[judge]]
 endpoint = \"http://localhost:8000\"

@@ -77,8 +77,24 @@ pub struct ResolvedJudge {
     pub min_logprob_coverage: f64,
     pub max_tokens: u32,
     pub reasoning_effort: Option<String>,
+    pub chat_template_kwargs: Option<HashMap<String, serde_json::Value>>,
     pub judge_id: u64,
     pub display_name: String,
+}
+
+fn toml_to_json(v: &toml::Value) -> serde_json::Value {
+    match v {
+        toml::Value::String(s) => serde_json::Value::String(s.clone()),
+        toml::Value::Integer(i) => serde_json::json!(i),
+        toml::Value::Float(f) => serde_json::json!(f),
+        toml::Value::Boolean(b) => serde_json::Value::Bool(*b),
+        toml::Value::Array(a) => serde_json::Value::Array(a.iter().map(toml_to_json).collect()),
+        toml::Value::Table(t) => {
+            let m = t.iter().map(|(k, v)| (k.clone(), toml_to_json(v))).collect();
+            serde_json::Value::Object(m)
+        }
+        toml::Value::Datetime(d) => serde_json::Value::String(d.to_string()),
+    }
 }
 
 /// Resolve judges from [[judge]] blocks in the config file.
@@ -222,6 +238,9 @@ pub fn resolve_judges(
             min_logprob_coverage,
             max_tokens: jc.max_tokens.unwrap_or(default_max_tokens),
             reasoning_effort: jc.reasoning_effort.clone(),
+            chat_template_kwargs: jc.chat_template_kwargs.as_ref().map(|m| {
+                m.iter().map(|(k, v)| (k.clone(), toml_to_json(v))).collect()
+            }),
             judge_id,
             display_name,
         });
@@ -434,6 +453,7 @@ mod tests {
                 api_key_env: None,
                 max_tokens: None,
                 reasoning_effort: None,
+                chat_template_kwargs: None,
             }]),
             ..Default::default()
         }

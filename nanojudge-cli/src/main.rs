@@ -61,6 +61,7 @@ async fn run_benchmark_cmd(args: BenchmarkArgs) {
             logprobs: judge.logprobs,
             max_tokens: judge.max_tokens,
             reasoning_effort: judge.reasoning_effort.clone(),
+            chat_template_kwargs: judge.chat_template_kwargs.clone(),
         };
 
         benchmark::run_benchmark(

@@ -158,6 +158,7 @@ pub async fn run(args: RankArgs) {
             logprobs: j.logprobs,
             max_tokens: j.max_tokens,
             reasoning_effort: j.reasoning_effort.clone(),
+            chat_template_kwargs: j.chat_template_kwargs.clone(),
         })
     }).collect();
 

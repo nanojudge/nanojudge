@@ -82,6 +82,7 @@ pub async fn run_benchmark(
         logprobs: llm_config.logprobs,
         max_tokens: llm_config.max_tokens,
         reasoning_effort: llm_config.reasoning_effort.clone(),
+        chat_template_kwargs: llm_config.chat_template_kwargs.clone(),
     });
 
     let client = Client::new();
