@@ -15,6 +15,7 @@
 /// pre-mapped `usize` indices, not caller IDs.
 use std::collections::HashMap;
 use rand::Rng;
+use rand::rngs::StdRng;
 
 use crate::types::{IndexedComparison, JudgeInfo, RankedItem, ScoringOptions};
 
@@ -304,15 +305,14 @@ impl GaussianBT {
         mcmc_iterations: usize,
         burn_in: usize,
         top_k: usize,
+        rng: &mut StdRng,
     ) -> SamplesResult {
-        let mut rng = rand::rng();
-
         for _ in 0..burn_in {
-            self.gibbs_iteration(&mut rng);
+            self.gibbs_iteration(rng);
             self.normalize_log_strengths();
         }
 
-        self.collect_samples(mcmc_iterations, top_k, &mut rng)
+        self.collect_samples(mcmc_iterations, top_k, rng)
     }
 
     /// Get current item state for warm-starting (log-strengths for real items).
@@ -340,6 +340,7 @@ impl GaussianBT {
         new_iterations: usize,
         burn_in: usize,
         top_k: usize,
+        rng: &mut StdRng,
     ) -> SamplesResult {
         let n = self.num_items;
         assert_eq!(previous_strengths.len(), n, "Previous state size mismatch");
@@ -354,14 +355,12 @@ impl GaussianBT {
             }
         }
 
-        let mut rng = rand::rng();
-
         for _ in 0..burn_in {
-            self.gibbs_iteration(&mut rng);
+            self.gibbs_iteration(rng);
             self.normalize_log_strengths();
         }
 
-        self.collect_samples(new_iterations, top_k, &mut rng)
+        self.collect_samples(new_iterations, top_k, rng)
     }
 
     /// Compute confidence intervals from pre-sorted MCMC samples.
@@ -413,6 +412,7 @@ impl GaussianBT {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::seed;
     use crate::types::ScoringOptions;
 
     fn single_judge_info() -> JudgeInfo {
@@ -441,6 +441,7 @@ mod tests {
             bias_prior_tau2: 2.0,
             bias_proposal_std: 0.15,
             bias_prior_logit: 0.0,
+            seed: None,
         }
     }
 
@@ -455,7 +456,8 @@ mod tests {
         let opts = default_options();
         let ji = single_judge_info();
         let mut mcmc = GaussianBT::new(3, &results, &opts, &ji);
-        let samples = mcmc.calculate_with_samples(20000, 500, 0);
+        let mut rng = seed::make_rng(None, seed::SUBSYSTEM_MCMC);
+        let samples = mcmc.calculate_with_samples(20000, 500, 0, &mut rng);
         let ranked = GaussianBT::compute_confidence_intervals_from_sorted_samples(
             &samples.sorted_samples, &samples.means, 0.95,
         );
@@ -474,14 +476,16 @@ mod tests {
         let opts = default_options();
         let ji = single_judge_info();
         let mut mcmc = GaussianBT::new(3, &results, &opts, &ji);
-        let _result1 = mcmc.calculate_with_samples(50, 50, 0);
+        let mut rng = seed::make_rng(None, seed::SUBSYSTEM_MCMC);
+        let _result1 = mcmc.calculate_with_samples(50, 50, 0, &mut rng);
         let state = mcmc.get_current_state();
 
         let judge_id_to_idx: HashMap<u64, usize> = ji.judge_ids.iter().enumerate().map(|(i, &id)| (id, i)).collect();
         let biases = mcmc.get_current_biases(&ji);
 
         let mut mcmc2 = GaussianBT::new(3, &results, &opts, &ji);
-        let result2 = mcmc2.calculate_incremental_with_samples(&state, &biases, &judge_id_to_idx, 50, 0, 0);
+        let mut rng2 = seed::make_rng(None, seed::SUBSYSTEM_MCMC);
+        let result2 = mcmc2.calculate_incremental_with_samples(&state, &biases, &judge_id_to_idx, 50, 0, 0, &mut rng2);
 
         assert_eq!(result2.means.len(), 3);
     }
@@ -500,7 +504,8 @@ mod tests {
         let opts = default_options();
         let ji = single_judge_info();
         let mut mcmc = GaussianBT::new(4, &results, &opts, &ji);
-        let result = mcmc.calculate_with_samples(200, 100, 2);
+        let mut rng = seed::make_rng(None, seed::SUBSYSTEM_MCMC);
+        let result = mcmc.calculate_with_samples(200, 100, 2, &mut rng);
 
         let probs = result.top_k_probs.unwrap();
         assert_eq!(probs.len(), 4);
@@ -541,7 +546,8 @@ mod tests {
             logprobs_mode: false,
         };
         let mut mcmc = GaussianBT::new(3, &results, &opts, &ji);
-        let result = mcmc.calculate_with_samples(500, 200, 0);
+        let mut rng = seed::make_rng(None, seed::SUBSYSTEM_MCMC);
+        let result = mcmc.calculate_with_samples(500, 200, 0, &mut rng);
 
         assert_eq!(result.means.len(), 3);
         assert_eq!(result.bias_logit_means.len(), 2);

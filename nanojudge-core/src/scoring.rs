@@ -5,6 +5,7 @@
 use std::collections::HashMap;
 
 use crate::gaussian_bt::GaussianBT;
+use crate::seed;
 use crate::types::{
     ComparisonInput, IdMap, JudgeAnalytics, JudgeInfo, ScoringOptions, ScoringResult,
     WarmStartState,
@@ -69,6 +70,8 @@ pub fn run_scoring(
         judge_info,
     );
 
+    let mut rng = seed::make_rng(options.seed, seed::SUBSYSTEM_MCMC);
+
     let samples_result = if let Some(ref warm_start) = options.warm_start {
         assert_eq!(
             warm_start.item_strengths.len(), num_items,
@@ -82,9 +85,10 @@ pub fn run_scoring(
             options.iterations,
             options.burn_in,
             options.top_k,
+            &mut rng,
         )
     } else {
-        mcmc.calculate_with_samples(options.iterations, options.burn_in, options.top_k)
+        mcmc.calculate_with_samples(options.iterations, options.burn_in, options.top_k, &mut rng)
     };
 
     // Compute confidence intervals; returned items use index-as-i64, map back to real IDs
@@ -181,6 +185,7 @@ mod tests {
             bias_proposal_std: 0.15,
 
             bias_prior_logit: 0.0,
+            seed: None,
         }
     }
 

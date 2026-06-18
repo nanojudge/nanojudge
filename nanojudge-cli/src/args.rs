@@ -166,6 +166,10 @@ pub struct ConfigArgs {
     /// With a path: saves to that file (or auto-generates a name if path is a directory).
     #[arg(long, num_args = 0..=1, default_missing_value = ".")]
     pub save_failures: Option<PathBuf>,
+
+    /// RNG seed for reproducible runs. Omit for OS entropy.
+    #[arg(long)]
+    pub seed: Option<u64>,
 }
 
 #[derive(Parser)]

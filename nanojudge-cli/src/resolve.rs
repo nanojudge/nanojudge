@@ -60,6 +60,7 @@ pub struct ResolvedConfig {
     pub output_format: OutputFormat,
     pub verbose: bool,
     pub save_failures: Option<PathBuf>,
+    pub seed: Option<u64>,
 }
 
 /// A resolved judge — all fields concrete, ready to build LlmConfig.
@@ -337,6 +338,8 @@ pub fn resolve_config(shared: &ConfigArgs, cfg: &config::NanojudgeConfig) -> Res
         (None, f) => f,
     };
 
+    let seed = merge_opt(shared.seed, cfg.seed, "seed");
+
     // bias_prior: user specifies in probability space, we convert to logit
     let bias_prior = merge_opt(shared.bias_prior, cfg.bias_prior, "bias-prior")
         .unwrap_or(0.5);
@@ -397,6 +400,7 @@ pub fn resolve_config(shared: &ConfigArgs, cfg: &config::NanojudgeConfig) -> Res
         output_format,
         verbose,
         save_failures,
+        seed,
     }
 }
 
@@ -435,6 +439,7 @@ mod tests {
             output_format: None,
             verbose: None,
             save_failures: None,
+            seed: None,
         }
     }
 

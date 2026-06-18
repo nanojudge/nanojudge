@@ -10,7 +10,9 @@ use crate::pairing::{
     generate_uniform_pairings_indexed, generate_top_heavy_pairings_indexed,
     get_effective_comparison_distribution, ComparisonDistribution,
 };
+use crate::seed::make_rng;
 use crate::types::{ComparisonInput, IdMap, Pair};
+use rand::rngs::StdRng;
 
 /// Collapse a categorical verdict distribution into a scalar P(item1 wins) for the
 /// Bradley-Terry matchmaking fit. A and B count as a win, C and D as a loss.
@@ -26,6 +28,7 @@ pub struct EngineConfig {
     pub matchmaking_sharpness: f64,
     pub min_uniform_games: usize,
     pub number_of_rounds: Option<usize>,
+    pub seed: Option<u64>,
 }
 
 pub struct RankingEngine {
@@ -53,6 +56,7 @@ pub struct RankingEngine {
     pub mcmc_top_k_probs: Option<Vec<f64>>,
 
     config: EngineConfig,
+    rng: StdRng,
 }
 
 impl RankingEngine {
@@ -67,6 +71,8 @@ impl RankingEngine {
         let num_items = id_map.len();
         assert!(num_items >= 2, "RankingEngine requires at least two items to compare.");
 
+        let rng = make_rng(config.seed, crate::seed::SUBSYSTEM_PAIRING);
+
         RankingEngine {
             id_map,
             completed_comparisons: Vec::new(),
@@ -77,6 +83,7 @@ impl RankingEngine {
             mcmc_sample_means: None,
             mcmc_top_k_probs: None,
             config,
+            rng,
         }
     }
 
@@ -119,6 +126,7 @@ impl RankingEngine {
                 self.config.matchmaking_sharpness,
                 &self.first_position_count,
                 &self.games_played,
+                &mut self.rng,
             ),
             ComparisonDistribution::TopHeavy => {
                 let top_k_probs = self.mcmc_top_k_probs.as_ref()
@@ -134,6 +142,7 @@ impl RankingEngine {
                     self.config.matchmaking_sharpness,
                     &self.first_position_count,
                     &self.games_played,
+                    &mut self.rng,
                 )
             }
         };
@@ -252,6 +261,7 @@ mod tests {
             matchmaking_sharpness: 1.0,
             min_uniform_games: 3,
             number_of_rounds: Some(5),
+            seed: None,
         };
 
         let mut engine = RankingEngine::new(&item_ids, config);
@@ -283,6 +293,7 @@ mod tests {
             matchmaking_sharpness: 1.0,
             min_uniform_games: 3,
             number_of_rounds: None,
+            seed: None,
         };
         let _ = RankingEngine::new(&[1], config);
     }
@@ -299,6 +310,7 @@ mod tests {
             matchmaking_sharpness: 1.0,
             min_uniform_games: 3,
             number_of_rounds: Some(342),
+            seed: None,
         };
 
         let mut engine = RankingEngine::new(&item_ids, config);
@@ -332,6 +344,7 @@ mod tests {
             matchmaking_sharpness: 1.0,
             min_uniform_games: 3,
             number_of_rounds: None,
+            seed: None,
         };
         let _ = RankingEngine::new(&[1, 2, 1], config);
     }

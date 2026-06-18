@@ -3,6 +3,7 @@ use nanojudge_core::{
     calculate_pairs_for_round, calculate_rounds_for_target_comparisons,
     calculate_total_expected_comparisons, run_scoring,
 };
+use nanojudge_core::seed;
 use rand::seq::SliceRandom;
 use reqwest::Client;
 use std::collections::HashMap;
@@ -292,6 +293,7 @@ pub async fn run(args: RankArgs) {
         matchmaking_sharpness: resolved.matchmaking_sharpness,
         min_uniform_games: resolved.min_uniform_games,
         number_of_rounds: Some(rounds),
+        seed: resolved.seed,
     };
     let mut engine = RankingEngine::new(&item_ids, engine_config);
 
@@ -321,6 +323,8 @@ pub async fn run(args: RankArgs) {
     let mut cumulative_judge_pairs: Vec<usize> = vec![0; judges.len()];
     let mut cumulative_criterion_pairs: Vec<usize> = vec![0; criteria.len()];
     let mut cumulative_total_pairs: usize = 0;
+    let mut judge_assign_rng = seed::make_rng(resolved.seed, seed::SUBSYSTEM_JUDGE_ASSIGN);
+    let mut jitter_rng = seed::make_rng(resolved.seed, seed::SUBSYSTEM_TEMP_JITTER);
 
     let mut interim_warm_start: Option<nanojudge_core::WarmStartState> = None;
     for round in 0..rounds {
@@ -334,14 +338,13 @@ pub async fn run(args: RankArgs) {
             eprintln!("Round {}/{}: {} pairs", round + 1, rounds, pairs.len());
         }
 
-        let mut rng = rand::rng();
         cumulative_total_pairs += pairs.len();
         let pair_assignments = assign_pairs_to_judges(
             pairs.len(),
             &normalized_weights,
             &mut cumulative_judge_pairs,
             cumulative_total_pairs,
-            &mut rng,
+            &mut judge_assign_rng,
         );
 
         let criterion_weights: Vec<f64> = vec![1.0 / criteria.len() as f64; criteria.len()];
@@ -350,16 +353,36 @@ pub async fn run(args: RankArgs) {
             &criterion_weights,
             &mut cumulative_criterion_pairs,
             cumulative_total_pairs,
-            &mut rng,
+            &mut judge_assign_rng,
         );
 
         let mut handles = Vec::with_capacity(pairs.len());
+
+        let precomputed_temperatures: Vec<f64> = pairs.iter().enumerate().map(|(pair_idx, _)| {
+            let judge_idx = pair_assignments[pair_idx];
+            let base = judge_llm_configs[judge_idx].temperature;
+            let jitter = judge_llm_configs[judge_idx].temperature_jitter;
+            crate::llm::jittered_temperature(base, jitter, &mut jitter_rng)
+        }).collect();
 
         for (pair_idx, (id_a, id_b)) in pairs.iter().enumerate() {
             let judge_idx = pair_assignments[pair_idx];
             let sem = judge_semaphores[judge_idx].clone();
             let client = client.clone();
-            let llm_config = judge_llm_configs[judge_idx].clone();
+            let base_config = &judge_llm_configs[judge_idx];
+            let llm_config = Arc::new(LlmConfig {
+                temperature: precomputed_temperatures[pair_idx],
+                temperature_jitter: 0.0,
+                endpoint: base_config.endpoint.clone(),
+                model: base_config.model.clone(),
+                api_key: base_config.api_key.clone(),
+                presence_penalty: base_config.presence_penalty,
+                top_p: base_config.top_p,
+                logprobs: base_config.logprobs,
+                max_tokens: base_config.max_tokens,
+                reasoning_effort: base_config.reasoning_effort.clone(),
+                chat_template_kwargs: base_config.chat_template_kwargs.clone(),
+            });
             let texts = texts.clone();
             let titles = titles.clone();
             let criterion = criteria[criterion_assignments[pair_idx]].clone();
@@ -569,8 +592,8 @@ pub async fn run(args: RankArgs) {
                     proposal_std: resolved.proposal_std,
                     bias_prior_tau2: resolved.bias_prior_tau2,
                     bias_proposal_std: resolved.bias_proposal_std,
-
                     bias_prior_logit: resolved.bias_prior_logit,
+                    seed: resolved.seed,
                 },
                 &judge_info,
             );
@@ -619,6 +642,7 @@ pub async fn run(args: RankArgs) {
             bias_prior_tau2: resolved.bias_prior_tau2,
             bias_proposal_std: resolved.bias_proposal_std,
             bias_prior_logit: resolved.bias_prior_logit,
+            seed: resolved.seed,
         },
         &judge_info,
     );

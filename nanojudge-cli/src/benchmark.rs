@@ -6,6 +6,7 @@
 use crate::bail;
 use crate::llm::{LlmConfig, send_comparison_request};
 use crate::prompt::build_prompt;
+use nanojudge_core::seed;
 use rand::Rng;
 use rand::seq::SliceRandom;
 use reqwest::Client;
@@ -45,12 +46,13 @@ pub async fn run_benchmark(
     concurrency: usize,
     min_logprob_coverage: f64,
     template: &str,
+    run_seed: Option<u64>,
 ) {
     let questions: Vec<BenchmarkQuestion> = serde_json::from_str(BENCHMARK_QUESTIONS)
         .unwrap_or_else(|e| bail(format!("Failed to parse embedded benchmark questions: {e}")));
 
     // Sample N questions (with replacement if num_pairs > questions.len())
-    let mut rng = rand::rng();
+    let mut rng = seed::make_rng(run_seed, seed::SUBSYSTEM_BENCHMARK);
     let selected: Vec<&BenchmarkQuestion> = if num_pairs <= questions.len() {
         let mut indices: Vec<usize> = (0..questions.len()).collect();
         indices.shuffle(&mut rng);

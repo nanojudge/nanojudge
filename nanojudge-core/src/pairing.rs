@@ -3,8 +3,10 @@
 /// Public functions accept `item_ids: &[i64]` and return `Pair` (i64, i64).
 /// Internal functions use `usize` indices for efficient array indexing.
 use rand::Rng;
+use rand::rngs::StdRng;
 
 use crate::constants::OPPONENT_WINDOW_SIZE;
+use crate::seed::make_rng;
 use crate::types::{IndexedPair, Pair};
 
 /// Comparison distribution enum.
@@ -98,6 +100,7 @@ pub fn generate_uniform_pairings(
 ) -> Vec<Pair> {
     let n = item_ids.len();
     let zeros = vec![0usize; n];
+    let mut rng = make_rng(None, crate::seed::SUBSYSTEM_PAIRING);
     let index_pairs = generate_uniform_pairings_indexed(
         n,
         pairs_count,
@@ -105,6 +108,7 @@ pub fn generate_uniform_pairings(
         sharpness,
         &zeros,
         &zeros,
+        &mut rng,
     );
     index_pairs.into_iter().map(|(a, b)| (item_ids[a], item_ids[b])).collect()
 }
@@ -126,6 +130,7 @@ pub fn generate_top_heavy_pairings(
 ) -> Vec<Pair> {
     let n = item_ids.len();
     let zeros = vec![0usize; n];
+    let mut rng = make_rng(None, crate::seed::SUBSYSTEM_PAIRING);
     let index_pairs = generate_top_heavy_pairings_indexed(
         n,
         pairs_count,
@@ -134,6 +139,7 @@ pub fn generate_top_heavy_pairings(
         sharpness,
         &zeros,
         &zeros,
+        &mut rng,
     );
     index_pairs.into_iter().map(|(a, b)| (item_ids[a], item_ids[b])).collect()
 }
@@ -149,8 +155,8 @@ pub(crate) fn generate_uniform_pairings_indexed(
     sharpness: f64,
     first_position_counts: &[usize],
     games_played: &[usize],
+    rng: &mut StdRng,
 ) -> Vec<IndexedPair> {
-    let mut rng = rand::rng();
     let mut pairings: Vec<IndexedPair> = Vec::with_capacity(pairs_count);
 
     if num_items < 2 {
@@ -165,7 +171,7 @@ pub(crate) fn generate_uniform_pairings_indexed(
 
     generate_uniform_iteration(
         num_items, current_ratings, sharpness, pairs_count,
-        &mut pairings, &mut rng,
+        &mut pairings, rng,
         &mut local_first_counts, &mut local_games,
     );
 
@@ -288,12 +294,11 @@ pub(crate) fn generate_top_heavy_pairings_indexed(
     sharpness: f64,
     first_position_counts: &[usize],
     games_played: &[usize],
+    rng: &mut StdRng,
 ) -> Vec<IndexedPair> {
     if num_items < 2 {
         return Vec::new();
     }
-
-    let mut rng = rand::rng();
     let pairs_target = pairs_count;
 
     let total_item1_weight: f64 = top_k_probs.iter().sum();
@@ -324,7 +329,7 @@ pub(crate) fn generate_top_heavy_pairings_indexed(
         let item1 = if total_item1_weight <= 0.0 {
             rng.random_range(0..num_items)
         } else {
-            weighted_random_select(top_k_probs, total_item1_weight, &mut rng)
+            weighted_random_select(top_k_probs, total_item1_weight, rng)
         };
 
         // Item 2: info-gain weighted from a window of nearby items in rating order.
@@ -352,7 +357,7 @@ pub(crate) fn generate_top_heavy_pairings_indexed(
         let item2_local_idx = if total_opp_weight <= 0.0 {
             rng.random_range(0..opponents.len())
         } else {
-            weighted_random_select(&opp_weights, total_opp_weight, &mut rng)
+            weighted_random_select(&opp_weights, total_opp_weight, rng)
         };
 
         let item2 = opponents[item2_local_idx];

@@ -108,6 +108,8 @@ pub struct ScoringOptions {
     pub bias_proposal_std: f64,
     /// Prior mean for positional bias in logit space. Default: 0.0 (= 0.5 probability = no bias).
     pub bias_prior_logit: f64,
+    /// RNG seed for reproducible MCMC sampling. `None` = OS entropy.
+    pub seed: Option<u64>,
 }
 
 /// Result from `run_scoring()`.

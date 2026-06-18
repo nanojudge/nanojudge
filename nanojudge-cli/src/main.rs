@@ -71,6 +71,7 @@ async fn run_benchmark_cmd(args: BenchmarkArgs) {
             judge.concurrency,
             judge.min_logprob_coverage,
             template,
+            resolved.seed,
         ).await;
 
         if judges.len() > 1 {

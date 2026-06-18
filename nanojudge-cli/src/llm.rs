@@ -136,11 +136,10 @@ fn build_completions_url(endpoint: &str) -> String {
 /// Apply normal jitter to temperature: N(1.0, jitter_std) clamped to [0.8, 1.2].
 /// Uses Box-Muller transform to avoid an extra crate dependency.
 /// Returns base unchanged if jitter_std is 0.0.
-fn jittered_temperature(base: f64, jitter_std: f64) -> f64 {
+pub(crate) fn jittered_temperature(base: f64, jitter_std: f64, rng: &mut impl Rng) -> f64 {
     if jitter_std == 0.0 {
         return base;
     }
-    let mut rng = rand::rng();
     let u1: f64 = rng.random::<f64>().max(1e-10);
     let u2: f64 = rng.random();
     let z = (-2.0 * u1.ln()).sqrt() * (2.0 * std::f64::consts::PI * u2).cos();
@@ -163,7 +162,7 @@ pub async fn send_comparison_request(
             role: "user",
             content: prompt.to_string(),
         }],
-        temperature: jittered_temperature(config.temperature, config.temperature_jitter),
+        temperature: config.temperature,
         max_tokens: config.max_tokens,
         logprobs: if config.logprobs { Some(true) } else { None },
         top_logprobs: if config.logprobs { Some(10) } else { None },
@@ -290,18 +289,18 @@ mod tests {
 
     #[test]
     fn test_jittered_temperature_no_jitter() {
-        // With jitter_std = 0.0, should return base exactly
-        assert_eq!(jittered_temperature(0.7, 0.0), 0.7);
-        assert_eq!(jittered_temperature(1.0, 0.0), 1.0);
-        assert_eq!(jittered_temperature(0.0, 0.0), 0.0);
+        let mut rng = rand::rng();
+        assert_eq!(jittered_temperature(0.7, 0.0, &mut rng), 0.7);
+        assert_eq!(jittered_temperature(1.0, 0.0, &mut rng), 1.0);
+        assert_eq!(jittered_temperature(0.0, 0.0, &mut rng), 0.0);
     }
 
     #[test]
     fn test_jittered_temperature_stays_in_range() {
-        // With jitter, result should be within [base * 0.8, base * 1.2]
+        let mut rng = rand::rng();
         let base = 0.7;
         for _ in 0..1000 {
-            let result = jittered_temperature(base, 0.1);
+            let result = jittered_temperature(base, 0.1, &mut rng);
             assert!(result >= base * 0.8, "result {result} < {}", base * 0.8);
             assert!(result <= base * 1.2, "result {result} > {}", base * 1.2);
         }
@@ -309,10 +308,10 @@ mod tests {
 
     #[test]
     fn test_jittered_temperature_high_jitter_still_clamped() {
-        // Even with extreme jitter, clamping should hold
+        let mut rng = rand::rng();
         let base = 1.0;
         for _ in 0..1000 {
-            let result = jittered_temperature(base, 10.0);
+            let result = jittered_temperature(base, 10.0, &mut rng);
             assert!(result >= base * 0.8);
             assert!(result <= base * 1.2);
         }

@@ -61,6 +61,7 @@ pub struct NanojudgeConfig {
     pub output_format: Option<OutputFormat>,
     pub verbose: Option<bool>,
     pub save_failures: Option<PathBuf>,
+    pub seed: Option<u64>,
     /// Judge panel configuration. At least one [[judge]] block is required.
     pub judge: Option<Vec<JudgeConfig>>,
 }
@@ -137,6 +138,9 @@ const DEFAULT_CONFIG_TEMPLATE: &str = "\
 
 # Max retries per comparison on HTTP errors. 0 = no retries. Default: 3.
 # retries = 3
+
+# RNG seed for reproducible runs. Omit for OS entropy.
+# seed = 42
 
 # --- Judges ---
 # At least one [[judge]] block is required. Each judge needs endpoint, model,
