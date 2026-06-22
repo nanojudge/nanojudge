@@ -300,6 +300,9 @@ pub fn resolve_config(shared: &ConfigArgs, cfg: &config::NanojudgeConfig) -> Res
         .unwrap_or(0.01);
     let mcmc_iterations = merge_opt(shared.mcmc_iterations, cfg.mcmc_iterations, "mcmc-iterations")
         .unwrap_or(2000);
+    if mcmc_iterations == 0 {
+        bail("mcmc-iterations must be at least 1");
+    }
     let mcmc_burn_in = merge_opt(shared.mcmc_burn_in, cfg.mcmc_burn_in, "mcmc-burn-in")
         .unwrap_or(500);
     let matchmaking_sharpness = merge_opt(shared.matchmaking_sharpness, cfg.matchmaking_sharpness, "matchmaking-sharpness")
