@@ -103,23 +103,17 @@ Add `--output-format json` for machine-readable output. Add `-v` for progress du
 
 ### Saving comparisons for inspection
 
-Save a sample of LLM responses to a JSONL file for spot-checking or live monitoring with `tail -f`:
+Save all LLM responses to a JSONL file for spot-checking or live monitoring with `tail -f`:
 
 ```bash
-# Save all comparisons
-nanojudge rank ... --save-comparisons 1.0
+# Save to comparisons-{timestamp}.jsonl in the current directory
+nanojudge rank ... --save-comparisons
 
-# Save ~10% of comparisons
-nanojudge rank ... --save-comparisons 0.1
-
-# Save exactly 50 randomly selected comparisons
-nanojudge rank ... --save-comparisons 50
-
-# Custom output path (default: comparisons.jsonl)
-nanojudge rank ... --save-comparisons 0.3 --save-comparisons-to samples.jsonl
+# Save to a specific file
+nanojudge rank ... --save-comparisons results.jsonl
 ```
 
-Each line is a JSON object with `round`, `item1`, `item2`, `probability`, and `response` (the raw LLM text). Lines are flushed immediately so you can `tail -f` during a run.
+Each line is a JSON object with `round`, `item1`, `item2`, `category_probs`, `judge_model`, `judge_endpoint`, and `response` (the raw LLM text). Lines are flushed immediately so you can `tail -f` during a run.
 
 ## Config file
 
