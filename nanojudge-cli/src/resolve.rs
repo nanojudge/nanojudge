@@ -303,6 +303,9 @@ pub fn resolve_config(shared: &ConfigArgs, cfg: &config::NanojudgeConfig) -> Res
     }
     let regularization_strength = merge_opt(shared.regularization_strength, cfg.regularization_strength, "regularization-strength")
         .unwrap_or(0.01);
+    if !regularization_strength.is_finite() || regularization_strength <= 0.0 {
+        bail(format!("regularization-strength={regularization_strength}, must be finite and > 0"));
+    }
     let mcmc_iterations = merge_opt(shared.mcmc_iterations, cfg.mcmc_iterations, "mcmc-iterations")
         .unwrap_or(2000);
     if mcmc_iterations == 0 {
@@ -312,16 +315,31 @@ pub fn resolve_config(shared: &ConfigArgs, cfg: &config::NanojudgeConfig) -> Res
         .unwrap_or(500);
     let matchmaking_sharpness = merge_opt(shared.matchmaking_sharpness, cfg.matchmaking_sharpness, "matchmaking-sharpness")
         .unwrap_or(1.0);
+    if !matchmaking_sharpness.is_finite() || matchmaking_sharpness <= 0.0 {
+        bail(format!("matchmaking-sharpness={matchmaking_sharpness}, must be finite and > 0"));
+    }
     let min_uniform_games = merge_opt(shared.min_uniform_games, cfg.min_uniform_games, "min-uniform-games")
         .unwrap_or(3);
     let prior_tau2 = merge_opt(shared.prior_tau2, cfg.prior_tau2, "prior-tau2")
         .unwrap_or(10.0);
+    if !prior_tau2.is_finite() || prior_tau2 <= 0.0 {
+        bail(format!("prior-tau2={prior_tau2}, must be finite and > 0"));
+    }
     let proposal_std = merge_opt(shared.proposal_std, cfg.proposal_std, "proposal-std")
         .unwrap_or(0.3);
+    if !proposal_std.is_finite() || proposal_std <= 0.0 {
+        bail(format!("proposal-std={proposal_std}, must be finite and > 0"));
+    }
     let bias_prior_tau2 = merge_opt(shared.bias_prior_tau2, cfg.bias_prior_tau2, "bias-prior-tau2")
         .unwrap_or(2.0);
+    if !bias_prior_tau2.is_finite() || bias_prior_tau2 <= 0.0 {
+        bail(format!("bias-prior-tau2={bias_prior_tau2}, must be finite and > 0"));
+    }
     let bias_proposal_std = merge_opt(shared.bias_proposal_std, cfg.bias_proposal_std, "bias-proposal-std")
         .unwrap_or(0.15);
+    if !bias_proposal_std.is_finite() || bias_proposal_std <= 0.0 {
+        bail(format!("bias-proposal-std={bias_proposal_std}, must be finite and > 0"));
+    }
 
     let live_top = merge_opt(shared.live_top, cfg.live_top, "live-top");
     let save_comparisons = match (shared.save_comparisons.clone(), cfg.save_comparisons.clone()) {
