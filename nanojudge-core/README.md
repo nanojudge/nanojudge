@@ -9,14 +9,17 @@ Takes pairwise win probabilities, produces ranked items with confidence interval
 Items are identified by `i64` IDs — any unique numbers you want. The crate handles internal index mapping.
 
 ```rust
-use nanojudge_core::{run_scoring, ComparisonInput, ScoringOptions};
+use nanojudge_core::{run_scoring, ComparisonInput, ScoringOptions, JudgeInfo, stable_hash};
 
 let item_ids = vec![100, 200, 300];
+let judge_id = stable_hash("my-endpoint/my-model");
 
 let comparisons = vec![
-    ComparisonInput { item1: 100, item2: 200, item1_win_probability: 0.8 },
-    ComparisonInput { item1: 200, item2: 300, item1_win_probability: 0.7 },
+    ComparisonInput { item1: 100, item2: 200, category_probs: [0.8, 0.0, 0.0, 0.2], judge_id },
+    ComparisonInput { item1: 200, item2: 300, category_probs: [0.7, 0.0, 0.0, 0.3], judge_id },
 ];
+
+let judge_info = JudgeInfo { judge_ids: vec![judge_id], logprobs_mode: false };
 
 let result = run_scoring(&item_ids, &comparisons, &ScoringOptions {
     iterations: 200,
@@ -25,7 +28,13 @@ let result = run_scoring(&item_ids, &comparisons, &ScoringOptions {
     top_k: 0,
     warm_start: None,
     regularization_strength: 0.01,
-});
+    prior_tau2: 10.0,
+    proposal_std: 0.3,
+    bias_prior_tau2: 2.0,
+    bias_proposal_std: 0.15,
+    bias_prior_logit: 0.0,
+    seed: None,
+}, &judge_info);
 
 for r in &result.rankings {
     println!("Item {}: {:.4} [{:.4}, {:.4}]", r.item, r.score, r.lower_bound, r.upper_bound);
@@ -37,9 +46,15 @@ for r in &result.rankings {
 For iterative ranking (compare, score, pick next pairs, repeat):
 
 ```rust
-use nanojudge_core::{RankingEngine, EngineConfig, ComparisonDistribution, ComparisonInput, run_scoring, ScoringOptions};
+use nanojudge_core::{
+    RankingEngine, EngineConfig, ComparisonDistribution,
+    ComparisonInput, run_scoring, ScoringOptions, JudgeInfo, stable_hash,
+};
 
 let item_ids: Vec<i64> = vec![10, 20, 30, 40];
+let judge_id = stable_hash("my-endpoint/my-model");
+let judge_info = JudgeInfo { judge_ids: vec![judge_id], logprobs_mode: false };
+
 let config = EngineConfig {
     comparison_distribution: ComparisonDistribution::TopHeavy,
     matchmaking_sharpness: 1.0,
@@ -59,7 +74,13 @@ for round in 0..20 {
             top_k: 6,
             warm_start: None,
             regularization_strength: 0.01,
-        });
+            prior_tau2: 10.0,
+            proposal_std: 0.3,
+            bias_prior_tau2: 2.0,
+            bias_proposal_std: 0.15,
+            bias_prior_logit: 0.0,
+            seed: None,
+        }, &judge_info);
         engine.mcmc_top_k_probs = scoring.top_k_probs;
         engine.mcmc_sample_means = scoring.sample_means;
     }
@@ -70,7 +91,7 @@ for round in 0..20 {
     // 3. You perform the comparisons (call your LLM, ask humans, etc.)
     let results: Vec<ComparisonInput> = pairs.iter().map(|&(a, b)| {
         let prob = your_llm_compare(a, b); // you implement this
-        ComparisonInput { item1: a, item2: b, item1_win_probability: prob }
+        ComparisonInput { item1: a, item2: b, category_probs: [prob, 0.0, 0.0, 1.0 - prob], judge_id }
     }).collect();
 
     // 4. Feed results back
