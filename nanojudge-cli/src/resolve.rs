@@ -296,6 +296,11 @@ pub fn resolve_config(shared: &ConfigArgs, cfg: &config::NanojudgeConfig) -> Res
 
     let confidence_level = merge_opt(shared.confidence_level, cfg.confidence_level, "confidence-level")
         .unwrap_or(0.95);
+    if confidence_level <= 0.0 || confidence_level >= 1.0 {
+        bail(format!(
+            "confidence-level={confidence_level}, must be between 0.0 and 1.0 (exclusive)"
+        ));
+    }
     let regularization_strength = merge_opt(shared.regularization_strength, cfg.regularization_strength, "regularization-strength")
         .unwrap_or(0.01);
     let mcmc_iterations = merge_opt(shared.mcmc_iterations, cfg.mcmc_iterations, "mcmc-iterations")
