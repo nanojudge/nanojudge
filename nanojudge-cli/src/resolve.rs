@@ -279,6 +279,9 @@ pub fn resolve_config(shared: &ConfigArgs, cfg: &config::NanojudgeConfig) -> Res
     if rounds.is_some() && comparisons.is_some() {
         bail("Specify --rounds or --comparisons, not both.");
     }
+    if rounds == Some(0) {
+        bail("--rounds must be at least 1");
+    }
 
     let comparison_distribution_str = merge_opt(shared.comparison_distribution.clone(), cfg.comparison_distribution.clone(), "comparison-distribution")
         .unwrap_or_else(|| "uniform".to_string());
