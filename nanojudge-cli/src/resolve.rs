@@ -132,6 +132,9 @@ pub fn resolve_judges(
 
     let global_concurrency = merge_opt(shared.concurrency, cfg.concurrency, "concurrency")
         .unwrap_or(DEFAULT_CONCURRENCY);
+    if global_concurrency == 0 {
+        bail("concurrency must be at least 1");
+    }
 
     let global_min_logprob_coverage = merge_opt(shared.min_logprob_coverage, cfg.min_logprob_coverage, "min-logprob-coverage")
         .unwrap_or(parse::DEFAULT_MIN_LOGPROB_COVERAGE);
@@ -234,7 +237,13 @@ pub fn resolve_judges(
             presence_penalty: jc.presence_penalty,
             top_p: jc.top_p,
             logprobs: global_logprobs,
-            concurrency: jc.concurrency.unwrap_or(global_concurrency),
+            concurrency: {
+                let c = jc.concurrency.unwrap_or(global_concurrency);
+                if c == 0 {
+                    bail(format!("judge '{}': concurrency must be at least 1", jc.endpoint));
+                }
+                c
+            },
             weight,
             min_logprob_coverage,
             max_tokens: jc.max_tokens.unwrap_or(default_max_tokens),
