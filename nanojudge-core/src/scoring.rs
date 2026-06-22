@@ -52,6 +52,8 @@ pub fn run_scoring(
     options: &ScoringOptions,
     judge_info: &JudgeInfo,
 ) -> ScoringResult {
+    assert!(options.iterations > 0, "iterations must be at least 1");
+
     let id_map = IdMap::from_ids(item_ids);
     let num_items = id_map.len();
 
