@@ -56,7 +56,7 @@ pub struct ConfigArgs {
     pub rounds: Option<usize>,
 
     /// Target number of comparisons (alternative to --rounds).
-    /// Converted to rounds by dividing by comparisons-per-round, rounded down.
+    /// Converted to rounds by dividing by comparisons-per-round, rounded up.
     #[arg(long, conflicts_with = "rounds")]
     pub comparisons: Option<usize>,
 

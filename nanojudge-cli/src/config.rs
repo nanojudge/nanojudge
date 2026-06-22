@@ -74,7 +74,7 @@ const DEFAULT_CONFIG_TEMPLATE: &str = "\
 # rounds = 10
 
 # Target number of comparisons (alternative to rounds).
-# Converted to rounds by dividing by comparisons-per-round, rounded down.
+# Converted to rounds by dividing by comparisons-per-round, rounded up.
 # comparisons = 500
 
 # Default max concurrent LLM requests per judge (can be overridden per-judge)
