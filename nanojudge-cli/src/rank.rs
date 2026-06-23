@@ -777,7 +777,7 @@ mod tests {
         // After 50 total pairs with equal weights, each should have ~16-17
         assert_eq!(cumulative.iter().sum::<usize>(), 50);
         for &count in &cumulative {
-            assert!(count >= 16 && count <= 17, "count {count} not in [16, 17]");
+            assert!((16..=17).contains(&count), "count {count} not in [16, 17]");
         }
     }
 

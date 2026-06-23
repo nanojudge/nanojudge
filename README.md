@@ -164,12 +164,13 @@ NanoJudge works with any instruct-tuned model served over an OpenAI-compatible A
 
 ## Workspace structure
 
-This repo is a Cargo workspace with two crates:
+This repo is a Cargo workspace with three crates:
 
 | Crate | What it does |
 |---|---|
 | `nanojudge-core` | Pure-computation ranking engine. No IO — just math. Use this as a Rust dependency. |
 | `nanojudge-cli` | Command-line tool that wires the engine to an OpenAI-compatible API. |
+| `nanojudge-bench` | Synthetic benchmark harness that measures ranking accuracy against known ground truth. |
 
 ## The bigger picture
 

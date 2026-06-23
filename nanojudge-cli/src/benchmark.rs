@@ -1,7 +1,7 @@
-/// Benchmark command: measures endpoint throughput, latency, reliability, and positional bias.
-///
-/// Runs N pairs of comparisons, each in both directions (A vs B and B vs A),
-/// collecting timing, token usage, verdict distribution, and flip rate statistics.
+//! Benchmark command: measures endpoint throughput, latency, reliability, and positional bias.
+//!
+//! Runs N pairs of comparisons, each in both directions (A vs B and B vs A),
+//! collecting timing, token usage, verdict distribution, and flip rate statistics.
 
 use crate::bail;
 use crate::llm::{LlmConfig, send_comparison_request};
@@ -349,7 +349,7 @@ pub async fn run_benchmark(
     writeln!(file, "Judge: {} | Endpoint: {} | Model: {}", display_name, llm_config.endpoint, llm_config.model).unwrap();
     writeln!(file, "Pairs: {} | Comparisons: {} | Wall time: {:.1}s", num_pairs, total_comparisons, wall_clock_secs).unwrap();
     writeln!(file, "Parse rate: {}/{} ({:.1}%)", parseable_count, non_http_count, parseable_count as f64 / non_http_count.max(1) as f64 * 100.0).unwrap();
-    writeln!(file, "").unwrap();
+    writeln!(file).unwrap();
 
     let mut comparison_num = 0usize;
     for i in 0..num_pairs {
@@ -370,13 +370,13 @@ pub async fn run_benchmark(
                 writeln!(file, "{}", "=".repeat(80)).unwrap();
                 writeln!(file, "#{} | Pair {} {} | {:.2}s | {}", comparison_num, i + 1, direction, result.latency_secs, status).unwrap();
                 writeln!(file, "{}", "=".repeat(80)).unwrap();
-                writeln!(file, "").unwrap();
+                writeln!(file).unwrap();
                 writeln!(file, "--- PROMPT ---").unwrap();
                 writeln!(file, "{}", result.prompt_text).unwrap();
-                writeln!(file, "").unwrap();
+                writeln!(file).unwrap();
                 writeln!(file, "--- RESPONSE ---").unwrap();
                 writeln!(file, "{}", result.response_text).unwrap();
-                writeln!(file, "").unwrap();
+                writeln!(file).unwrap();
             }
         }
     }

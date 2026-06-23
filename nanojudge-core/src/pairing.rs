@@ -63,17 +63,17 @@ pub fn get_effective_comparison_distribution(
     }
 
     // Stage 1: Warm-up
-    for i in 0..num_items {
-        if games_played[i] < min_uniform_games {
+    for &games in games_played.iter().take(num_items) {
+        if games < min_uniform_games {
             return ComparisonDistribution::Uniform;
         }
     }
 
     // Stage 3: Smoothing — last round
-    if let Some(total_rounds) = number_of_rounds {
-        if current_round_number >= total_rounds - 1 {
-            return ComparisonDistribution::Uniform;
-        }
+    if let Some(total_rounds) = number_of_rounds
+        && current_round_number >= total_rounds - 1
+    {
+        return ComparisonDistribution::Uniform;
     }
 
     // Stage 2
@@ -120,7 +120,7 @@ pub fn generate_uniform_pairings(
 ///
 /// # Panics
 ///
-/// Panics if `top_k_probs` or `sample_means` has fewer entries than `item_ids`.
+/// Panics if `top_k_probs` or `sample_means` length does not equal `item_ids` length.
 pub fn generate_top_heavy_pairings(
     item_ids: &[i64],
     pairs_count: usize,
@@ -178,6 +178,7 @@ pub(crate) fn generate_uniform_pairings_indexed(
     pairings
 }
 
+#[allow(clippy::too_many_arguments)]
 fn generate_uniform_iteration(
     num_items: usize,
     current_ratings: &[f64],
@@ -286,6 +287,7 @@ fn swap_remove_live(
     removed_pos
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn generate_top_heavy_pairings_indexed(
     num_items: usize,
     pairs_count: usize,
@@ -299,6 +301,8 @@ pub(crate) fn generate_top_heavy_pairings_indexed(
     if num_items < 2 {
         return Vec::new();
     }
+    assert_eq!(top_k_probs.len(), num_items, "top_k_probs length mismatch");
+    assert_eq!(sample_means.len(), num_items, "sample_means length mismatch");
     let pairs_target = pairs_count;
 
     let total_item1_weight: f64 = top_k_probs.iter().sum();

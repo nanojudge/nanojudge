@@ -247,8 +247,8 @@ impl GaussianBT {
             self.gibbs_iteration(rng);
             self.normalize_log_strengths();
 
-            for idx in 0..n {
-                samples_per_item[idx].push(self.log_strengths[idx]);
+            for (idx, samples) in samples_per_item.iter_mut().enumerate().take(n) {
+                samples.push(self.log_strengths[idx]);
             }
 
             let mut panel_prob = 0.0;
@@ -260,7 +260,7 @@ impl GaussianBT {
             panel_bias_samples.push(panel_prob);
 
             if let Some(ref mut counts) = top_k_count {
-                for j in 0..n { sort_indices[j] = j; }
+                for (j, idx) in sort_indices.iter_mut().enumerate().take(n) { *idx = j; }
                 sort_indices.sort_by(|&a, &b| {
                     self.log_strengths[b].partial_cmp(&self.log_strengths[a]).unwrap_or(std::cmp::Ordering::Equal)
                 });
@@ -273,17 +273,16 @@ impl GaussianBT {
         let mut sorted_samples = Vec::with_capacity(n);
         let mut means = Vec::with_capacity(n);
 
-        for idx in 0..n {
-            let samples = &mut samples_per_item[idx];
+        for samples in samples_per_item.iter_mut().take(n) {
             means.push(samples.iter().sum::<f64>() / samples.len() as f64);
             samples.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
             sorted_samples.push(std::mem::take(samples));
         }
 
         let mut bias_logit_means = Vec::with_capacity(k);
-        for j in 0..k {
-            bias_logit_means.push(bias_samples[j].iter().sum::<f64>() / bias_samples[j].len() as f64);
-            bias_samples[j].sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        for bias_sample in bias_samples.iter_mut().take(k) {
+            bias_logit_means.push(bias_sample.iter().sum::<f64>() / bias_sample.len() as f64);
+            bias_sample.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
         }
 
         panel_bias_samples.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
@@ -332,6 +331,7 @@ impl GaussianBT {
     /// # Panics
     ///
     /// Panics if `previous_strengths` does not have one entry per item.
+    #[allow(clippy::too_many_arguments)]
     pub fn calculate_incremental_with_samples(
         &mut self,
         previous_strengths: &[f64],
@@ -345,9 +345,7 @@ impl GaussianBT {
         let n = self.num_items;
         assert_eq!(previous_strengths.len(), n, "Previous state size mismatch");
 
-        for i in 0..n {
-            self.log_strengths[i] = previous_strengths[i];
-        }
+        self.log_strengths[..n].copy_from_slice(&previous_strengths[..n]);
 
         for &(judge_id, bias) in previous_biases {
             if let Some(&idx) = judge_id_to_idx.get(&judge_id) {
@@ -530,15 +528,16 @@ mod tests {
 
     #[test]
     fn test_multi_judge() {
-        let mut results: Vec<IndexedComparison> = Vec::new();
-        results.push((0, 1, 0.80, 0));
-        results.push((1, 0, 0.20, 0));
-        results.push((0, 1, 0.75, 1));
-        results.push((1, 0, 0.25, 1));
-        results.push((1, 2, 0.70, 0));
-        results.push((2, 1, 0.30, 0));
-        results.push((1, 2, 0.65, 1));
-        results.push((2, 1, 0.35, 1));
+        let results: Vec<IndexedComparison> = vec![
+            (0, 1, 0.80, 0),
+            (1, 0, 0.20, 0),
+            (0, 1, 0.75, 1),
+            (1, 0, 0.25, 1),
+            (1, 2, 0.70, 0),
+            (2, 1, 0.30, 0),
+            (1, 2, 0.65, 1),
+            (2, 1, 0.35, 1),
+        ];
 
         let opts = default_options();
         let ji = JudgeInfo {

@@ -227,6 +227,7 @@ pub async fn send_comparison_request(
 ///
 /// Retries up to `max_retries` times with exponential backoff (1s, 4s, 16s).
 /// Only HTTP/network errors trigger retries — unparseable verdicts do not.
+#[allow(clippy::too_many_arguments)]
 pub async fn compare_pair(
     client: &Client,
     config: &LlmConfig,

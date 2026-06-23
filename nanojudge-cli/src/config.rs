@@ -305,7 +305,7 @@ top_p = 0.95
         let config = load_config(tmpfile.path());
         assert_eq!(config.rounds.unwrap(), 10);
         assert_eq!(config.concurrency.unwrap(), 16);
-        assert_eq!(config.logprobs.unwrap(), false);
+        assert!(!config.logprobs.unwrap());
         assert_eq!(config.analysis_length.as_deref().unwrap(), "3 sentences");
         let judges = config.judge.unwrap();
         assert_eq!(judges.len(), 1);

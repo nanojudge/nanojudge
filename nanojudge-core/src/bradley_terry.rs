@@ -2,7 +2,7 @@
 ///
 /// Uses ghost player regularization and fractional wins from logprob-derived probabilities.
 /// Internal module — operates on pre-mapped `usize` indices, not caller IDs.
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 
 const CONVERGENCE_THRESHOLD: f64 = 1e-6;
 
@@ -12,7 +12,7 @@ pub struct BradleyTerry {
     /// Total number of items including ghost player.
     total: usize,
     /// Sparse fractional wins: wins_table[i] maps opponent index -> fractional wins of i over opponent.
-    wins_table: Vec<HashMap<usize, f64>>,
+    wins_table: Vec<BTreeMap<usize, f64>>,
     /// Total wins per item (precomputed for efficiency).
     total_wins: Vec<f64>,
     /// Current scores (indices 0..num_items are real items, last is ghost).
@@ -34,7 +34,7 @@ impl BradleyTerry {
         let total = num_items + 1; // real items + ghost
 
         // Build sparse wins table
-        let mut wins_table: Vec<HashMap<usize, f64>> = (0..total).map(|_| HashMap::new()).collect();
+        let mut wins_table: Vec<BTreeMap<usize, f64>> = (0..total).map(|_| BTreeMap::new()).collect();
 
         for &(i1, i2, prob) in results {
             assert!(i1 < num_items, "item1 index {} out of range (num_items = {})", i1, num_items);
@@ -80,18 +80,17 @@ impl BradleyTerry {
     fn run_iteration(&mut self) {
         let mut new_scores = vec![0.0; self.total];
 
-        for i in 0..self.total {
+        for (i, new_score) in new_scores.iter_mut().enumerate() {
             let total_wins_i = self.total_wins[i];
 
             if total_wins_i == 0.0 {
-                new_scores[i] = 0.0;
+                *new_score = 0.0;
                 continue;
             }
 
             let score_i = self.scores[i];
             let mut denominator = 0.0;
 
-            // Only iterate over items that i has actually played against (sparse)
             for (&j, &wins_i_to_j) in &self.wins_table[i] {
                 if j == i {
                     continue;
@@ -106,7 +105,7 @@ impl BradleyTerry {
                 }
             }
 
-            new_scores[i] = if denominator > 0.0 {
+            *new_score = if denominator > 0.0 {
                 total_wins_i / denominator
             } else {
                 self.scores[i]

@@ -34,6 +34,7 @@ struct JsonOutput {
 }
 
 /// Print results as a formatted terminal table.
+#[allow(clippy::too_many_arguments)]
 pub fn print_table(
     rankings: &[RankedItem],
     names: &[String],
@@ -98,19 +99,19 @@ pub fn print_table(
             "Position bias — estimated: {:.3} [{:.3}, {:.3}] (corrected for in scores, 0.5 = no bias)",
             ja.positional_bias, ja.positional_bias_ci.0, ja.positional_bias_ci.1,
         );
-        if let Some(&(input, output)) = judge_tokens.get(&ja.judge_id) {
-            if input > 0 || output > 0 {
-                println!(
-                    "Tokens — input: {}, output: {}",
-                    format_count(input as usize),
-                    format_count(output as usize)
-                );
-            }
+        if let Some(&(input, output)) = judge_tokens.get(&ja.judge_id)
+            && (input > 0 || output > 0)
+        {
+            println!(
+                "Tokens — input: {}, output: {}",
+                format_count(input as usize),
+                format_count(output as usize)
+            );
         }
-        if let Some(&avg) = judge_avg_wall_time.get(&ja.judge_id) {
-            if avg > 0.0 {
-                println!("Avg wall time per round: {}", format_duration(avg));
-            }
+        if let Some(&avg) = judge_avg_wall_time.get(&ja.judge_id)
+            && avg > 0.0
+        {
+            println!("Avg wall time per round: {}", format_duration(avg));
         }
     } else {
         print_judge_panel_analytics(

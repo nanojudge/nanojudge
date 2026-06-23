@@ -1,3 +1,3 @@
 [workspace]
-members = ["nanojudge-core", "nanojudge-cli"]
+members = ["nanojudge-core", "nanojudge-cli", "nanojudge-bench"]
 resolver = "3"

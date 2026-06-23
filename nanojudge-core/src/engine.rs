@@ -214,7 +214,7 @@ pub fn calculate_rounds_for_target_comparisons(num_items: usize, target_comparis
     if pairs_per_round == 0 || target_comparisons == 0 {
         return 0;
     }
-    (target_comparisons + pairs_per_round - 1) / pairs_per_round
+    target_comparisons.div_ceil(pairs_per_round)
 }
 
 #[cfg(test)]

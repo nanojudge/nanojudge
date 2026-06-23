@@ -116,7 +116,7 @@ fn extract_at_marker(
         // Skip lowercase 'a' without colon (likely the word "a", not choice A)
         let has_colon = tok.contains(':');
         let is_upper = first_char.is_uppercase();
-        if !is_upper && !has_colon && first_char.to_ascii_lowercase() == 'a' {
+        if !is_upper && !has_colon && first_char.eq_ignore_ascii_case(&'a') {
             continue;
         }
 
@@ -129,10 +129,10 @@ fn extract_at_marker(
 
         for tlp in top_logprobs {
             let clean = tlp.token.trim().trim_end_matches(':');
-            if clean.len() == 1 {
-                if let Some(tidx) = letter_to_index(clean.chars().next().unwrap()) {
-                    choice_probs[tidx] += tlp.logprob.exp();
-                }
+            if clean.len() == 1
+                && let Some(tidx) = letter_to_index(clean.chars().next().unwrap())
+            {
+                choice_probs[tidx] += tlp.logprob.exp();
             }
         }
 

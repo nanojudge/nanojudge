@@ -398,11 +398,11 @@ pub fn resolve_config(shared: &ConfigArgs, cfg: &config::NanojudgeConfig) -> Res
         let cli_path = shared.prompt_template.clone();
         let cfg_path = cfg.prompt_template.as_ref().map(PathBuf::from);
 
-        if let (Some(cp), Some(fp)) = (&cli_path, &cfg_path) {
-            if cp != fp {
-                eprintln!("Warning: --prompt-template ({}) overrides config file value ({})",
-                    cp.display(), fp.display());
-            }
+        if let (Some(cp), Some(fp)) = (&cli_path, &cfg_path)
+            && cp != fp
+        {
+            eprintln!("Warning: --prompt-template ({}) overrides config file value ({})",
+                cp.display(), fp.display());
         }
 
         let template_path = cli_path.or(cfg_path);
@@ -599,8 +599,7 @@ mod tests {
     fn test_reasoning_cli_overrides_config() {
         let mut cli = default_cli();
         cli.reasoning = Some(true);
-        let mut cfg = NanojudgeConfig::default();
-        cfg.reasoning_enabled = Some(false);
+        let cfg = NanojudgeConfig { reasoning_enabled: Some(false), ..Default::default() };
         let resolved = resolve_config(&cli, &cfg);
         assert!(resolved.reasoning_enabled);
     }
@@ -608,8 +607,7 @@ mod tests {
     #[test]
     fn test_reasoning_from_config() {
         let cli = default_cli();
-        let mut cfg = NanojudgeConfig::default();
-        cfg.reasoning_enabled = Some(false);
+        let cfg = NanojudgeConfig { reasoning_enabled: Some(false), ..Default::default() };
         let resolved = resolve_config(&cli, &cfg);
         assert!(!resolved.reasoning_enabled);
     }

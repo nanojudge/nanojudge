@@ -1,10 +1,10 @@
-/// Prompt building for pairwise comparisons.
-///
-/// Supports custom prompt templates with variable substitution.
-/// Required variables: $criterion, $option1, $option2
-///
-/// If no template is provided, a sensible default is used that produces
-/// a "Verdict:" marker followed by a verdict letter (A-D).
+//! Prompt building for pairwise comparisons.
+//!
+//! Supports custom prompt templates with variable substitution.
+//! Required variables: $criterion, $option1, $option2
+//!
+//! If no template is provided, a sensible default is used that produces
+//! a "Verdict:" marker followed by a verdict letter (A-D).
 
 use crate::bail;
 
