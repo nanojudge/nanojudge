@@ -48,7 +48,10 @@ struct Comparison {
 pub struct SamplesResult {
     pub sorted_samples: Vec<Vec<f64>>,
     pub means: Vec<f64>,
-    pub top_k_probs: Option<Vec<f64>>,
+    /// Per-item posterior standard deviation (spread of the strength samples),
+    /// in the same order as `means`. Used to summarize each item as a Gaussian
+    /// `(mean, std)` for top-heavy selection weighting.
+    pub stds: Vec<f64>,
     /// Per-judge positional-bias samples in logit space. Outer vec indexed by judge.
     pub bias_logit_samples: Vec<Vec<f64>>,
     /// Per-judge positional-bias means in logit space.
@@ -223,14 +226,10 @@ impl GaussianBT {
     fn collect_samples(
         &mut self,
         iterations: usize,
-        top_k: usize,
         rng: &mut impl Rng,
     ) -> SamplesResult {
         let n = self.num_items;
         let k = self.num_judges;
-        let effective_k = top_k.min(n);
-        let mut top_k_count: Option<Vec<usize>> = if top_k > 0 { Some(vec![0; n]) } else { None };
-        let mut sort_indices: Vec<usize> = (0..n).collect();
 
         let mut samples_per_item: Vec<Vec<f64>> = (0..n).map(|_| Vec::with_capacity(iterations)).collect();
         let mut bias_samples: Vec<Vec<f64>> = (0..k).map(|_| Vec::with_capacity(iterations)).collect();
@@ -258,23 +257,19 @@ impl GaussianBT {
                 panel_prob += panel_weights[j] / (1.0 + (-bias_logit).exp());
             }
             panel_bias_samples.push(panel_prob);
-
-            if let Some(ref mut counts) = top_k_count {
-                for (j, idx) in sort_indices.iter_mut().enumerate().take(n) { *idx = j; }
-                sort_indices.sort_by(|&a, &b| {
-                    self.log_strengths[b].partial_cmp(&self.log_strengths[a]).unwrap_or(std::cmp::Ordering::Equal)
-                });
-                for idx in 0..effective_k {
-                    counts[sort_indices[idx]] += 1;
-                }
-            }
         }
 
         let mut sorted_samples = Vec::with_capacity(n);
         let mut means = Vec::with_capacity(n);
+        let mut stds = Vec::with_capacity(n);
 
         for samples in samples_per_item.iter_mut().take(n) {
-            means.push(samples.iter().sum::<f64>() / samples.len() as f64);
+            let count = samples.len() as f64;
+            let mean = samples.iter().sum::<f64>() / count;
+            // Population variance of the collected samples → posterior spread.
+            let variance = samples.iter().map(|&x| (x - mean) * (x - mean)).sum::<f64>() / count;
+            means.push(mean);
+            stds.push(variance.max(0.0).sqrt());
             samples.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
             sorted_samples.push(std::mem::take(samples));
         }
@@ -290,7 +285,7 @@ impl GaussianBT {
         SamplesResult {
             sorted_samples,
             means,
-            top_k_probs: top_k_count.map(|c| c.iter().map(|&v| v as f64 / iterations as f64).collect()),
+            stds,
             bias_logit_samples: bias_samples,
             bias_logit_means,
             panel_bias_samples,
@@ -303,7 +298,6 @@ impl GaussianBT {
         &mut self,
         mcmc_iterations: usize,
         burn_in: usize,
-        top_k: usize,
         rng: &mut StdRng,
     ) -> SamplesResult {
         for _ in 0..burn_in {
@@ -311,7 +305,7 @@ impl GaussianBT {
             self.normalize_log_strengths();
         }
 
-        self.collect_samples(mcmc_iterations, top_k, rng)
+        self.collect_samples(mcmc_iterations, rng)
     }
 
     /// Get current item state for warm-starting (log-strengths for real items).
@@ -339,7 +333,6 @@ impl GaussianBT {
         judge_id_to_idx: &HashMap<u64, usize>,
         new_iterations: usize,
         burn_in: usize,
-        top_k: usize,
         rng: &mut StdRng,
     ) -> SamplesResult {
         let n = self.num_items;
@@ -358,7 +351,7 @@ impl GaussianBT {
             self.normalize_log_strengths();
         }
 
-        self.collect_samples(new_iterations, top_k, rng)
+        self.collect_samples(new_iterations, rng)
     }
 
     /// Compute confidence intervals from pre-sorted MCMC samples.
@@ -431,7 +424,9 @@ mod tests {
             iterations: 200,
             burn_in: 100,
             confidence_level: 0.95,
-            top_k: 0,
+            selection_sharpness: None,
+            selection_cutoff: 0.05,
+            selection_coverage: 0.0,
             warm_start: None,
             regularization_strength: 0.01,
             prior_tau2: 10.0,
@@ -455,7 +450,7 @@ mod tests {
         let ji = single_judge_info();
         let mut mcmc = GaussianBT::new(3, &results, &opts, &ji);
         let mut rng = seed::make_rng(None, seed::SUBSYSTEM_MCMC);
-        let samples = mcmc.calculate_with_samples(20000, 500, 0, &mut rng);
+        let samples = mcmc.calculate_with_samples(20000, 500, &mut rng);
         let ranked = GaussianBT::compute_confidence_intervals_from_sorted_samples(
             &samples.sorted_samples, &samples.means, 0.95,
         );
@@ -475,7 +470,7 @@ mod tests {
         let ji = single_judge_info();
         let mut mcmc = GaussianBT::new(3, &results, &opts, &ji);
         let mut rng = seed::make_rng(None, seed::SUBSYSTEM_MCMC);
-        let _result1 = mcmc.calculate_with_samples(50, 50, 0, &mut rng);
+        let _result1 = mcmc.calculate_with_samples(50, 50, &mut rng);
         let state = mcmc.get_current_state();
 
         let judge_id_to_idx: HashMap<u64, usize> = ji.judge_ids.iter().enumerate().map(|(i, &id)| (id, i)).collect();
@@ -483,13 +478,13 @@ mod tests {
 
         let mut mcmc2 = GaussianBT::new(3, &results, &opts, &ji);
         let mut rng2 = seed::make_rng(None, seed::SUBSYSTEM_MCMC);
-        let result2 = mcmc2.calculate_incremental_with_samples(&state, &biases, &judge_id_to_idx, 50, 0, 0, &mut rng2);
+        let result2 = mcmc2.calculate_incremental_with_samples(&state, &biases, &judge_id_to_idx, 50, 0, &mut rng2);
 
         assert_eq!(result2.means.len(), 3);
     }
 
     #[test]
-    fn test_top_k_probs() {
+    fn test_stds_reported_per_item() {
         let results: Vec<IndexedComparison> = [
             make_pair(0, 1, 0.9),
             make_pair(0, 2, 0.9),
@@ -503,11 +498,16 @@ mod tests {
         let ji = single_judge_info();
         let mut mcmc = GaussianBT::new(4, &results, &opts, &ji);
         let mut rng = seed::make_rng(None, seed::SUBSYSTEM_MCMC);
-        let result = mcmc.calculate_with_samples(200, 100, 2, &mut rng);
+        let result = mcmc.calculate_with_samples(200, 100, &mut rng);
 
-        let probs = result.top_k_probs.unwrap();
-        assert_eq!(probs.len(), 4);
-        assert!(probs[0] > probs[3], "Item 0 should have higher P(top K) than item 3");
+        // One posterior std per item, all finite and non-negative.
+        assert_eq!(result.stds.len(), 4);
+        assert_eq!(result.means.len(), 4);
+        for s in &result.stds {
+            assert!(s.is_finite() && *s >= 0.0, "std must be finite and non-negative, got {s}");
+        }
+        // With real comparison data the chain moves, so spread is strictly positive.
+        assert!(result.stds.iter().all(|&s| s > 0.0), "expected positive spread with data");
     }
 
     #[test]
@@ -546,7 +546,7 @@ mod tests {
         };
         let mut mcmc = GaussianBT::new(3, &results, &opts, &ji);
         let mut rng = seed::make_rng(None, seed::SUBSYSTEM_MCMC);
-        let result = mcmc.calculate_with_samples(500, 200, 0, &mut rng);
+        let result = mcmc.calculate_with_samples(500, 200, &mut rng);
 
         assert_eq!(result.means.len(), 3);
         assert_eq!(result.bias_logit_means.len(), 2);

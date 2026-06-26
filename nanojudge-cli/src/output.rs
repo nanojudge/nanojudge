@@ -11,6 +11,7 @@ struct JsonRankedItem {
     score: f64,
     lower_bound: f64,
     upper_bound: f64,
+    comparisons: usize,
 }
 
 #[derive(Serialize)]
@@ -280,9 +281,11 @@ fn format_count(n: usize) -> String {
 }
 
 /// Build JSON output string.
+#[allow(clippy::too_many_arguments)]
 fn build_json(
     rankings: &[RankedItem],
     names: &[String],
+    games_played: &[usize],
     rounds: usize,
     total_comparisons: usize,
     judge_analytics: &[JudgeAnalytics],
@@ -299,6 +302,7 @@ fn build_json(
             score: r.score,
             lower_bound: r.lower_bound,
             upper_bound: r.upper_bound,
+            comparisons: games_played[r.item as usize],
         })
         .collect();
 
@@ -327,9 +331,11 @@ fn build_json(
 }
 
 /// Print results as JSON.
+#[allow(clippy::too_many_arguments)]
 pub fn print_json(
     rankings: &[RankedItem],
     names: &[String],
+    games_played: &[usize],
     rounds: usize,
     total_comparisons: usize,
     judge_analytics: &[JudgeAnalytics],
@@ -341,6 +347,7 @@ pub fn print_json(
         build_json(
             rankings,
             names,
+            games_played,
             rounds,
             total_comparisons,
             judge_analytics,
@@ -395,7 +402,7 @@ mod tests {
     #[test]
     fn test_json_contains_all_fields() {
         let (rankings, names) = sample_rankings();
-        let json = build_json(&rankings, &names, 10, 30, &sample_analytics(), 0.523, (0.481, 0.567));
+        let json = build_json(&rankings, &names, &[11, 22, 33], 10, 30, &sample_analytics(), 0.523, (0.481, 0.567));
         let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
 
         assert_eq!(parsed["rounds"], 10);
@@ -408,7 +415,7 @@ mod tests {
     #[test]
     fn test_json_items_structure() {
         let (rankings, names) = sample_rankings();
-        let json = build_json(&rankings, &names, 10, 30, &sample_analytics(), 0.523, (0.481, 0.567));
+        let json = build_json(&rankings, &names, &[11, 22, 33], 10, 30, &sample_analytics(), 0.523, (0.481, 0.567));
         let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
 
         let items = parsed["items"].as_array().unwrap();
@@ -420,6 +427,7 @@ mod tests {
         assert_eq!(items[0]["score"], 1.58);
         assert_eq!(items[0]["lower_bound"], 1.20);
         assert_eq!(items[0]["upper_bound"], 1.97);
+        assert_eq!(items[0]["comparisons"], 33); // item id 2 -> games_played[2]
 
         assert_eq!(items[2]["rank"], 3);
         assert_eq!(items[2]["name"], "Banana");
@@ -428,7 +436,7 @@ mod tests {
     #[test]
     fn test_json_is_valid() {
         let (rankings, names) = sample_rankings();
-        let json = build_json(&rankings, &names, 5, 15, &sample_analytics(), 0.523, (0.481, 0.567));
+        let json = build_json(&rankings, &names, &[11, 22, 33], 5, 15, &sample_analytics(), 0.523, (0.481, 0.567));
         let _: serde_json::Value = serde_json::from_str(&json).unwrap();
     }
 

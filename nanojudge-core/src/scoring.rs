@@ -33,10 +33,96 @@ fn logit_to_prob_ci(sorted_logit_samples: &[f64], mean_logit: f64, confidence_le
     (prob, (lower, upper))
 }
 
+/// Standard normal CDF Φ(x).
+///
+/// Uses the Abramowitz & Stegun 7.1.26 rational approximation of `erf`
+/// (|absolute error| < 1.5e-7) via `Φ(x) = 0.5·(1 + erf(x/√2))`. That precision
+/// is far beyond what a sampling weight needs, and it keeps the crate
+/// dependency-free.
+fn normal_cdf(x: f64) -> f64 {
+    let sign = if x < 0.0 { -1.0 } else { 1.0 };
+    let z = (x / std::f64::consts::SQRT_2).abs();
+    let t = 1.0 / (1.0 + 0.327_591_1 * z);
+    let poly = t
+        * (0.254_829_592
+            + t * (-0.284_496_736
+                + t * (1.421_413_741 + t * (-1.453_152_027 + t * 1.061_405_429))));
+    let erf = 1.0 - poly * (-z * z).exp();
+    0.5 * (1.0 + sign * erf)
+}
+
+/// Build top-heavy item-selection weights from each item's posterior summary.
+///
+/// For each item the base weight is the area of its posterior lying above the
+/// top item's mean — `P(strength_i ≥ top_mean)` under a `Gaussian(mean, std)`
+/// summary — raised to `selection_sharpness` (lower = flatter = more
+/// exploration). The leader sits at area 0.5. Items whose area is below
+/// `selection_cutoff` are dropped to 0, except the two highest-area items, which
+/// are always kept so the pairing layer can always draw two distinct contenders.
+///
+/// The base weight is then divided by `games_played^selection_coverage` — a
+/// proportional-fair coverage pull that drives each item's cumulative comparison
+/// count toward its area-implied share (`selection_coverage = 0` disables it, `1`
+/// is standard proportional-fair). `games_played` uses the current cumulative
+/// counts, so a resolved item (area → 0) sheds its weight rather than carrying
+/// stale "owed" comparisons.
+///
+/// Weights are returned unnormalized; the pairing layer normalizes by its
+/// running total.
+fn compute_selection_weights(
+    means: &[f64],
+    stds: &[f64],
+    games_played: &[usize],
+    selection_sharpness: f64,
+    selection_cutoff: f64,
+    selection_coverage: f64,
+) -> Vec<f64> {
+    let n = means.len();
+    let top_mean = means.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+
+    // Raw area per item: P(item's strength exceeds the leader's mean).
+    let areas: Vec<f64> = (0..n)
+        .map(|i| {
+            if stds[i] <= 1e-12 {
+                // Degenerate point mass: only an item sitting at the top mean
+                // reaches it (the leader). Everything below contributes nothing.
+                if means[i] >= top_mean { 0.5 } else { 0.0 }
+            } else {
+                normal_cdf((means[i] - top_mean) / stds[i])
+            }
+        })
+        .collect();
+
+    // Always keep the two highest-area items regardless of cutoff, so the
+    // candidate pool never collapses below the two needed to form a pair.
+    let mut kept = vec![false; n];
+    let mut order: Vec<usize> = (0..n).collect();
+    order.sort_by(|&a, &b| areas[b].partial_cmp(&areas[a]).unwrap_or(std::cmp::Ordering::Equal));
+    for &idx in order.iter().take(2) {
+        kept[idx] = true;
+    }
+
+    (0..n)
+        .map(|i| {
+            let base = if areas[i] >= selection_cutoff || kept[i] {
+                areas[i].powf(selection_sharpness)
+            } else {
+                0.0
+            };
+            // Proportional-fair coverage: divide by games-played^selection_coverage. Guard
+            // the denominator at 1 so an item not yet played doesn't blow up
+            // (warm-up guarantees >= min_uniform_games before these weights are
+            // actually used for pairing).
+            let served = (games_played[i] as f64).max(1.0);
+            base / served.powf(selection_coverage)
+        })
+        .collect()
+}
+
 /// Run MCMC scoring on pairwise comparison data.
 ///
-/// `item_ids` is the full list of item IDs being ranked. The returned state,
-/// `top_k_probs`, and `sample_means` are in the same order as `item_ids`.
+/// `item_ids` is the full list of item IDs being ranked. The returned
+/// `selection_weights` (when requested) is in the same order as `item_ids`.
 ///
 /// # Panics
 ///
@@ -86,11 +172,10 @@ pub fn run_scoring(
             &judge_id_to_idx,
             options.iterations,
             options.burn_in,
-            options.top_k,
             &mut rng,
         )
     } else {
-        mcmc.calculate_with_samples(options.iterations, options.burn_in, options.top_k, &mut rng)
+        mcmc.calculate_with_samples(options.iterations, options.burn_in, &mut rng)
     };
 
     // Compute confidence intervals; returned items use index-as-i64, map back to real IDs
@@ -134,10 +219,29 @@ pub fn run_scoring(
         judge_biases: mcmc.get_current_biases(judge_info),
     };
 
+    // Top-heavy selection weights: each item's softened P(beat the leader's
+    // mean), built from the posterior (mean, std) summary, with a
+    // proportional-fair coverage pull. `None` for uniform.
+    let selection_weights = options.selection_sharpness.map(|selection_sharpness| {
+        // Comparisons played per item so far (each comparison touches two items).
+        let mut games_per_item = vec![0usize; num_items];
+        for &(idx1, idx2, _, _) in &indexed {
+            games_per_item[idx1] += 1;
+            games_per_item[idx2] += 1;
+        }
+        compute_selection_weights(
+            &samples_result.means,
+            &samples_result.stds,
+            &games_per_item,
+            selection_sharpness,
+            options.selection_cutoff,
+            options.selection_coverage,
+        )
+    });
+
     ScoringResult {
         rankings,
-        top_k_probs: if options.top_k > 0 { samples_result.top_k_probs } else { None },
-        sample_means: if options.top_k > 0 { Some(samples_result.means) } else { None },
+        selection_weights,
         warm_start_state,
         sample_size: options.iterations,
         judge_analytics,
@@ -178,7 +282,9 @@ mod tests {
             iterations: 200,
             burn_in: 100,
             confidence_level: 0.95,
-            top_k: 0,
+            selection_sharpness: None,
+            selection_cutoff: 0.05,
+            selection_coverage: 0.0,
             warm_start: None,
             regularization_strength: 0.01,
             prior_tau2: 10.0,
@@ -236,7 +342,7 @@ mod tests {
 
         assert_eq!(result.rankings.len(), 3);
         assert_eq!(result.rankings[0].item, 100);
-        assert!(result.top_k_probs.is_none());
+        assert!(result.selection_weights.is_none());
         assert_eq!(result.warm_start_state.item_strengths.len(), 3);
         assert_eq!(result.sample_size, 2000);
         assert_eq!(result.judge_analytics.len(), 1);
@@ -283,7 +389,7 @@ mod tests {
     }
 
     #[test]
-    fn test_scoring_with_top_k() {
+    fn test_scoring_with_selection_weights() {
         let item_ids = vec![1, 2, 3, 4];
         let comparisons: Vec<ComparisonInput> = [
             make_pair(1, 2, 0.9),
@@ -296,13 +402,49 @@ mod tests {
 
         let ji = single_judge_info();
         let mut opts = default_scoring_options();
-        opts.top_k = 2;
+        opts.selection_sharpness = Some(0.5);
 
         let result = run_scoring(&item_ids, &comparisons, &opts, &ji);
 
-        assert!(result.top_k_probs.is_some());
-        assert_eq!(result.top_k_probs.as_ref().unwrap().len(), 4);
-        assert!(result.sample_means.is_some());
+        let weights = result.selection_weights.expect("selection weights requested");
+        assert_eq!(weights.len(), 4);
+        // The dominant winner (item 1) should carry strictly more selection
+        // weight than the clear loser (item 4).
+        let idx1 = item_ids.iter().position(|&id| id == 1).unwrap();
+        let idx4 = item_ids.iter().position(|&id| id == 4).unwrap();
+        assert!(
+            weights[idx1] > weights[idx4],
+            "leader weight {} should exceed tail weight {}",
+            weights[idx1], weights[idx4]
+        );
+        // Every weight is finite and non-negative.
+        assert!(weights.iter().all(|&w| w.is_finite() && w >= 0.0));
+    }
+
+    #[test]
+    fn test_selection_weights_cutoff_keeps_at_least_two() {
+        // A runaway leader with everyone else far behind: the cutoff would zero
+        // the whole field, but the top-2 floor must keep two positive weights so
+        // a pair can still be drawn.
+        let item_ids = vec![1, 2, 3, 4, 5];
+        let comparisons: Vec<ComparisonInput> = [
+            make_pair(1, 2, 0.99),
+            make_pair(1, 3, 0.99),
+            make_pair(1, 4, 0.99),
+            make_pair(1, 5, 0.99),
+            make_pair(2, 3, 0.55),
+            make_pair(4, 5, 0.55),
+        ].into_iter().flatten().collect();
+
+        let ji = single_judge_info();
+        let mut opts = default_scoring_options();
+        opts.selection_sharpness = Some(0.5);
+        opts.selection_cutoff = 0.5; // aggressive: only the leader clears it on area
+
+        let result = run_scoring(&item_ids, &comparisons, &opts, &ji);
+        let weights = result.selection_weights.unwrap();
+        let positive = weights.iter().filter(|&&w| w > 0.0).count();
+        assert!(positive >= 2, "expected at least two positive weights, got {positive}");
     }
 
     #[test]
@@ -425,6 +567,66 @@ mod tests {
             .map(|ja| ja.positional_bias_ci.1 - ja.positional_bias_ci.0)
             .fold(0.0_f64, f64::max);
         assert!(hi - lo <= max_judge_width + 1e-12);
+    }
+
+    #[test]
+    fn test_normal_cdf_known_points() {
+        assert!((normal_cdf(0.0) - 0.5).abs() < 1e-6);
+        assert!((normal_cdf(1.959_963_98) - 0.975).abs() < 1e-5); // 97.5% quantile
+        assert!((normal_cdf(-1.959_963_98) - 0.025).abs() < 1e-5);
+        assert!(normal_cdf(8.0) > 0.999_999);
+        assert!(normal_cdf(-8.0) < 1e-6);
+        // Symmetry: Φ(x) + Φ(-x) = 1.
+        assert!((normal_cdf(1.3) + normal_cdf(-1.3) - 1.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_compute_selection_weights_leader_and_ordering() {
+        // means descending; the leader (index 0) must land at area 0.5, and
+        // weights must be non-increasing in distance below the leader.
+        let means = vec![2.0, 1.5, 1.0, 0.0];
+        let stds = vec![0.5, 0.5, 0.5, 0.5];
+        let games = vec![10, 10, 10, 10];
+        // sharpness 1, no cutoff, no coverage pull → pure area.
+        let w = compute_selection_weights(&means, &stds, &games, 1.0, 0.0, 0.0);
+        assert!((w[0] - 0.5).abs() < 1e-6, "leader area should be 0.5, got {}", w[0]);
+        assert!(w[0] > w[1] && w[1] > w[2] && w[2] > w[3]);
+    }
+
+    #[test]
+    fn test_compute_selection_weights_sharpness_flattens() {
+        // Lower sharpness compresses the leader-to-tail ratio.
+        let means = vec![2.0, 1.0];
+        let stds = vec![1.0, 1.0];
+        let games = vec![10, 10];
+        let sharp = compute_selection_weights(&means, &stds, &games, 1.0, 0.0, 0.0);
+        let soft = compute_selection_weights(&means, &stds, &games, 0.5, 0.0, 0.0);
+        let ratio_sharp = sharp[0] / sharp[1];
+        let ratio_soft = soft[0] / soft[1];
+        assert!(ratio_soft < ratio_sharp, "lower sharpness should flatten the ratio");
+    }
+
+    #[test]
+    fn test_compute_selection_weights_coverage_pull() {
+        // Two items with identical posteriors (so identical area), but one has
+        // been played far more. With coverage = 0 their weights match; with
+        // coverage > 0 the under-played item is boosted above the over-played one.
+        let means = vec![1.0, 1.0];
+        let stds = vec![1.0, 1.0];
+        let games = vec![2, 50]; // item 0 under-served, item 1 over-served
+
+        let no_pull = compute_selection_weights(&means, &stds, &games, 1.0, 0.0, 0.0);
+        assert!((no_pull[0] - no_pull[1]).abs() < 1e-12, "coverage 0 should ignore games");
+
+        let pull = compute_selection_weights(&means, &stds, &games, 1.0, 0.0, 1.0);
+        assert!(
+            pull[0] > pull[1],
+            "under-served item should outweigh over-served one under coverage pull: {} vs {}",
+            pull[0], pull[1]
+        );
+        // Proportional-fair (coverage 1): weight ratio should be the inverse game
+        // ratio, i.e. 50/2 = 25.
+        assert!(((pull[0] / pull[1]) - 25.0).abs() < 1e-6);
     }
 
     #[test]

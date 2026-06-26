@@ -27,7 +27,6 @@ pub struct EngineConfig {
     pub comparison_distribution: ComparisonDistribution,
     pub matchmaking_sharpness: f64,
     pub min_uniform_games: usize,
-    pub number_of_rounds: Option<usize>,
     pub seed: Option<u64>,
 }
 
@@ -47,13 +46,11 @@ pub struct RankingEngine {
     /// Current BT ratings (indexed internally 0..num_items).
     current_ratings: Vec<f64>,
 
-    current_round_number: usize,
-
-    /// MCMC data for top-heavy pairing (indexed 0..num_items, same order as item_ids).
-    /// Caller MUST set these before calling `generate_pairs_for_round()` when using
-    /// the TopHeavy distribution. The engine will panic if missing.
-    pub mcmc_sample_means: Option<Vec<f64>>,
-    pub mcmc_top_k_probs: Option<Vec<f64>>,
+    /// Per-item selection weights for top-heavy pairing (indexed 0..num_items,
+    /// same order as item_ids). Caller MUST set this before calling
+    /// `generate_pairs_for_round()` when using the TopHeavy distribution past
+    /// warm-up. The engine will panic if missing.
+    pub selection_weights: Option<Vec<f64>>,
 
     config: EngineConfig,
     rng: StdRng,
@@ -79,9 +76,7 @@ impl RankingEngine {
             games_played: vec![0; num_items],
             first_position_count: vec![0; num_items],
             current_ratings: vec![INITIAL_BRADLEY_TERRY_RATING; num_items],
-            current_round_number: 0,
-            mcmc_sample_means: None,
-            mcmc_top_k_probs: None,
+            selection_weights: None,
             config,
             rng,
         }
@@ -98,14 +93,11 @@ impl RankingEngine {
     ///
     /// Panics if the round's effective distribution is top-heavy and the MCMC
     /// data is missing or malformed. The effective distribution is top-heavy
-    /// when the engine is configured with `ComparisonDistribution::TopHeavy`,
-    /// every item has reached `min_uniform_games`, and this is not the final
-    /// round (warm-up and smoothing rounds use uniform pairing and need no
-    /// MCMC data). In a top-heavy round:
-    /// - `mcmc_top_k_probs` and `mcmc_sample_means` must be set
-    /// - both must have one entry per item
-    pub fn generate_pairs_for_round(&mut self, round_index: usize) -> Vec<Pair> {
-        self.current_round_number = round_index;
+    /// when the engine is configured with `ComparisonDistribution::TopHeavy`
+    /// and every item has reached `min_uniform_games` (warm-up rounds use
+    /// uniform pairing and need no MCMC data). In a top-heavy round
+    /// `selection_weights` must be set, with one entry per item.
+    pub fn generate_pairs_for_round(&mut self, _round_index: usize) -> Vec<Pair> {
         let num_items = self.id_map.len();
         let pairs_count = calculate_pairs_for_round(num_items);
 
@@ -113,9 +105,7 @@ impl RankingEngine {
             self.config.comparison_distribution,
             num_items,
             &self.games_played,
-            self.current_round_number,
             self.config.min_uniform_games,
-            self.config.number_of_rounds,
         );
 
         let index_pairs = match effective_comparison_distribution {
@@ -129,17 +119,13 @@ impl RankingEngine {
                 &mut self.rng,
             ),
             ComparisonDistribution::TopHeavy => {
-                let top_k_probs = self.mcmc_top_k_probs.as_ref()
-                    .expect("TopHeavy distribution requires mcmc_top_k_probs to be set before generating pairs");
-                let sample_means = self.mcmc_sample_means.as_ref()
-                    .expect("TopHeavy distribution requires mcmc_sample_means to be set before generating pairs");
+                let selection_weights = self.selection_weights.as_ref()
+                    .expect("TopHeavy distribution requires selection_weights to be set before generating pairs");
 
                 generate_top_heavy_pairings_indexed(
                     num_items,
                     pairs_count,
-                    top_k_probs,
-                    sample_means,
-                    self.config.matchmaking_sharpness,
+                    selection_weights,
                     &self.first_position_count,
                     &self.games_played,
                     &mut self.rng,
@@ -260,7 +246,6 @@ mod tests {
             comparison_distribution: ComparisonDistribution::Uniform,
             matchmaking_sharpness: 1.0,
             min_uniform_games: 3,
-            number_of_rounds: Some(5),
             seed: None,
         };
 
@@ -292,7 +277,6 @@ mod tests {
             comparison_distribution: ComparisonDistribution::Uniform,
             matchmaking_sharpness: 1.0,
             min_uniform_games: 3,
-            number_of_rounds: None,
             seed: None,
         };
         let _ = RankingEngine::new(&[1], config);
@@ -309,7 +293,6 @@ mod tests {
             comparison_distribution: ComparisonDistribution::Uniform,
             matchmaking_sharpness: 1.0,
             min_uniform_games: 3,
-            number_of_rounds: Some(342),
             seed: None,
         };
 
@@ -343,7 +326,6 @@ mod tests {
             comparison_distribution: ComparisonDistribution::Uniform,
             matchmaking_sharpness: 1.0,
             min_uniform_games: 3,
-            number_of_rounds: None,
             seed: None,
         };
         let _ = RankingEngine::new(&[1, 2, 1], config);

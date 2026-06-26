@@ -73,10 +73,27 @@ pub struct ConfigArgs {
     #[arg(long)]
     pub comparison_distribution: Option<String>,
 
-    /// How many top positions to track for the top-heavy distribution.
-    /// Default: sqrt(n) * 3, clamped to n-1. Only used with --comparison-distribution top-heavy.
+    /// Top-heavy selection sharpness: each item's P(beat the current leader) is
+    /// raised to this power before being used as its pairing weight. Lower =
+    /// flatter = more exploration; 1.0 = raw probabilities. Must be finite and
+    /// > 0. Default: 0.1. Only used with top-heavy.
     #[arg(long)]
-    pub top_k: Option<usize>,
+    pub selection_sharpness: Option<f64>,
+
+    /// Top-heavy selection cutoff: an item needs at least this P(beat the
+    /// leader's mean) to stay a candidate; items below are dropped (the two
+    /// strongest are always kept). In [0, 1); 0 disables the cutoff. Default: 0
+    /// (no cutoff — sharpness does the shaping). Only used with top-heavy.
+    #[arg(long)]
+    pub cutoff: Option<f64>,
+
+    /// Top-heavy coverage pull (proportional-fair). Each item's weight is divided
+    /// by games-played^coverage, pulling its cumulative comparison count toward
+    /// its area-implied share. 0 = off, 1 = standard proportional-fair, > 1
+    /// over-corrects toward equal coverage. Must be finite and >= 0. Default: 1.
+    /// Only used with top-heavy.
+    #[arg(long)]
+    pub coverage: Option<f64>,
 
     /// Max retries per comparison on HTTP errors. Default: 3. Set to 0 to disable.
     #[arg(long)]
@@ -105,7 +122,7 @@ pub struct ConfigArgs {
     #[arg(long)]
     pub regularization_strength: Option<f64>,
 
-    /// Number of post-burn-in MCMC iterations for final scoring. Default: 2000.
+    /// Number of post-burn-in MCMC iterations for final scoring. Default: 5000.
     #[arg(long)]
     pub mcmc_iterations: Option<usize>,
 
@@ -122,7 +139,7 @@ pub struct ConfigArgs {
     #[arg(long)]
     pub matchmaking_sharpness: Option<f64>,
 
-    /// Minimum games per item before the top-heavy distribution kicks in. Default: 3.
+    /// Minimum games per item before the top-heavy distribution kicks in. Default: 2.
     #[arg(long)]
     pub min_uniform_games: Option<usize>,
 

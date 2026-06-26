@@ -25,7 +25,9 @@ let result = run_scoring(&item_ids, &comparisons, &ScoringOptions {
     iterations: 200,
     burn_in: 100,
     confidence_level: 0.95,
-    top_k: 0,
+    selection_sharpness: None,
+    selection_cutoff: 0.0005,
+    selection_coverage: 1.0,
     warm_start: None,
     regularization_strength: 0.01,
     prior_tau2: 10.0,
@@ -58,8 +60,7 @@ let judge_info = JudgeInfo { judge_ids: vec![judge_id], logprobs_mode: false };
 let config = EngineConfig {
     comparison_distribution: ComparisonDistribution::TopHeavy,
     matchmaking_sharpness: 1.0,
-    min_uniform_games: 3,
-    number_of_rounds: Some(20),
+    min_uniform_games: 2,
 };
 
 let mut engine = RankingEngine::new(&item_ids, config);
@@ -71,7 +72,12 @@ for round in 0..20 {
             iterations: 200,
             burn_in: 100,
             confidence_level: 0.95,
-            top_k: 6,
+            // Top-heavy selection: weight each item by its softened probability
+            // of beating the current leader. Both compared items are drawn from
+            // these weights. `None` would disable top-heavy weighting.
+            selection_sharpness: Some(0.5),
+            selection_cutoff: 0.0005,
+            selection_coverage: 1.0,
             warm_start: None,
             regularization_strength: 0.01,
             prior_tau2: 10.0,
@@ -81,8 +87,7 @@ for round in 0..20 {
             bias_prior_logit: 0.0,
             seed: None,
         }, &judge_info);
-        engine.mcmc_top_k_probs = scoring.top_k_probs;
-        engine.mcmc_sample_means = scoring.sample_means;
+        engine.selection_weights = scoring.selection_weights;
     }
 
     // 2. Engine decides which pairs to compare
@@ -103,7 +108,7 @@ for round in 0..20 {
 ## The math
 
 1. **Bradley-Terry MLE** — fast iterative algorithm for point-estimate scores from pairwise win rates
-2. **Gaussian BT MCMC** — Bayesian posterior sampling via Metropolis-Hastings within Gibbs, producing confidence intervals and P(top K) probabilities
+2. **Gaussian BT MCMC** — Bayesian posterior sampling via Metropolis-Hastings within Gibbs, producing confidence intervals and per-item selection weights (each item's softened probability of beating the current leader)
 3. **Positional bias estimation** — jointly estimated during MCMC sampling. LLMs tend to favor whichever option is shown first; the sampler detects and corrects for this automatically
 4. **Smart pairing** — decides which pairs to compare next to maximize information gain per comparison
 

@@ -44,6 +44,21 @@ struct Args {
     #[arg(long)]
     comparison_distribution: String,
 
+    /// Top-heavy selection sharpness forwarded to the CLI. Omit to use the CLI's
+    /// default (0.1).
+    #[arg(long)]
+    selection_sharpness: Option<f64>,
+
+    /// Top-heavy selection cutoff forwarded to the CLI. Omit to use the CLI's
+    /// default (0 = no cutoff).
+    #[arg(long)]
+    cutoff: Option<f64>,
+
+    /// Top-heavy coverage pull forwarded to the CLI. Omit to use the CLI's
+    /// default (1 = proportional-fair).
+    #[arg(long)]
+    coverage: Option<f64>,
+
     /// Use logprobs mode instead of text-verdict mode.
     #[arg(long)]
     logprobs: bool,
@@ -132,6 +147,9 @@ async fn main() {
         strength_spread: args.spread,
         use_logprobs: args.logprobs,
         distribution: &args.comparison_distribution,
+        selection_sharpness: args.selection_sharpness,
+        cutoff: args.cutoff,
+        coverage: args.coverage,
         nanojudge_bin: &nanojudge_bin,
     };
 
@@ -145,7 +163,9 @@ async fn main() {
             eprint!("\r  Running trial {}/{}...", t + 1, args.trials);
         }
 
-        match trial::run(&config, trial_seed, top_k).await {
+        // Capture the ranking table from the first trial only, to avoid spamming
+        // one table per trial.
+        match trial::run(&config, trial_seed, top_k, t == 0).await {
             Ok(result) => {
                 if args.verbose {
                     eprintln!(
@@ -184,6 +204,15 @@ async fn main() {
     }
 
     print_summary(&results, top_k, errors);
+
+    // Show one example ranking (captured from the first trial) so the actual
+    // output is visible, not just the aggregate metrics.
+    if let Some(table) = results.iter().find_map(|r| r.example_ranking.as_ref()) {
+        println!();
+        println!("Example ranking (trial 1):");
+        println!();
+        print!("{table}");
+    }
 }
 
 // ---------------------------------------------------------------------------

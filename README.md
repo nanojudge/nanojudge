@@ -125,7 +125,8 @@ Key settings:
 |---|---|
 | `rounds` | Number of comparison rounds |
 | `logprobs` | `true` to extract logprobs for continuous confidence (requires endpoint support, e.g. vLLM). `false` for text-based verdict parsing (works everywhere, but needs more rounds). |
-| `comparison_distribution` | `"uniform"` (default) or `"top-heavy"` |
+| `comparison_distribution` | `"uniform"` (default) or `"top-heavy"`. Top-heavy concentrates comparisons on the contenders for the top spots. |
+| `selection_sharpness` / `cutoff` | Top-heavy tuning. Each item's pairing weight is its probability of beating the current leader (from the posterior mean/std), raised to `selection_sharpness` (lower = flatter = more exploration; default `0.1`). `cutoff` drops items below that probability of beating the leader's mean, keeping the two strongest regardless (`[0,1)`, default `0` — no cutoff; sharpness does the shaping). Both items in each comparison are drawn from these weights. |
 
 Per-judge settings (in `[[judge]]` blocks):
 

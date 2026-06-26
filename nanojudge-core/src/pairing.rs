@@ -42,10 +42,9 @@ fn position_probability(
 
 /// Determine the effective comparison distribution to use for this round.
 ///
-/// Three stages:
+/// Two stages:
 ///   Stage 1 (Warm-up): Uniform until every item has >= min_uniform_games.
-///   Stage 2 (P(top K)): Top-heavy — the main phase.
-///   Stage 3 (Smoothing): Last round reverts to uniform.
+///   Stage 2 (Main phase): Top-heavy.
 ///
 /// # Panics
 ///
@@ -54,9 +53,7 @@ pub fn get_effective_comparison_distribution(
     user_comparison_distribution: ComparisonDistribution,
     num_items: usize,
     games_played: &[usize],
-    current_round_number: usize,
     min_uniform_games: usize,
-    number_of_rounds: Option<usize>,
 ) -> ComparisonDistribution {
     if user_comparison_distribution == ComparisonDistribution::Uniform {
         return ComparisonDistribution::Uniform;
@@ -69,14 +66,7 @@ pub fn get_effective_comparison_distribution(
         }
     }
 
-    // Stage 3: Smoothing — last round
-    if let Some(total_rounds) = number_of_rounds
-        && current_round_number >= total_rounds - 1
-    {
-        return ComparisonDistribution::Uniform;
-    }
-
-    // Stage 2
+    // Stage 2: Main phase
     ComparisonDistribution::TopHeavy
 }
 
@@ -115,18 +105,20 @@ pub fn generate_uniform_pairings(
 
 /// Generate top-heavy pairings for a round.
 ///
-/// `top_k_probs[i]` and `sample_means[i]` correspond to `item_ids[i]`.
-/// Returns pairs of item IDs.
+/// Both items in every pair are sampled from the per-item selection weights
+/// `selection_weights[i]` (corresponding to `item_ids[i]`), so contenders are
+/// compared against contenders. Returns pairs of item IDs.
 ///
 /// # Panics
 ///
-/// Panics if `top_k_probs` or `sample_means` length does not equal `item_ids` length.
+/// Panics if `selection_weights` length does not equal `item_ids` length, or if
+/// after picking the first item no weight remains for a distinct second item
+/// (only possible with a degenerate list where a single item holds all the
+/// weight).
 pub fn generate_top_heavy_pairings(
     item_ids: &[i64],
     pairs_count: usize,
-    top_k_probs: &[f64],
-    sample_means: &[f64],
-    sharpness: f64,
+    selection_weights: &[f64],
 ) -> Vec<Pair> {
     let n = item_ids.len();
     let zeros = vec![0usize; n];
@@ -134,9 +126,7 @@ pub fn generate_top_heavy_pairings(
     let index_pairs = generate_top_heavy_pairings_indexed(
         n,
         pairs_count,
-        top_k_probs,
-        sample_means,
-        sharpness,
+        selection_weights,
         &zeros,
         &zeros,
         &mut rng,
@@ -287,13 +277,10 @@ fn swap_remove_live(
     removed_pos
 }
 
-#[allow(clippy::too_many_arguments)]
 pub(crate) fn generate_top_heavy_pairings_indexed(
     num_items: usize,
     pairs_count: usize,
-    top_k_probs: &[f64],
-    sample_means: &[f64],
-    sharpness: f64,
+    selection_weights: &[f64],
     first_position_counts: &[usize],
     games_played: &[usize],
     rng: &mut StdRng,
@@ -301,24 +288,14 @@ pub(crate) fn generate_top_heavy_pairings_indexed(
     if num_items < 2 {
         return Vec::new();
     }
-    assert_eq!(top_k_probs.len(), num_items, "top_k_probs length mismatch");
-    assert_eq!(sample_means.len(), num_items, "sample_means length mismatch");
+    assert_eq!(selection_weights.len(), num_items, "selection_weights length mismatch");
     let pairs_target = pairs_count;
 
-    let total_item1_weight: f64 = top_k_probs.iter().sum();
-
-    // Pre-sort items by sample_means for windowed opponent selection.
-    // sorted_by_mean[i] = (original_index, mean), sorted by mean ascending.
-    let mut sorted_by_mean: Vec<(usize, f64)> = (0..num_items)
-        .map(|i| (i, sample_means[i]))
-        .collect();
-    sorted_by_mean.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
-
-    // Reverse lookup: original_index -> position in sorted order.
-    let mut sorted_pos = vec![0usize; num_items];
-    for (pos, &(orig_idx, _)) in sorted_by_mean.iter().enumerate() {
-        sorted_pos[orig_idx] = pos;
-    }
+    let total_weight: f64 = selection_weights.iter().sum();
+    assert!(
+        total_weight > 0.0,
+        "top-heavy pairing requires positive total item-selection weight"
+    );
 
     // Local mutable copies of caller-provided counters. Updated optimistically
     // as positions are assigned within this call so later pairs balance against
@@ -329,42 +306,19 @@ pub(crate) fn generate_top_heavy_pairings_indexed(
     let mut pairs: Vec<IndexedPair> = Vec::with_capacity(pairs_target);
 
     for _ in 0..pairs_target {
-        // Item 1: weighted sample from P(top K)
-        let item1 = if total_item1_weight <= 0.0 {
-            rng.random_range(0..num_items)
-        } else {
-            weighted_random_select(top_k_probs, total_item1_weight, rng)
-        };
+        // Both items are sampled from the layered weights: item1 from the full
+        // distribution, item2 from the same distribution with item1 removed.
+        let item1 = weighted_random_select(selection_weights, total_weight, rng);
 
-        // Item 2: info-gain weighted from a window of nearby items in rating order.
-        let item1_rating = sample_means[item1];
-        let center = sorted_pos[item1];
-
-        let half_w = OPPONENT_WINDOW_SIZE / 2;
-        let window_start = center.saturating_sub(half_w);
-        let window_end = (center + half_w + 1).min(num_items);
-
-        let mut opponents: Vec<usize> = Vec::with_capacity(window_end - window_start);
-        let mut opp_weights: Vec<f64> = Vec::with_capacity(window_end - window_start);
-
-        for &(orig_idx, opp_rating) in &sorted_by_mean[window_start..window_end] {
-            if orig_idx == item1 { continue; }
-            opponents.push(orig_idx);
-            opp_weights.push(calculate_info_gain(item1_rating, opp_rating, sharpness));
-        }
-
-        if opponents.is_empty() {
-            break;
-        }
-
-        let total_opp_weight: f64 = opp_weights.iter().sum();
-        let item2_local_idx = if total_opp_weight <= 0.0 {
-            rng.random_range(0..opponents.len())
-        } else {
-            weighted_random_select(&opp_weights, total_opp_weight, rng)
-        };
-
-        let item2 = opponents[item2_local_idx];
+        // Remaining weight after excluding item1. Zero here means a single item
+        // holds all the weight — a degenerate list — so we panic rather than
+        // fabricate an opponent.
+        let total_remaining = total_weight - selection_weights[item1];
+        assert!(
+            total_remaining > 0.0,
+            "top-heavy pairing: all item-selection weight is on one item; cannot pick a distinct opponent"
+        );
+        let item2 = weighted_random_select_excluding(selection_weights, total_remaining, item1, rng);
 
         let p = position_probability(
             local_first_counts[item1], local_games[item1],
@@ -395,6 +349,30 @@ fn weighted_random_select(weights: &[f64], total_weight: f64, rng: &mut impl Rng
     weights.len() - 1
 }
 
+/// Weighted selection over `weights`, skipping index `exclude`. `total_weight`
+/// must be the sum of all weights except `weights[exclude]` (i.e. the caller has
+/// already subtracted the excluded item's weight) and must be positive.
+fn weighted_random_select_excluding(
+    weights: &[f64],
+    total_weight: f64,
+    exclude: usize,
+    rng: &mut impl Rng,
+) -> usize {
+    let mut r = rng.random::<f64>() * total_weight;
+    let mut last = exclude;
+    for (j, &w) in weights.iter().enumerate() {
+        if j == exclude {
+            continue;
+        }
+        last = j;
+        r -= w;
+        if r < 1e-10 {
+            return j;
+        }
+    }
+    last
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -421,28 +399,21 @@ mod tests {
     #[test]
     fn test_effective_comparison_distribution_uniform_user_choice() {
         let games = vec![10, 10];
-        let result = get_effective_comparison_distribution(ComparisonDistribution::Uniform, 2, &games, 5, 3, Some(10));
+        let result = get_effective_comparison_distribution(ComparisonDistribution::Uniform, 2, &games, 3);
         assert_eq!(result, ComparisonDistribution::Uniform);
     }
 
     #[test]
     fn test_effective_comparison_distribution_warmup_stage() {
         let games = vec![1, 10]; // Item 0 below minimum
-        let result = get_effective_comparison_distribution(ComparisonDistribution::TopHeavy, 2, &games, 5, 3, Some(10));
-        assert_eq!(result, ComparisonDistribution::Uniform);
-    }
-
-    #[test]
-    fn test_effective_comparison_distribution_smoothing_stage() {
-        let games = vec![10, 10];
-        let result = get_effective_comparison_distribution(ComparisonDistribution::TopHeavy, 2, &games, 9, 3, Some(10));
+        let result = get_effective_comparison_distribution(ComparisonDistribution::TopHeavy, 2, &games, 3);
         assert_eq!(result, ComparisonDistribution::Uniform);
     }
 
     #[test]
     fn test_effective_comparison_distribution_main_phase() {
         let games = vec![10, 10];
-        let result = get_effective_comparison_distribution(ComparisonDistribution::TopHeavy, 2, &games, 5, 3, Some(10));
+        let result = get_effective_comparison_distribution(ComparisonDistribution::TopHeavy, 2, &games, 3);
         assert_eq!(result, ComparisonDistribution::TopHeavy);
     }
 
@@ -524,10 +495,39 @@ mod tests {
     #[test]
     fn test_top_heavy_pairings() {
         let item_ids: Vec<i64> = (0..10).collect();
-        let sample_means: Vec<f64> = (0..10).map(|i| 10.0 - i as f64).collect();
-        let top_k_probs: Vec<f64> = (0..10).map(|i| if i < 3 { 0.8 } else { 0.05 }).collect();
+        let selection_weights: Vec<f64> = (0..10).map(|i| if i < 3 { 0.8 } else { 0.05 }).collect();
 
-        let pairs = generate_top_heavy_pairings(&item_ids, 5, &top_k_probs, &sample_means, 1.0);
-        assert!(!pairs.is_empty());
+        let pairs = generate_top_heavy_pairings(&item_ids, 5, &selection_weights);
+        assert_eq!(pairs.len(), 5);
+        for (a, b) in &pairs {
+            assert_ne!(a, b);
+        }
+    }
+
+    #[test]
+    fn test_top_heavy_both_items_from_weights() {
+        // Items 0,1,2 carry essentially all the weight; 3-9 carry ~none. Both
+        // slots should be drawn from the heavy items, so the contenders vastly
+        // out-appear the tail across a long batch.
+        let item_ids: Vec<i64> = (0..10).collect();
+        let selection_weights: Vec<f64> = (0..10).map(|i| if i < 3 { 1.0 } else { 0.0001 }).collect();
+
+        let pairs = generate_top_heavy_pairings(&item_ids, 200, &selection_weights);
+        let mut appearances = [0usize; 10];
+        for (a, b) in &pairs {
+            appearances[*a as usize] += 1;
+            appearances[*b as usize] += 1;
+        }
+        let top_3: usize = appearances[0] + appearances[1] + appearances[2];
+        let tail: usize = appearances[3..].iter().sum();
+        assert!(top_3 > tail, "contenders ({top_3}) should out-appear tail ({tail})");
+    }
+
+    #[test]
+    #[should_panic(expected = "all item-selection weight is on one item")]
+    fn test_top_heavy_panics_when_one_item_holds_all_weight() {
+        let item_ids: Vec<i64> = (0..3).collect();
+        let selection_weights = vec![1.0, 0.0, 0.0];
+        let _ = generate_top_heavy_pairings(&item_ids, 1, &selection_weights);
     }
 }

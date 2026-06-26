@@ -17,6 +17,9 @@ pub struct TrialConfig<'a> {
     pub strength_spread: f64,
     pub use_logprobs: bool,
     pub distribution: &'a str,
+    pub selection_sharpness: Option<f64>,
+    pub cutoff: Option<f64>,
+    pub coverage: Option<f64>,
     pub nanojudge_bin: &'a Path,
 }
 
@@ -26,38 +29,43 @@ pub struct TrialResult {
     pub top_k_displacement: f64,
     pub comparisons: usize,
     pub duration: std::time::Duration,
+    /// Rendered ranking table for this trial, present only when `capture_example`
+    /// was set (we print one example and suppress the rest to avoid spam).
+    pub example_ranking: Option<String>,
 }
 
 pub async fn run(
     config: &TrialConfig<'_>,
     seed: u64,
     top_k: usize,
+    capture_example: bool,
 ) -> Result<TrialResult, String> {
     let start = std::time::Instant::now();
     let mut rng = StdRng::seed_from_u64(seed);
 
-    // Generate items with true strengths drawn from N(0, spread).
-    let mut strengths: HashMap<String, f64> = HashMap::with_capacity(config.num_items);
-    for i in 0..config.num_items {
-        let name = format!("item_{i:04}");
-        let s: f64 = sample_normal(&mut rng) * config.strength_spread;
-        strengths.insert(name, s);
-    }
-
-    // True ranking: items sorted by strength, strongest first.
-    let mut true_order: Vec<(String, f64)> = strengths
-        .iter()
-        .map(|(name, &s)| (name.clone(), s))
+    // Draw strengths from N(0, spread), then assign names by rank so that
+    // item_0001 is the strongest, item_0002 the second strongest, and so on.
+    // This makes ranking errors obvious by eye in the example table (a perfect
+    // recovery is item_0001, item_0002, … in order).
+    let mut sampled_strengths: Vec<f64> = (0..config.num_items)
+        .map(|_| sample_normal(&mut rng) * config.strength_spread)
         .collect();
-    true_order.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
-    let true_order: Vec<String> = true_order.into_iter().map(|(name, _)| name).collect();
+    sampled_strengths.sort_by(|a, b| b.partial_cmp(a).unwrap()); // strongest first
+
+    let mut strengths: HashMap<String, f64> = HashMap::with_capacity(config.num_items);
+    let mut true_order: Vec<String> = Vec::with_capacity(config.num_items);
+    for (i, &s) in sampled_strengths.iter().enumerate() {
+        let name = format!("item_{:04}", i + 1);
+        strengths.insert(name.clone(), s);
+        true_order.push(name);
+    }
 
     // Temp files for items and config. Dropped (deleted) at end of scope.
     let items_file = tempfile::NamedTempFile::new().map_err(|e| e.to_string())?;
     let config_file = tempfile::NamedTempFile::new().map_err(|e| e.to_string())?;
 
     let items_text: String = (0..config.num_items)
-        .map(|i| format!("item_{i:04}"))
+        .map(|i| format!("item_{:04}", i + 1))
         .collect::<Vec<_>>()
         .join("\n");
     std::fs::write(items_file.path(), &items_text).map_err(|e| e.to_string())?;
@@ -91,8 +99,8 @@ pub async fn run(
     let cli_seed = seed.wrapping_add(2);
 
     // Run the real CLI as a subprocess.
-    let output = tokio::process::Command::new(config.nanojudge_bin)
-        .arg("rank")
+    let mut cmd = tokio::process::Command::new(config.nanojudge_bin);
+    cmd.arg("rank")
         .arg("--items")
         .arg(items_file.path())
         .arg("--config")
@@ -106,7 +114,20 @@ pub async fn run(
         .arg("--comparison-distribution")
         .arg(config.distribution)
         .arg("--seed")
-        .arg(cli_seed.to_string())
+        .arg(cli_seed.to_string());
+
+    // Forward top-heavy selection tuning if the bench was given it.
+    if let Some(selection_sharpness) = config.selection_sharpness {
+        cmd.arg("--selection-sharpness").arg(selection_sharpness.to_string());
+    }
+    if let Some(cutoff) = config.cutoff {
+        cmd.arg("--cutoff").arg(cutoff.to_string());
+    }
+    if let Some(coverage) = config.coverage {
+        cmd.arg("--coverage").arg(coverage.to_string());
+    }
+
+    let output = cmd
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .output()
@@ -136,6 +157,13 @@ pub async fn run(
 
     let comparisons = json["total_comparisons"].as_u64().unwrap_or(0) as usize;
 
+    // Render the example ranking table only for the trial that asked for it.
+    let example_ranking = if capture_example {
+        Some(render_ranking_table(items))
+    } else {
+        None
+    };
+
     let duration = start.elapsed();
 
     // Compute metrics against ground truth.
@@ -149,7 +177,43 @@ pub async fn run(
         top_k_displacement,
         comparisons,
         duration,
+        example_ranking,
     })
+}
+
+/// Render the CLI's JSON `items` array into a human-readable ranking table,
+/// mirroring the CLI's own table columns (rank, item, score, 95% CI, per-item
+/// comparison count, id).
+fn render_ranking_table(items: &[serde_json::Value]) -> String {
+    let name_width = items
+        .iter()
+        .map(|it| it["name"].as_str().unwrap_or("").len())
+        .max()
+        .unwrap_or(4)
+        .max(4);
+
+    let mut out = String::new();
+    out.push_str(&format!(
+        " # | {:<name_width$} |   Score | 95% CI Low | 95% CI High | Comparisons | ID\n",
+        "Item",
+    ));
+    out.push_str(&format!(
+        "---|-{}-|---------|------------|-------------|-------------|----\n",
+        "-".repeat(name_width)
+    ));
+    for it in items {
+        out.push_str(&format!(
+            "{:>2} | {:<name_width$} | {:>7.4} | {:>10.2} | {:>11.2} | {:>11} | {:>2}\n",
+            it["rank"].as_u64().unwrap_or(0),
+            it["name"].as_str().unwrap_or(""),
+            it["score"].as_f64().unwrap_or(0.0),
+            it["lower_bound"].as_f64().unwrap_or(0.0),
+            it["upper_bound"].as_f64().unwrap_or(0.0),
+            it["comparisons"].as_u64().unwrap_or(0),
+            it["id"].as_i64().unwrap_or(0),
+        ));
+    }
+    out
 }
 
 struct ServerGuard<'a>(&'a tokio::task::JoinHandle<()>);

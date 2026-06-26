@@ -41,7 +41,9 @@ pub struct NanojudgeConfig {
     pub logprobs: Option<bool>,
     pub analysis_length: Option<String>,
     pub comparison_distribution: Option<String>,
-    pub top_k: Option<usize>,
+    pub selection_sharpness: Option<f64>,
+    pub cutoff: Option<f64>,
+    pub coverage: Option<f64>,
     pub retries: Option<usize>,
     pub confidence_level: Option<f64>,
     pub regularization_strength: Option<f64>,
@@ -104,9 +106,21 @@ const DEFAULT_CONFIG_TEMPLATE: &str = "\
 # Uniform gives equal attention to all items. Top-heavy focuses on contenders.
 # comparison_distribution = \"uniform\"
 
-# How many top positions to track for the top-heavy distribution.
-# Default: sqrt(n) * 3, clamped to n-1. Only used with comparison_distribution = \"top-heavy\".
-# top_k = 10
+# Tuning for the top-heavy distribution. Each item's pairing weight is its
+# probability of beating the current leader (from the posterior mean/std),
+# raised to `selection_sharpness`. Both items in each comparison are drawn from
+# these weights, so contenders are compared against contenders.
+#   selection_sharpness: lower = flatter = more exploration; 1.0 = raw probabilities (> 0).
+#   cutoff:   minimum P(beat the leader's mean) to stay a candidate; items below
+#             are dropped, except the two strongest, which are always kept.
+#             [0,1); 0 disables the cutoff.
+#   coverage: proportional-fair pull. Each weight is divided by
+#             games-played^coverage, pulling cumulative comparisons toward the
+#             area-implied share. 0 = off, 1 = proportional-fair, > 1 over-corrects.
+# Only used with comparison_distribution = \"top-heavy\".
+# selection_sharpness = 0.1
+# cutoff = 0.0
+# coverage = 1.0
 
 # Minimum fraction of A-D probability mass the top-logprobs must cover for a
 # logprob-based verdict to be trusted (logprobs mode only). Below this, the
@@ -186,8 +200,8 @@ temperature = 0.7
 # Ghost player regularization strength. Default: 0.01.
 # regularization_strength = 0.01
 
-# Number of post-burn-in MCMC iterations for final scoring. Default: 2000.
-# mcmc_iterations = 2000
+# Number of post-burn-in MCMC iterations for final scoring. Default: 5000.
+# mcmc_iterations = 5000
 
 # MCMC burn-in iterations for final scoring. Default: 500.
 # mcmc_burn_in = 500
@@ -200,8 +214,8 @@ temperature = 0.7
 # Info-gain exponent for matchmaking. Higher = more exploitation. Default: 1.0.
 # matchmaking_sharpness = 1.0
 
-# Minimum games per item before the top-heavy distribution kicks in. Default: 3.
-# min_uniform_games = 3
+# Minimum games per item before the top-heavy distribution kicks in. Default: 2.
+# min_uniform_games = 2
 
 # Prior variance on log-strengths. Default: 10.0.
 # prior_tau2 = 10.0

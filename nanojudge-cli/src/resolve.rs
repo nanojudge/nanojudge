@@ -39,7 +39,14 @@ pub struct ResolvedConfig {
     pub rounds: Option<usize>,
     pub comparisons: Option<usize>,
     pub comparison_distribution: ComparisonDistribution,
-    pub top_k: Option<usize>,
+    /// Top-heavy selection sharpness (power applied to each item's P(beat leader)).
+    /// Finite and > 0.
+    pub selection_sharpness: f64,
+    /// Top-heavy selection cutoff (minimum P(beat leader's mean) to stay a
+    /// candidate). In [0, 1); 0 disables the cutoff.
+    pub selection_cutoff: f64,
+    /// Top-heavy proportional-fair coverage pull. Finite and >= 0; 0 disables it.
+    pub selection_coverage: f64,
     pub retries: usize,
     pub analysis_length: String,
     pub reasoning_enabled: bool,
@@ -291,7 +298,22 @@ pub fn resolve_config(shared: &ConfigArgs, cfg: &config::NanojudgeConfig) -> Res
         other => bail(format!("Unknown comparison distribution \"{other}\". Use \"uniform\" or \"top-heavy\".")),
     };
 
-    let top_k = merge_opt(shared.top_k, cfg.top_k, "top-k");
+    // Top-heavy selection tuning (only used with the top-heavy distribution).
+    let selection_sharpness = merge_opt(shared.selection_sharpness, cfg.selection_sharpness, "selection-sharpness")
+        .unwrap_or(0.1);
+    if !selection_sharpness.is_finite() || selection_sharpness <= 0.0 {
+        bail(format!("selection-sharpness={selection_sharpness}, must be finite and > 0"));
+    }
+    let selection_cutoff = merge_opt(shared.cutoff, cfg.cutoff, "cutoff")
+        .unwrap_or(0.0);
+    if !selection_cutoff.is_finite() || !(0.0..1.0).contains(&selection_cutoff) {
+        bail(format!("cutoff={selection_cutoff}, must be in [0.0, 1.0) — 0 disables the cutoff"));
+    }
+    let selection_coverage = merge_opt(shared.coverage, cfg.coverage, "coverage")
+        .unwrap_or(1.0);
+    if !selection_coverage.is_finite() || selection_coverage < 0.0 {
+        bail(format!("coverage={selection_coverage}, must be finite and >= 0 (0 disables it)"));
+    }
     let retries = merge_opt(shared.retries, cfg.retries, "retries")
         .unwrap_or(DEFAULT_MAX_RETRIES);
     let analysis_length = merge_opt(shared.analysis_length.clone(), cfg.analysis_length.clone(), "analysis-length")
@@ -310,7 +332,7 @@ pub fn resolve_config(shared: &ConfigArgs, cfg: &config::NanojudgeConfig) -> Res
         bail(format!("regularization-strength={regularization_strength}, must be finite and > 0"));
     }
     let mcmc_iterations = merge_opt(shared.mcmc_iterations, cfg.mcmc_iterations, "mcmc-iterations")
-        .unwrap_or(2000);
+        .unwrap_or(5000);
     if mcmc_iterations == 0 {
         bail("mcmc-iterations must be at least 1");
     }
@@ -322,7 +344,7 @@ pub fn resolve_config(shared: &ConfigArgs, cfg: &config::NanojudgeConfig) -> Res
         bail(format!("matchmaking-sharpness={matchmaking_sharpness}, must be finite and > 0"));
     }
     let min_uniform_games = merge_opt(shared.min_uniform_games, cfg.min_uniform_games, "min-uniform-games")
-        .unwrap_or(3);
+        .unwrap_or(2);
     let prior_tau2 = merge_opt(shared.prior_tau2, cfg.prior_tau2, "prior-tau2")
         .unwrap_or(10.0);
     if !prior_tau2.is_finite() || prior_tau2 <= 0.0 {
@@ -417,7 +439,9 @@ pub fn resolve_config(shared: &ConfigArgs, cfg: &config::NanojudgeConfig) -> Res
         rounds,
         comparisons,
         comparison_distribution,
-        top_k,
+        selection_sharpness,
+        selection_cutoff,
+        selection_coverage,
         retries,
         analysis_length,
         reasoning_enabled,
@@ -456,7 +480,9 @@ mod tests {
             concurrency: None,
             min_logprob_coverage: None,
             comparison_distribution: None,
-            top_k: None,
+            selection_sharpness: None,
+            cutoff: None,
+            coverage: None,
             retries: None,
             analysis_length: None,
             reasoning: None,

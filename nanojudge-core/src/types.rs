@@ -84,7 +84,7 @@ pub struct RankedItem {
 #[derive(Debug, Clone)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct ScoringOptions {
-    /// Number of post-burn-in MCMC iterations (e.g. 200 interim, 2000 final).
+    /// Number of post-burn-in MCMC iterations (e.g. 5000 interim, 5000 final).
     pub iterations: usize,
     /// Burn-in iterations run before collecting samples. Applied even when `warm_start` is
     /// provided, so set to 0 (or a small value) if the warm start is already near the
@@ -92,8 +92,26 @@ pub struct ScoringOptions {
     pub burn_in: usize,
     /// Confidence interval level (e.g. 0.95).
     pub confidence_level: f64,
-    /// Compute P(top K) probabilities. 0 = skip.
-    pub top_k: usize,
+    /// Top-heavy item-selection weighting. `None` skips it entirely (uniform
+    /// pairing needs no selection weights, and the result's `selection_weights`
+    /// is then `None`). `Some(sharpness)` computes, per item, the area of its
+    /// posterior lying above the top item's mean — P(item beats the current
+    /// leader) under a Gaussian summary `(mean, std)` of its samples — then
+    /// raises that area to `sharpness`. Lower sharpness flattens the distribution
+    /// (more exploration); `1.0` leaves the areas as-is. Must be finite and > 0.
+    pub selection_sharpness: Option<f64>,
+    /// Minimum area (P(item beats the leader's mean)) an item needs to stay a
+    /// selection candidate. Items below are dropped to weight 0, except the two
+    /// highest-area items, which are always kept so a pair can always be formed.
+    /// In [0, 1); 0 disables the cutoff. Ignored when `selection_sharpness` is
+    /// `None`.
+    pub selection_cutoff: f64,
+    /// Proportional-fair coverage pull. Each item's area weight is divided by
+    /// `games_played^selection_coverage`, pulling its cumulative comparison count
+    /// toward its area-implied share. 0 disables it (pure area sampling); 1 is
+    /// standard proportional-fair; > 1 over-corrects toward equal coverage. Must
+    /// be finite and >= 0. Ignored when `selection_sharpness` is `None`.
+    pub selection_coverage: f64,
     /// Previous warm start state. `None` = cold start.
     pub warm_start: Option<WarmStartState>,
     /// Ghost player regularization strength (e.g. 0.01).
@@ -118,10 +136,11 @@ pub struct ScoringOptions {
 pub struct ScoringResult {
     /// Ranked items, sorted by score descending.
     pub rankings: Vec<RankedItem>,
-    /// P(top K) probabilities per item, in the same order as input `item_ids`. `None` if `top_k == 0`.
-    pub top_k_probs: Option<Vec<f64>>,
-    /// Mean scores per item, in the same order as input `item_ids`. `None` if `top_k == 0`.
-    pub sample_means: Option<Vec<f64>>,
+    /// Top-heavy item-selection weights per item, in the same order as input
+    /// `item_ids`: each item's softened P(beat the leader's mean), with
+    /// sub-cutoff items zeroed. Drives both-items-from-the-weights pairing.
+    /// `None` when `selection_sharpness` was `None`.
+    pub selection_weights: Option<Vec<f64>>,
     /// Warm start state for next round.
     pub warm_start_state: WarmStartState,
     /// Number of post-burn-in samples (for DB storage).

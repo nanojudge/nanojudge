@@ -278,21 +278,18 @@ pub async fn run(args: RankArgs) {
 
     let comparison_distribution = resolved.comparison_distribution;
 
-    if resolved.top_k.is_some() && matches!(comparison_distribution, ComparisonDistribution::Uniform) {
-        eprintln!("Warning: --top-k has no effect with the uniform distribution. It only applies to --comparison-distribution top-heavy.");
-    }
-
-    // Pure heuristic — no empirical basis. Just a guess at how many top
-    // positions users typically care about for a given list size.
-    let top_k = resolved.top_k.unwrap_or_else(|| {
-        ((texts.len() as f64).sqrt() * 3.0) as usize
-    }).min(texts.len() - 1);
+    // Top-heavy selection: when active, each interim scoring pass turns the
+    // posterior into per-item pairing weights (softened P(beat the leader)).
+    // `None` for uniform, which needs no selection weights.
+    let selection_sharpness = match comparison_distribution {
+        ComparisonDistribution::TopHeavy => Some(resolved.selection_sharpness),
+        ComparisonDistribution::Uniform => None,
+    };
 
     let engine_config = EngineConfig {
         comparison_distribution,
         matchmaking_sharpness: resolved.matchmaking_sharpness,
         min_uniform_games: resolved.min_uniform_games,
-        number_of_rounds: Some(rounds),
         seed: resolved.seed,
     };
     let mut engine = RankingEngine::new(&item_ids, engine_config);
@@ -582,10 +579,12 @@ pub async fn run(args: RankArgs) {
                 &item_ids,
                 &engine.completed_comparisons,
                 &ScoringOptions {
-                    iterations: 200,
+                    iterations: 5000,
                     burn_in: if interim_warm_start.is_some() { 0 } else { 100 },
                     confidence_level: resolved.confidence_level,
-                    top_k,
+                    selection_sharpness,
+                    selection_cutoff: resolved.selection_cutoff,
+                    selection_coverage: resolved.selection_coverage,
                     warm_start: interim_warm_start.take(),
                     regularization_strength: resolved.regularization_strength,
                     prior_tau2: resolved.prior_tau2,
@@ -598,8 +597,7 @@ pub async fn run(args: RankArgs) {
                 &judge_info,
             );
             if matches!(comparison_distribution, ComparisonDistribution::TopHeavy) {
-                engine.mcmc_top_k_probs = interim.top_k_probs;
-                engine.mcmc_sample_means = interim.sample_means;
+                engine.selection_weights = interim.selection_weights;
             }
             if let Some(limit) = resolved.live_top {
                 output::print_live_table(
@@ -634,7 +632,9 @@ pub async fn run(args: RankArgs) {
             iterations: resolved.mcmc_iterations,
             burn_in: resolved.mcmc_burn_in,
             confidence_level: resolved.confidence_level,
-            top_k: 0,
+            selection_sharpness: None,
+            selection_cutoff: resolved.selection_cutoff,
+            selection_coverage: resolved.selection_coverage,
             warm_start: None,
             regularization_strength: resolved.regularization_strength,
             prior_tau2: resolved.prior_tau2,
@@ -699,6 +699,7 @@ pub async fn run(args: RankArgs) {
         OutputFormat::Json => output::print_json(
             &scoring_result.rankings,
             &titles,
+            &engine.games_played,
             rounds,
             total_comparisons,
             &scoring_result.judge_analytics,
