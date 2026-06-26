@@ -72,6 +72,42 @@ struct Args {
     verbose: bool,
 }
 
+/// Current UTC time as "YYYY-MM-DD HH:MM:SS", using only std (no chrono
+/// dependency) — mirrors the manual civil-date conversion used in
+/// nanojudge-cli's benchmark log. UTC, so it reads ~1h behind a BST wall clock.
+fn utc_timestamp() -> String {
+    let secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    let s = secs % 60;
+    let m = (secs / 60) % 60;
+    let h = (secs / 3600) % 24;
+    let days = secs / 86400;
+    let mut y = 1970i64;
+    let mut remaining = days as i64;
+    loop {
+        let days_in_year = if y % 4 == 0 && (y % 100 != 0 || y % 400 == 0) { 366 } else { 365 };
+        if remaining < days_in_year {
+            break;
+        }
+        remaining -= days_in_year;
+        y += 1;
+    }
+    let leap = y % 4 == 0 && (y % 100 != 0 || y % 400 == 0);
+    let month_days = [31, if leap { 29 } else { 28 }, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+    let mut mo = 0;
+    for (i, &md) in month_days.iter().enumerate() {
+        if remaining < md as i64 {
+            mo = i + 1;
+            break;
+        }
+        remaining -= md as i64;
+    }
+    let d = remaining + 1;
+    format!("{:04}-{:02}-{:02} {:02}:{:02}:{:02}", y, mo, d, h, m, s)
+}
+
 fn find_nanojudge_binary(override_path: Option<PathBuf>) -> PathBuf {
     if let Some(path) = override_path {
         if !path.exists() {
@@ -160,7 +196,7 @@ async fn main() {
         let trial_seed = master_seed.wrapping_add(t as u64 * 1000);
 
         if !args.verbose {
-            eprint!("\r  Running trial {}/{}...", t + 1, args.trials);
+            eprintln!("{}  Running trial {}/{}...", utc_timestamp(), t + 1, args.trials);
         }
 
         // Capture the ranking table from the first trial only, to avoid spamming
@@ -185,17 +221,13 @@ async fn main() {
             Err(e) => {
                 errors += 1;
                 eprintln!(
-                    "\r  Trial {:>4}/{} FAILED: {}",
+                    "  Trial {:>4}/{} FAILED: {}",
                     t + 1,
                     args.trials,
                     e
                 );
             }
         }
-    }
-
-    if !args.verbose {
-        eprint!("\r{}\r", " ".repeat(60));
     }
 
     if results.is_empty() {
