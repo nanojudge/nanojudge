@@ -126,6 +126,8 @@ impl RankingEngine {
                     num_items,
                     pairs_count,
                     selection_weights,
+                    &self.current_ratings,
+                    self.config.matchmaking_sharpness,
                     &self.first_position_count,
                     &self.games_played,
                     &mut self.rng,

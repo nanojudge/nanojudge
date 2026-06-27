@@ -105,20 +105,23 @@ pub fn generate_uniform_pairings(
 
 /// Generate top-heavy pairings for a round.
 ///
-/// Both items in every pair are sampled from the per-item selection weights
-/// `selection_weights[i]` (corresponding to `item_ids[i]`), so contenders are
-/// compared against contenders. Returns pairs of item IDs.
+/// item1 of every pair is sampled from the per-item selection weights
+/// `selection_weights[i]` (corresponding to `item_ids[i]`), concentrating
+/// comparisons on the contenders. The opponent (item2) is then chosen by
+/// info-gain matchmaking from a rating window around item1 (using
+/// `current_ratings` and `matchmaking_sharpness`), exactly as uniform pairing
+/// selects opponents. Returns pairs of item IDs.
 ///
 /// # Panics
 ///
-/// Panics if `selection_weights` length does not equal `item_ids` length, or if
-/// after picking the first item no weight remains for a distinct second item
-/// (only possible with a degenerate list where a single item holds all the
-/// weight).
+/// Panics if `selection_weights` or `current_ratings` length does not equal
+/// `item_ids` length, or if the total selection weight is not positive.
 pub fn generate_top_heavy_pairings(
     item_ids: &[i64],
     pairs_count: usize,
     selection_weights: &[f64],
+    current_ratings: &[f64],
+    matchmaking_sharpness: f64,
 ) -> Vec<Pair> {
     let n = item_ids.len();
     let zeros = vec![0usize; n];
@@ -127,6 +130,8 @@ pub fn generate_top_heavy_pairings(
         n,
         pairs_count,
         selection_weights,
+        current_ratings,
+        matchmaking_sharpness,
         &zeros,
         &zeros,
         &mut rng,
@@ -277,10 +282,13 @@ fn swap_remove_live(
     removed_pos
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn generate_top_heavy_pairings_indexed(
     num_items: usize,
     pairs_count: usize,
     selection_weights: &[f64],
+    current_ratings: &[f64],
+    matchmaking_sharpness: f64,
     first_position_counts: &[usize],
     games_played: &[usize],
     rng: &mut StdRng,
@@ -289,6 +297,7 @@ pub(crate) fn generate_top_heavy_pairings_indexed(
         return Vec::new();
     }
     assert_eq!(selection_weights.len(), num_items, "selection_weights length mismatch");
+    assert_eq!(current_ratings.len(), num_items, "current_ratings length mismatch");
     let pairs_target = pairs_count;
 
     let total_weight: f64 = selection_weights.iter().sum();
@@ -296,6 +305,24 @@ pub(crate) fn generate_top_heavy_pairings_indexed(
         total_weight > 0.0,
         "top-heavy pairing requires positive total item-selection weight"
     );
+
+    // Sort items by rating ascending so each item1's opponent can be drawn from a
+    // narrow rating window around it — the same info-gain matchmaking uniform
+    // uses. The pool is built once per round; item1 is sampled with replacement
+    // from the selection weights, so no entries are removed between pairs.
+    let mut sorted_pool: Vec<(usize, f64)> = (0..num_items)
+        .map(|i| (i, current_ratings[i]))
+        .collect();
+    sorted_pool.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
+    // Inverse map: item index -> its position in sorted_pool.
+    let mut sorted_position = vec![0usize; num_items];
+    for (pos, &(item, _)) in sorted_pool.iter().enumerate() {
+        sorted_position[item] = pos;
+    }
+
+    let half_w = OPPONENT_WINDOW_SIZE / 2;
+    let mut candidates: Vec<usize> = Vec::with_capacity(OPPONENT_WINDOW_SIZE + 1);
+    let mut weights: Vec<f64> = Vec::with_capacity(OPPONENT_WINDOW_SIZE + 1);
 
     // Local mutable copies of caller-provided counters. Updated optimistically
     // as positions are assigned within this call so later pairs balance against
@@ -306,19 +333,38 @@ pub(crate) fn generate_top_heavy_pairings_indexed(
     let mut pairs: Vec<IndexedPair> = Vec::with_capacity(pairs_target);
 
     for _ in 0..pairs_target {
-        // Both items are sampled from the layered weights: item1 from the full
-        // distribution, item2 from the same distribution with item1 removed.
+        // item1: sampled from the global selection weights, concentrating
+        // comparisons on the contenders.
         let item1 = weighted_random_select(selection_weights, total_weight, rng);
+        let item1_rating = current_ratings[item1];
+        let pos1 = sorted_position[item1];
 
-        // Remaining weight after excluding item1. Zero here means a single item
-        // holds all the weight — a degenerate list — so we panic rather than
-        // fabricate an opponent.
-        let total_remaining = total_weight - selection_weights[item1];
-        assert!(
-            total_remaining > 0.0,
-            "top-heavy pairing: all item-selection weight is on one item; cannot pick a distinct opponent"
-        );
-        let item2 = weighted_random_select_excluding(selection_weights, total_remaining, item1, rng);
+        // item2 (the opponent): the info-gain pick from a rating window around
+        // item1, identical to how uniform pairing chooses an opponent. Closely
+        // matched items carry more information, so the window concentrates on
+        // them; item1 itself is excluded so the pair is always distinct.
+        let window_start = pos1.saturating_sub(half_w);
+        let window_end = (pos1 + half_w + 1).min(num_items);
+        candidates.clear();
+        weights.clear();
+        for &(cand_item, cand_rating) in &sorted_pool[window_start..window_end] {
+            if cand_item == item1 {
+                continue;
+            }
+            candidates.push(cand_item);
+            weights.push(calculate_info_gain(item1_rating, cand_rating, matchmaking_sharpness));
+        }
+        // For num_items >= 2 the window around item1 always holds at least one
+        // other item, so a distinct opponent always exists.
+        debug_assert!(!candidates.is_empty(), "top-heavy opponent window was empty");
+
+        let total_candidate_weight: f64 = weights.iter().sum();
+        let selected = if total_candidate_weight == 0.0 {
+            rng.random_range(0..candidates.len())
+        } else {
+            weighted_random_select(&weights, total_candidate_weight, rng)
+        };
+        let item2 = candidates[selected];
 
         let p = position_probability(
             local_first_counts[item1], local_games[item1],
@@ -347,30 +393,6 @@ fn weighted_random_select(weights: &[f64], total_weight: f64, rng: &mut impl Rng
         }
     }
     weights.len() - 1
-}
-
-/// Weighted selection over `weights`, skipping index `exclude`. `total_weight`
-/// must be the sum of all weights except `weights[exclude]` (i.e. the caller has
-/// already subtracted the excluded item's weight) and must be positive.
-fn weighted_random_select_excluding(
-    weights: &[f64],
-    total_weight: f64,
-    exclude: usize,
-    rng: &mut impl Rng,
-) -> usize {
-    let mut r = rng.random::<f64>() * total_weight;
-    let mut last = exclude;
-    for (j, &w) in weights.iter().enumerate() {
-        if j == exclude {
-            continue;
-        }
-        last = j;
-        r -= w;
-        if r < 1e-10 {
-            return j;
-        }
-    }
-    last
 }
 
 #[cfg(test)]
@@ -496,8 +518,9 @@ mod tests {
     fn test_top_heavy_pairings() {
         let item_ids: Vec<i64> = (0..10).collect();
         let selection_weights: Vec<f64> = (0..10).map(|i| if i < 3 { 0.8 } else { 0.05 }).collect();
+        let ratings: Vec<f64> = (0..10).map(|i| i as f64).collect();
 
-        let pairs = generate_top_heavy_pairings(&item_ids, 5, &selection_weights);
+        let pairs = generate_top_heavy_pairings(&item_ids, 5, &selection_weights, &ratings, 1.0);
         assert_eq!(pairs.len(), 5);
         for (a, b) in &pairs {
             assert_ne!(a, b);
@@ -505,14 +528,17 @@ mod tests {
     }
 
     #[test]
-    fn test_top_heavy_both_items_from_weights() {
-        // Items 0,1,2 carry essentially all the weight; 3-9 carry ~none. Both
-        // slots should be drawn from the heavy items, so the contenders vastly
-        // out-appear the tail across a long batch.
+    fn test_top_heavy_item1_from_weights_concentrates_on_contenders() {
+        // Items 0,1,2 carry essentially all the selection weight and share a high
+        // rating; 3-9 carry ~none and sit far below. item1 is always a contender
+        // (drawn from the weights), and its info-gain opponent is the nearest in
+        // rating — another contender — so the heavy items vastly out-appear the
+        // tail across a long batch.
         let item_ids: Vec<i64> = (0..10).collect();
         let selection_weights: Vec<f64> = (0..10).map(|i| if i < 3 { 1.0 } else { 0.0001 }).collect();
+        let ratings: Vec<f64> = (0..10).map(|i| if i < 3 { 5.0 } else { 0.0 }).collect();
 
-        let pairs = generate_top_heavy_pairings(&item_ids, 200, &selection_weights);
+        let pairs = generate_top_heavy_pairings(&item_ids, 200, &selection_weights, &ratings, 1.0);
         let mut appearances = [0usize; 10];
         for (a, b) in &pairs {
             appearances[*a as usize] += 1;
@@ -524,10 +550,40 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "all item-selection weight is on one item")]
-    fn test_top_heavy_panics_when_one_item_holds_all_weight() {
+    fn test_top_heavy_opponent_is_rating_local() {
+        // With equal selection weights (item1 uniform) and spread-out ratings,
+        // the info-gain opponent picks the nearest-rated items far more often than
+        // a random opponent would, so the mean rating gap stays small.
+        let item_ids: Vec<i64> = (0..10).collect();
+        let selection_weights = vec![1.0; 10];
+        let ratings: Vec<f64> = (0..10).map(|i| i as f64).collect();
+
+        let pairs = generate_top_heavy_pairings(&item_ids, 2000, &selection_weights, &ratings, 1.0);
+        let mut total_gap = 0.0;
+        for (a, b) in &pairs {
+            total_gap += (ratings[*a as usize] - ratings[*b as usize]).abs();
+        }
+        let mean_gap = total_gap / pairs.len() as f64;
+        // A uniformly-random opponent over ratings 0..9 averages a gap of ~3.3;
+        // info-gain matchmaking pulls this well below that.
+        assert!(mean_gap < 2.5, "info-gain opponents should be rating-local; mean gap was {mean_gap}");
+    }
+
+    #[test]
+    fn test_top_heavy_single_weighted_item_is_not_degenerate() {
+        // A single item holding all the selection weight used to be a hard error
+        // (item2 was drawn from the remaining weight). Now item2 comes from the
+        // rating window instead, so item1 is always item 0 and it still gets a
+        // valid, distinct opponent.
         let item_ids: Vec<i64> = (0..3).collect();
         let selection_weights = vec![1.0, 0.0, 0.0];
-        let _ = generate_top_heavy_pairings(&item_ids, 1, &selection_weights);
+        let ratings = vec![0.0, 1.0, 2.0];
+
+        let pairs = generate_top_heavy_pairings(&item_ids, 5, &selection_weights, &ratings, 1.0);
+        assert_eq!(pairs.len(), 5);
+        for (a, b) in &pairs {
+            assert_ne!(a, b);
+            assert!(*a == 0 || *b == 0, "item 0 holds all selection weight; it must be in every pair");
+        }
     }
 }
