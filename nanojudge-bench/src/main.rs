@@ -9,6 +9,7 @@ mod trial;
 
 use clap::Parser;
 use std::path::PathBuf;
+use std::sync::Arc;
 
 #[derive(Parser)]
 #[command(
@@ -66,6 +67,12 @@ struct Args {
     /// Path to the nanojudge binary (auto-detected from sibling binary if omitted).
     #[arg(long)]
     bin: Option<PathBuf>,
+
+    /// How many trials to run concurrently. Each trial spawns its own CLI
+    /// subprocess, so this parallelizes across cores. Omitted: half the logical
+    /// cores (or 1 if that can't be determined).
+    #[arg(long)]
+    concurrency: Option<usize>,
 
     /// Print per-trial results to stderr.
     #[arg(short, long)]
@@ -133,6 +140,21 @@ fn find_nanojudge_binary(override_path: Option<PathBuf>) -> PathBuf {
     candidate
 }
 
+/// Owned trial configuration shared (via `Arc`) across the concurrent trial
+/// tasks. Each task borrows a `trial::TrialConfig` from this for its run; owning
+/// the `String`/`PathBuf` here is what lets the spawned tasks be `'static`.
+struct SharedTrialConfig {
+    num_items: usize,
+    rounds: usize,
+    strength_spread: f64,
+    use_logprobs: bool,
+    distribution: String,
+    selection_sharpness: Option<f64>,
+    cutoff: Option<f64>,
+    coverage: Option<f64>,
+    nanojudge_bin: PathBuf,
+}
+
 #[tokio::main]
 async fn main() {
     let args = Args::parse();
@@ -163,6 +185,18 @@ async fn main() {
     let master_seed = args.seed.unwrap_or_else(rand::random::<u64>);
     let top_k = args.report_top_k.min(args.items - 1).max(1);
 
+    // Default concurrency: half the logical cores, or 1 if the count is
+    // unavailable. At least 1 either way.
+    let concurrency = args.concurrency.unwrap_or_else(|| {
+        std::thread::available_parallelism()
+            .map(|n| (n.get() / 2).max(1))
+            .unwrap_or(1)
+    });
+    if concurrency == 0 {
+        eprintln!("Error: --concurrency must be at least 1");
+        std::process::exit(1);
+    }
+
     let comparisons_per_trial = (args.items / 2) * args.rounds;
 
     eprintln!("NanoJudge Synthetic Benchmark");
@@ -175,37 +209,71 @@ async fn main() {
     eprintln!("  Report top-K: {}", top_k);
     eprintln!("  Distribution: {}", args.comparison_distribution);
     eprintln!("  Seed: {}", master_seed);
+    eprintln!("  Concurrency: {}", concurrency);
     eprintln!();
 
-    let config = trial::TrialConfig {
+    // Owned config the concurrent tasks share by Arc.
+    let shared = Arc::new(SharedTrialConfig {
         num_items: args.items,
         rounds: args.rounds,
         strength_spread: args.spread,
         use_logprobs: args.logprobs,
-        distribution: &args.comparison_distribution,
+        distribution: args.comparison_distribution.clone(),
         selection_sharpness: args.selection_sharpness,
         cutoff: args.cutoff,
         coverage: args.coverage,
-        nanojudge_bin: &nanojudge_bin,
-    };
+        nanojudge_bin: nanojudge_bin.clone(),
+    });
+
+    // Run trials concurrently, capped at `concurrency` by a semaphore. Trials are
+    // independent (each owns its fake server on its own port + its own CLI
+    // subprocess), so this just spreads them across cores. The first trial
+    // (t == 0) captures the example ranking table.
+    let semaphore = Arc::new(tokio::sync::Semaphore::new(concurrency));
+    let mut join_set: tokio::task::JoinSet<(usize, Result<trial::TrialResult, String>)> =
+        tokio::task::JoinSet::new();
+
+    for t in 0..args.trials {
+        let shared = shared.clone();
+        let semaphore = semaphore.clone();
+        let capture_example = t == 0;
+        let trial_seed = master_seed.wrapping_add(t as u64 * 1000);
+        join_set.spawn(async move {
+            let _permit = semaphore
+                .acquire()
+                .await
+                .expect("semaphore unexpectedly closed");
+            let config = trial::TrialConfig {
+                num_items: shared.num_items,
+                rounds: shared.rounds,
+                strength_spread: shared.strength_spread,
+                use_logprobs: shared.use_logprobs,
+                distribution: &shared.distribution,
+                selection_sharpness: shared.selection_sharpness,
+                cutoff: shared.cutoff,
+                coverage: shared.coverage,
+                nanojudge_bin: &shared.nanojudge_bin,
+            };
+            let res = trial::run(&config, trial_seed, top_k, capture_example).await;
+            (t, res)
+        });
+    }
 
     let mut results: Vec<trial::TrialResult> = Vec::with_capacity(args.trials);
     let mut errors = 0usize;
+    let mut completed = 0usize;
 
-    for t in 0..args.trials {
-        let trial_seed = master_seed.wrapping_add(t as u64 * 1000);
-
-        if !args.verbose {
-            eprintln!("{}  Running trial {}/{}...", utc_timestamp(), t + 1, args.trials);
-        }
-
-        // Capture the ranking table from the first trial only, to avoid spamming
-        // one table per trial.
-        match trial::run(&config, trial_seed, top_k, t == 0).await {
+    // Trials complete out of order; collect as they finish (aggregate stats are
+    // order-independent, and only t == 0 carries the example ranking).
+    while let Some(joined) = join_set.join_next().await {
+        let (t, res) = joined.expect("trial task panicked");
+        completed += 1;
+        match res {
             Ok(result) => {
                 if args.verbose {
                     eprintln!(
-                        "  Trial {:>4}/{}: rho={:.4}  top1-off={:.1}  top{}-off={:.2}  comparisons={}  {:.1}s",
+                        "{}  Trial {:>4}/{}: rho={:.4}  top1-off={:.1}  top{}-off={:.2}  comparisons={}  {:.1}s",
+                        utc_timestamp(),
                         t + 1,
                         args.trials,
                         result.spearman_rho,
@@ -215,17 +283,20 @@ async fn main() {
                         result.comparisons,
                         result.duration.as_secs_f64(),
                     );
+                } else {
+                    eprintln!(
+                        "{}  Completed {}/{} (trial {})",
+                        utc_timestamp(),
+                        completed,
+                        args.trials,
+                        t + 1,
+                    );
                 }
                 results.push(result);
             }
             Err(e) => {
                 errors += 1;
-                eprintln!(
-                    "  Trial {:>4}/{} FAILED: {}",
-                    t + 1,
-                    args.trials,
-                    e
-                );
+                eprintln!("{}  Trial {} FAILED: {}", utc_timestamp(), t + 1, e);
             }
         }
     }
