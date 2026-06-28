@@ -31,7 +31,7 @@ struct Args {
 
     /// Standard deviation of the true strength distribution (normal, mean 0).
     #[arg(long)]
-    spread: f64,
+    strength_std: f64,
 
     /// How many top positions to include in the displacement metric.
     #[arg(long)]
@@ -146,7 +146,7 @@ fn find_nanojudge_binary(override_path: Option<PathBuf>) -> PathBuf {
 struct SharedTrialConfig {
     num_items: usize,
     rounds: usize,
-    strength_spread: f64,
+    strength_std: f64,
     use_logprobs: bool,
     distribution: String,
     selection_sharpness: Option<f64>,
@@ -171,8 +171,8 @@ async fn main() {
         eprintln!("Error: need at least 1 trial");
         std::process::exit(1);
     }
-    if !args.spread.is_finite() || args.spread <= 0.0 {
-        eprintln!("Error: --spread must be a positive finite number");
+    if !args.strength_std.is_finite() || args.strength_std <= 0.0 {
+        eprintln!("Error: --strength-std must be a positive finite number");
         std::process::exit(1);
     }
     if args.comparison_distribution != "uniform" && args.comparison_distribution != "top-heavy" {
@@ -204,7 +204,7 @@ async fn main() {
     eprintln!("  Rounds: {}", args.rounds);
     eprintln!("  Trials: {}", args.trials);
     eprintln!("  Comparisons per trial: {}", comparisons_per_trial);
-    eprintln!("  Spread: {:.1}", args.spread);
+    eprintln!("  Strength std: {:.1}", args.strength_std);
     eprintln!("  Logprobs: {}", args.logprobs);
     eprintln!("  Report top-K: {}", top_k);
     eprintln!("  Distribution: {}", args.comparison_distribution);
@@ -216,7 +216,7 @@ async fn main() {
     let shared = Arc::new(SharedTrialConfig {
         num_items: args.items,
         rounds: args.rounds,
-        strength_spread: args.spread,
+        strength_std: args.strength_std,
         use_logprobs: args.logprobs,
         distribution: args.comparison_distribution.clone(),
         selection_sharpness: args.selection_sharpness,
@@ -246,7 +246,7 @@ async fn main() {
             let config = trial::TrialConfig {
                 num_items: shared.num_items,
                 rounds: shared.rounds,
-                strength_spread: shared.strength_spread,
+                strength_std: shared.strength_std,
                 use_logprobs: shared.use_logprobs,
                 distribution: &shared.distribution,
                 selection_sharpness: shared.selection_sharpness,

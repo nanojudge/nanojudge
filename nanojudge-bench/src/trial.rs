@@ -14,7 +14,7 @@ use crate::server;
 pub struct TrialConfig<'a> {
     pub num_items: usize,
     pub rounds: usize,
-    pub strength_spread: f64,
+    pub strength_std: f64,
     pub use_logprobs: bool,
     pub distribution: &'a str,
     pub selection_sharpness: Option<f64>,
@@ -48,7 +48,7 @@ pub async fn run(
     // This makes ranking errors obvious by eye in the example table (a perfect
     // recovery is item_0001, item_0002, … in order).
     let mut sampled_strengths: Vec<f64> = (0..config.num_items)
-        .map(|_| sample_normal(&mut rng) * config.strength_spread)
+        .map(|_| sample_normal(&mut rng) * config.strength_std)
         .collect();
     sampled_strengths.sort_by(|a, b| b.partial_cmp(a).unwrap()); // strongest first
 
