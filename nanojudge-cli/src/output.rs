@@ -23,6 +23,15 @@ struct JsonJudgeAnalytics {
     num_comparisons: usize,
 }
 
+/// One round's interim ranking, emitted only when `--emit-round-rankings` is
+/// set. `order` lists item names best-to-worst after that round; `comparisons`
+/// is the cumulative comparison count through that round.
+#[derive(Serialize)]
+struct JsonRoundRanking {
+    comparisons: usize,
+    order: Vec<String>,
+}
+
 #[derive(Serialize)]
 struct JsonOutput {
     items: Vec<JsonRankedItem>,
@@ -32,6 +41,8 @@ struct JsonOutput {
     positional_bias_ci_low: f64,
     positional_bias_ci_high: f64,
     judge_analytics: Vec<JsonJudgeAnalytics>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    round_rankings: Option<Vec<JsonRoundRanking>>,
 }
 
 /// Print results as a formatted terminal table.
@@ -291,6 +302,7 @@ fn build_json(
     judge_analytics: &[JudgeAnalytics],
     panel_positional_bias: f64,
     panel_positional_bias_ci: (f64, f64),
+    round_rankings: Option<&[(usize, Vec<String>)]>,
 ) -> String {
     let items: Vec<JsonRankedItem> = rankings
         .iter()
@@ -317,6 +329,16 @@ fn build_json(
         })
         .collect();
 
+    let round_rankings_json = round_rankings.map(|rounds| {
+        rounds
+            .iter()
+            .map(|(comparisons, order)| JsonRoundRanking {
+                comparisons: *comparisons,
+                order: order.clone(),
+            })
+            .collect()
+    });
+
     let output = JsonOutput {
         items,
         total_comparisons,
@@ -325,6 +347,7 @@ fn build_json(
         positional_bias_ci_low: panel_positional_bias_ci.0,
         positional_bias_ci_high: panel_positional_bias_ci.1,
         judge_analytics: judge_analytics_json,
+        round_rankings: round_rankings_json,
     };
 
     serde_json::to_string_pretty(&output).unwrap()
@@ -341,6 +364,7 @@ pub fn print_json(
     judge_analytics: &[JudgeAnalytics],
     panel_positional_bias: f64,
     panel_positional_bias_ci: (f64, f64),
+    round_rankings: Option<&[(usize, Vec<String>)]>,
 ) {
     println!(
         "{}",
@@ -353,6 +377,7 @@ pub fn print_json(
             judge_analytics,
             panel_positional_bias,
             panel_positional_bias_ci,
+            round_rankings,
         )
     );
 }
@@ -402,7 +427,7 @@ mod tests {
     #[test]
     fn test_json_contains_all_fields() {
         let (rankings, names) = sample_rankings();
-        let json = build_json(&rankings, &names, &[11, 22, 33], 10, 30, &sample_analytics(), 0.523, (0.481, 0.567));
+        let json = build_json(&rankings, &names, &[11, 22, 33], 10, 30, &sample_analytics(), 0.523, (0.481, 0.567), None);
         let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
 
         assert_eq!(parsed["rounds"], 10);
@@ -415,7 +440,7 @@ mod tests {
     #[test]
     fn test_json_items_structure() {
         let (rankings, names) = sample_rankings();
-        let json = build_json(&rankings, &names, &[11, 22, 33], 10, 30, &sample_analytics(), 0.523, (0.481, 0.567));
+        let json = build_json(&rankings, &names, &[11, 22, 33], 10, 30, &sample_analytics(), 0.523, (0.481, 0.567), None);
         let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
 
         let items = parsed["items"].as_array().unwrap();
@@ -436,7 +461,7 @@ mod tests {
     #[test]
     fn test_json_is_valid() {
         let (rankings, names) = sample_rankings();
-        let json = build_json(&rankings, &names, &[11, 22, 33], 5, 15, &sample_analytics(), 0.523, (0.481, 0.567));
+        let json = build_json(&rankings, &names, &[11, 22, 33], 5, 15, &sample_analytics(), 0.523, (0.481, 0.567), None);
         let _: serde_json::Value = serde_json::from_str(&json).unwrap();
     }
 

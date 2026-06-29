@@ -20,7 +20,18 @@ pub struct TrialConfig<'a> {
     pub selection_sharpness: Option<f64>,
     pub cutoff: Option<f64>,
     pub coverage: Option<f64>,
+    pub mcmc_iterations: Option<usize>,
+    pub min_uniform_games: Option<usize>,
     pub nanojudge_bin: &'a Path,
+}
+
+/// Accuracy metrics for one round's interim ranking, measured against ground
+/// truth. One per round when the CLI is run with `--emit-round-rankings`.
+pub struct RoundMetrics {
+    pub comparisons: usize,
+    pub spearman_rho: f64,
+    pub top_1_displacement: f64,
+    pub top_k_displacement: f64,
 }
 
 pub struct TrialResult {
@@ -29,6 +40,8 @@ pub struct TrialResult {
     pub top_k_displacement: f64,
     pub comparisons: usize,
     pub duration: std::time::Duration,
+    /// Per-round interim metrics (round 1..N), for plotting convergence.
+    pub per_round: Vec<RoundMetrics>,
     /// Rendered ranking table for this trial, present only when `capture_example`
     /// was set (we print one example and suppress the rest to avoid spam).
     pub example_ranking: Option<String>,
@@ -114,7 +127,10 @@ pub async fn run(
         .arg("--comparison-distribution")
         .arg(config.distribution)
         .arg("--seed")
-        .arg(cli_seed.to_string());
+        .arg(cli_seed.to_string())
+        // Emit the interim ranking after every round so we can measure the
+        // accuracy curve, not just the final number.
+        .arg("--emit-round-rankings");
 
     // Forward top-heavy selection tuning if the bench was given it.
     if let Some(selection_sharpness) = config.selection_sharpness {
@@ -125,6 +141,12 @@ pub async fn run(
     }
     if let Some(coverage) = config.coverage {
         cmd.arg("--coverage").arg(coverage.to_string());
+    }
+    if let Some(mcmc_iterations) = config.mcmc_iterations {
+        cmd.arg("--mcmc-iterations").arg(mcmc_iterations.to_string());
+    }
+    if let Some(min_uniform_games) = config.min_uniform_games {
+        cmd.arg("--min-uniform-games").arg(min_uniform_games.to_string());
     }
 
     let output = cmd
@@ -171,12 +193,38 @@ pub async fn run(
     let top_1_displacement = metrics::top_k_displacement(&true_order, &output_order, 1);
     let top_k_displacement = metrics::top_k_displacement(&true_order, &output_order, top_k);
 
+    // Per-round interim metrics. The CLI was run with --emit-round-rankings, so
+    // it must include this array; a missing field is a hard error, not a silent
+    // skip.
+    let round_rankings = json["round_rankings"]
+        .as_array()
+        .ok_or("missing 'round_rankings' in output (was --emit-round-rankings honored?)")?;
+    let per_round: Vec<RoundMetrics> = round_rankings
+        .iter()
+        .map(|entry| {
+            let comparisons = entry["comparisons"].as_u64().unwrap_or(0) as usize;
+            let order: Vec<String> = entry["order"]
+                .as_array()
+                .ok_or("round entry missing 'order' array")?
+                .iter()
+                .map(|v| v.as_str().unwrap().to_string())
+                .collect();
+            Ok(RoundMetrics {
+                comparisons,
+                spearman_rho: metrics::spearman_rho(&true_order, &order),
+                top_1_displacement: metrics::top_k_displacement(&true_order, &order, 1),
+                top_k_displacement: metrics::top_k_displacement(&true_order, &order, top_k),
+            })
+        })
+        .collect::<Result<Vec<_>, String>>()?;
+
     Ok(TrialResult {
         spearman_rho,
         top_1_displacement,
         top_k_displacement,
         comparisons,
         duration,
+        per_round,
         example_ranking,
     })
 }

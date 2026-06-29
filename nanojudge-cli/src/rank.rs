@@ -324,6 +324,9 @@ pub async fn run(args: RankArgs) {
     let mut jitter_rng = seed::make_rng(resolved.seed, seed::SUBSYSTEM_TEMP_JITTER);
 
     let mut interim_warm_start: Option<nanojudge_core::WarmStartState> = None;
+    // When --emit-round-rankings is set, record (cumulative comparisons, ranked
+    // names) after each round so the benchmark can plot per-round convergence.
+    let mut round_rankings: Vec<(usize, Vec<String>)> = Vec::new();
     for round in 0..rounds {
         if cancelled.load(Ordering::Relaxed) {
             break;
@@ -573,13 +576,15 @@ pub async fn run(args: RankArgs) {
         engine.record_results(&round_results);
         engine.update_current_ratings();
 
-        let need_interim = matches!(comparison_distribution, ComparisonDistribution::TopHeavy) || resolved.live_top.is_some();
+        let need_interim = matches!(comparison_distribution, ComparisonDistribution::TopHeavy)
+            || resolved.live_top.is_some()
+            || resolved.emit_round_rankings;
         if need_interim && !engine.completed_comparisons.is_empty() {
             let interim = run_scoring(
                 &item_ids,
                 &engine.completed_comparisons,
                 &ScoringOptions {
-                    iterations: 5000,
+                    iterations: resolved.mcmc_iterations,
                     burn_in: if interim_warm_start.is_some() { 0 } else { 100 },
                     confidence_level: resolved.confidence_level,
                     selection_sharpness,
@@ -596,6 +601,14 @@ pub async fn run(args: RankArgs) {
                 },
                 &judge_info,
             );
+            if resolved.emit_round_rankings {
+                let order: Vec<String> = interim
+                    .rankings
+                    .iter()
+                    .map(|r| titles[r.item as usize].clone())
+                    .collect();
+                round_rankings.push((total_comparisons, order));
+            }
             if matches!(comparison_distribution, ComparisonDistribution::TopHeavy) {
                 engine.selection_weights = interim.selection_weights;
             }
@@ -705,6 +718,11 @@ pub async fn run(args: RankArgs) {
             &scoring_result.judge_analytics,
             scoring_result.panel_positional_bias,
             scoring_result.panel_positional_bias_ci,
+            if resolved.emit_round_rankings {
+                Some(round_rankings.as_slice())
+            } else {
+                None
+            },
         ),
         OutputFormat::Table => output::print_table(
             &scoring_result.rankings,

@@ -164,6 +164,12 @@ pub struct ConfigArgs {
     #[arg(long, num_args = 0..=1, default_missing_value = "0")]
     pub live_top: Option<usize>,
 
+    /// Emit the interim ranking after every round as a `round_rankings` array
+    /// in JSON output. Forces an interim MCMC pass each round even for uniform.
+    /// Intended for the benchmark harness to plot per-round convergence.
+    #[arg(long, num_args = 0..=1, default_missing_value = "true")]
+    pub emit_round_rankings: Option<bool>,
+
     /// Save all comparisons to a JSONL file.
     /// Bare flag: saves to comparisons-{timestamp}.jsonl in the current directory.
     /// With a path: saves to that file (or auto-generates a name if path is a directory).

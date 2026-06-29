@@ -63,6 +63,7 @@ pub struct ResolvedConfig {
     pub bias_prior_tau2: f64,
     pub bias_proposal_std: f64,
     pub live_top: Option<usize>,
+    pub emit_round_rankings: bool,
     pub save_comparisons: Option<PathBuf>,
     pub output_format: OutputFormat,
     pub verbose: bool,
@@ -367,6 +368,7 @@ pub fn resolve_config(shared: &ConfigArgs, cfg: &config::NanojudgeConfig) -> Res
     }
 
     let live_top = merge_opt(shared.live_top, cfg.live_top, "live-top");
+    let emit_round_rankings = shared.emit_round_rankings.unwrap_or(false);
     let save_comparisons = match (shared.save_comparisons.clone(), cfg.save_comparisons.clone()) {
         (Some(c), Some(f)) => {
             if c != f {
@@ -458,6 +460,7 @@ pub fn resolve_config(shared: &ConfigArgs, cfg: &config::NanojudgeConfig) -> Res
         bias_prior_tau2,
         bias_proposal_std,
         live_top,
+        emit_round_rankings,
         save_comparisons,
         output_format,
         verbose,
@@ -499,6 +502,7 @@ mod tests {
             bias_prior_tau2: None,
             bias_proposal_std: None,
             live_top: None,
+            emit_round_rankings: None,
             save_comparisons: None,
             output_format: None,
             verbose: None,

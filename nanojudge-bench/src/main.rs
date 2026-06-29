@@ -60,6 +60,16 @@ struct Args {
     #[arg(long)]
     coverage: Option<f64>,
 
+    /// MCMC iterations forwarded to the CLI (governs both the per-round interim
+    /// scoring and the final scoring). Omit to use the CLI's default (5000).
+    #[arg(long)]
+    mcmc_iterations: Option<usize>,
+
+    /// Minimum uniform warm-up games per item forwarded to the CLI, before
+    /// top-heavy concentration engages. Omit to use the CLI's default (2).
+    #[arg(long)]
+    min_uniform_games: Option<usize>,
+
     /// Use logprobs mode instead of text-verdict mode.
     #[arg(long)]
     logprobs: bool,
@@ -152,6 +162,8 @@ struct SharedTrialConfig {
     selection_sharpness: Option<f64>,
     cutoff: Option<f64>,
     coverage: Option<f64>,
+    mcmc_iterations: Option<usize>,
+    min_uniform_games: Option<usize>,
     nanojudge_bin: PathBuf,
 }
 
@@ -208,6 +220,20 @@ async fn main() {
     eprintln!("  Logprobs: {}", args.logprobs);
     eprintln!("  Report top-K: {}", top_k);
     eprintln!("  Distribution: {}", args.comparison_distribution);
+    eprintln!(
+        "  MCMC iterations: {}",
+        match args.mcmc_iterations {
+            Some(n) => n.to_string(),
+            None => "CLI default (5000)".to_string(),
+        }
+    );
+    eprintln!(
+        "  Min uniform games: {}",
+        match args.min_uniform_games {
+            Some(n) => n.to_string(),
+            None => "CLI default (2)".to_string(),
+        }
+    );
     eprintln!("  Seed: {}", master_seed);
     eprintln!("  Concurrency: {}", concurrency);
     eprintln!();
@@ -222,6 +248,8 @@ async fn main() {
         selection_sharpness: args.selection_sharpness,
         cutoff: args.cutoff,
         coverage: args.coverage,
+        mcmc_iterations: args.mcmc_iterations,
+        min_uniform_games: args.min_uniform_games,
         nanojudge_bin: nanojudge_bin.clone(),
     });
 
@@ -252,6 +280,8 @@ async fn main() {
                 selection_sharpness: shared.selection_sharpness,
                 cutoff: shared.cutoff,
                 coverage: shared.coverage,
+                mcmc_iterations: shared.mcmc_iterations,
+                min_uniform_games: shared.min_uniform_games,
                 nanojudge_bin: &shared.nanojudge_bin,
             };
             let res = trial::run(&config, trial_seed, top_k, capture_example).await;
@@ -306,6 +336,7 @@ async fn main() {
         std::process::exit(1);
     }
 
+    print_round_convergence(&results, top_k);
     print_summary(&results, top_k, errors);
 
     // Show one example ranking (captured from the first trial) so the actual
@@ -321,6 +352,51 @@ async fn main() {
 // ---------------------------------------------------------------------------
 // Summary output
 // ---------------------------------------------------------------------------
+
+/// Print the mean accuracy metrics after each round, showing how the ranking
+/// converges as comparisons accumulate. Each cell is averaged across all trials.
+fn print_round_convergence(results: &[trial::TrialResult], top_k: usize) {
+    // All trials run the same number of rounds; take the min defensively so a
+    // short result can never index out of bounds.
+    let num_rounds = results
+        .iter()
+        .map(|r| r.per_round.len())
+        .min()
+        .unwrap_or(0);
+    if num_rounds == 0 {
+        return;
+    }
+
+    println!("Per-round convergence (mean across {} trials)", results.len());
+    println!();
+    println!(
+        "  {:>5} {:>12} {:>8} {:>8} {:>8}",
+        "Round",
+        "Comparisons",
+        "rho",
+        "Top-1",
+        format!("Top-{top_k}"),
+    );
+    println!(
+        "  {:>5} {:>12} {:>8} {:>8} {:>8}",
+        "-----", "-----------", "---", "-----", "-----"
+    );
+    for r in 0..num_rounds {
+        let comps: Vec<f64> = results.iter().map(|res| res.per_round[r].comparisons as f64).collect();
+        let rhos: Vec<f64> = results.iter().map(|res| res.per_round[r].spearman_rho).collect();
+        let top1: Vec<f64> = results.iter().map(|res| res.per_round[r].top_1_displacement).collect();
+        let topk: Vec<f64> = results.iter().map(|res| res.per_round[r].top_k_displacement).collect();
+        println!(
+            "  {:>5} {:>12} {:>8.4} {:>8.2} {:>8.2}",
+            r + 1,
+            mean(&comps) as usize,
+            mean(&rhos),
+            mean(&top1),
+            mean(&topk),
+        );
+    }
+    println!();
+}
 
 fn print_summary(results: &[trial::TrialResult], top_k: usize, errors: usize) {
     let rhos: Vec<f64> = results.iter().map(|r| r.spearman_rho).collect();
