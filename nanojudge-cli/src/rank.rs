@@ -44,22 +44,6 @@ fn resolve_save_path(path: &Path, prefix: &str) -> PathBuf {
     }
 }
 
-/// Split a round's `total` pairs into `parts` chunk sizes that sum to `total`,
-/// as evenly as possible (the first `total % parts` chunks get one extra).
-/// Zero-sized chunks (when `parts` exceeds `total`) are dropped, so the result
-/// always has between 1 and `min(parts, total)` entries.
-fn split_round_into_chunks(total: usize, parts: usize) -> Vec<usize> {
-    if parts <= 1 || total == 0 {
-        return vec![total];
-    }
-    let base = total / parts;
-    let remainder = total % parts;
-    (0..parts)
-        .map(|i| base + usize::from(i < remainder))
-        .filter(|&size| size > 0)
-        .collect()
-}
-
 /// Parse a criterion file into a list of criteria, splitting on ---CRITERION---.
 fn parse_criteria(content: &str) -> Vec<String> {
     content
@@ -349,18 +333,12 @@ pub async fn run(args: RankArgs) {
             break;
         }
 
-        // Decide how many refit chunks this round splits into. Only top-heavy
-        // batches may be subdivided: the uniform stage pairs every item exactly
-        // once per full round, so we keep it whole (--refits-per-round leaves
-        // the uniform stage alone). Each chunk runs its own scoring refit and
-        // re-derives selection weights, so pairing adapts mid-round.
-        let chunk_sizes: Vec<usize> = if resolved.refits_per_round > 1
-            && matches!(engine.effective_distribution(), ComparisonDistribution::TopHeavy)
-        {
-            split_round_into_chunks(pairs_per_round, resolved.refits_per_round)
-        } else {
-            vec![pairs_per_round]
-        };
+        // Decide how many refit chunks this round splits into. The engine
+        // applies the policy: only top-heavy batches may be subdivided (the
+        // uniform stage pairs every item exactly once per full round, so it
+        // stays whole). Each chunk runs its own scoring refit and re-derives
+        // selection weights, so pairing adapts mid-round.
+        let chunk_sizes = engine.round_chunk_sizes(resolved.refits_per_round);
 
         if resolved.verbose {
             eprintln!(
@@ -785,29 +763,6 @@ pub async fn run(args: RankArgs) {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn test_split_round_into_chunks_even() {
-        assert_eq!(split_round_into_chunks(200, 4), vec![50, 50, 50, 50]);
-    }
-
-    #[test]
-    fn test_split_round_into_chunks_uneven_sums_to_total() {
-        let chunks = split_round_into_chunks(201, 4);
-        assert_eq!(chunks, vec![51, 50, 50, 50]);
-        assert_eq!(chunks.iter().sum::<usize>(), 201);
-    }
-
-    #[test]
-    fn test_split_round_into_chunks_single_part() {
-        assert_eq!(split_round_into_chunks(200, 1), vec![200]);
-    }
-
-    #[test]
-    fn test_split_round_into_chunks_more_parts_than_pairs() {
-        // 3 pairs, 8 requested chunks → three 1-pair chunks, zeros dropped.
-        assert_eq!(split_round_into_chunks(3, 8), vec![1, 1, 1]);
-    }
 
     #[test]
     fn test_parse_criteria_single() {

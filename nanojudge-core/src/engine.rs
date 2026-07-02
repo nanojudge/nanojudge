@@ -104,8 +104,8 @@ impl RankingEngine {
 
     /// The comparison distribution the next generated batch will use, given the
     /// games played so far. Top-heavy only once every item has reached
-    /// `min_uniform_games` (otherwise uniform pairing). Lets the caller decide
-    /// whether a round may be subdivided into finer refit chunks: only top-heavy
+    /// `min_uniform_games` (otherwise uniform pairing). Round subdivision into
+    /// refit chunks derives from this via `round_chunk_sizes()`: only top-heavy
     /// batches are safe to split, since the uniform stage pairs every item
     /// exactly once per full round.
     pub fn effective_distribution(&self) -> ComparisonDistribution {
@@ -115,6 +115,32 @@ impl RankingEngine {
             &self.games_played,
             self.config.min_uniform_games,
         )
+    }
+
+    /// Decide how many refit chunks the next round splits into, returning the
+    /// chunk sizes (each a `generate_pairs()` batch; they sum to one full round).
+    ///
+    /// `refits_per_round = 1` keeps the round whole. Higher values subdivide it
+    /// into that many near-equal chunks so the caller can refit scoring and
+    /// re-derive selection weights between chunks — but only when the round's
+    /// effective distribution is top-heavy. Uniform rounds pair every item
+    /// exactly once, so they are never subdivided and always come back as a
+    /// single full-round chunk. Encoding that rule here means callers cannot
+    /// get the policy wrong.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `refits_per_round` is 0.
+    pub fn round_chunk_sizes(&self, refits_per_round: usize) -> Vec<usize> {
+        assert!(refits_per_round >= 1, "refits_per_round must be at least 1");
+        let pairs_per_round = calculate_pairs_for_round(self.id_map.len());
+        if refits_per_round > 1
+            && self.effective_distribution() == ComparisonDistribution::TopHeavy
+        {
+            split_round_into_chunks(pairs_per_round, refits_per_round)
+        } else {
+            vec![pairs_per_round]
+        }
     }
 
     /// Generate a batch of `pairs_count` pairs using the current effective
@@ -214,6 +240,22 @@ pub fn calculate_total_expected_comparisons(num_items: usize, number_of_rounds: 
     calculate_pairs_for_round(num_items) * number_of_rounds
 }
 
+/// Split a round's `total` pairs into `parts` chunk sizes that sum to `total`,
+/// as evenly as possible (the first `total % parts` chunks get one extra).
+/// Zero-sized chunks (when `parts` exceeds `total`) are dropped, so the result
+/// always has between 1 and `min(parts, total)` entries.
+pub fn split_round_into_chunks(total: usize, parts: usize) -> Vec<usize> {
+    if parts <= 1 || total == 0 {
+        return vec![total];
+    }
+    let base = total / parts;
+    let remainder = total % parts;
+    (0..parts)
+        .map(|i| base + usize::from(i < remainder))
+        .filter(|&size| size > 0)
+        .collect()
+}
+
 /// Calculate rounds needed to reach target comparisons.
 pub fn calculate_rounds_for_target_comparisons(num_items: usize, target_comparisons: usize) -> usize {
     let pairs_per_round = calculate_pairs_for_round(num_items);
@@ -249,6 +291,74 @@ mod tests {
         assert_eq!(calculate_rounds_for_target_comparisons(100, 501), 11);
         assert_eq!(calculate_rounds_for_target_comparisons(100, 0), 0);
         assert_eq!(calculate_rounds_for_target_comparisons(1, 100), 0);
+    }
+
+    #[test]
+    fn test_split_round_into_chunks_even() {
+        assert_eq!(split_round_into_chunks(200, 4), vec![50, 50, 50, 50]);
+    }
+
+    #[test]
+    fn test_split_round_into_chunks_uneven_sums_to_total() {
+        let chunks = split_round_into_chunks(201, 4);
+        assert_eq!(chunks, vec![51, 50, 50, 50]);
+        assert_eq!(chunks.iter().sum::<usize>(), 201);
+    }
+
+    #[test]
+    fn test_split_round_into_chunks_single_part() {
+        assert_eq!(split_round_into_chunks(200, 1), vec![200]);
+    }
+
+    #[test]
+    fn test_split_round_into_chunks_more_parts_than_pairs() {
+        // 3 pairs, 8 requested chunks → three 1-pair chunks, zeros dropped.
+        assert_eq!(split_round_into_chunks(3, 8), vec![1, 1, 1]);
+    }
+
+    fn top_heavy_engine(num_items: usize) -> RankingEngine {
+        let item_ids: Vec<i64> = (0..num_items as i64).collect();
+        RankingEngine::new(&item_ids, EngineConfig {
+            comparison_distribution: ComparisonDistribution::TopHeavy,
+            matchmaking_sharpness: 1.0,
+            min_uniform_games: 3,
+            seed: Some(1),
+        })
+    }
+
+    #[test]
+    fn test_round_chunk_sizes_uniform_stage_never_subdivides() {
+        // Fresh engine: nobody has reached min_uniform_games, so the effective
+        // distribution is uniform and the round stays whole despite refits > 1.
+        let engine = top_heavy_engine(10);
+        assert_eq!(engine.round_chunk_sizes(4), vec![5]);
+    }
+
+    #[test]
+    fn test_round_chunk_sizes_top_heavy_subdivides() {
+        let mut engine = top_heavy_engine(10);
+        engine.games_played = vec![3; 10]; // uniform stage complete
+        assert_eq!(engine.round_chunk_sizes(4), vec![2, 1, 1, 1]);
+        assert_eq!(engine.round_chunk_sizes(1), vec![5]);
+    }
+
+    #[test]
+    fn test_round_chunk_sizes_uniform_config_never_subdivides() {
+        let item_ids: Vec<i64> = (0..10).collect();
+        let mut engine = RankingEngine::new(&item_ids, EngineConfig {
+            comparison_distribution: ComparisonDistribution::Uniform,
+            matchmaking_sharpness: 1.0,
+            min_uniform_games: 3,
+            seed: Some(1),
+        });
+        engine.games_played = vec![10; 10];
+        assert_eq!(engine.round_chunk_sizes(4), vec![5]);
+    }
+
+    #[test]
+    #[should_panic(expected = "refits_per_round must be at least 1")]
+    fn test_round_chunk_sizes_zero_refits_panics() {
+        top_heavy_engine(10).round_chunk_sizes(0);
     }
 
     fn make_input(id1: i64, id2: i64, prob: f64) -> ComparisonInput {

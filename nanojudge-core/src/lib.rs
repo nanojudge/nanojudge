@@ -71,7 +71,8 @@ pub mod types;
 // Re-export primary public API at crate root.
 pub use engine::{
     calculate_pairs_for_round, calculate_rounds_for_target_comparisons,
-    calculate_total_expected_comparisons, EngineConfig, RankingEngine,
+    calculate_total_expected_comparisons, split_round_into_chunks, EngineConfig,
+    RankingEngine,
 };
 pub use pairing::{
     calculate_info_gain, generate_uniform_pairings, generate_top_heavy_pairings,
