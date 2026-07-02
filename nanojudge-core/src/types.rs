@@ -61,8 +61,8 @@ pub struct JudgeAnalytics {
 #[derive(Debug, Clone)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct WarmStartState {
-    /// Item strengths (exp of log-strengths), same order as item_ids.
-    pub item_strengths: Vec<f64>,
+    /// Item log-strengths (θ, the engines' native state), same order as item_ids.
+    pub item_log_strengths: Vec<f64>,
     /// Per-judge positional bias in logit space, keyed by judge_id hash.
     /// Positive values mean the judge favors the first-listed item.
     pub judge_biases: Vec<(u64, f64)>,

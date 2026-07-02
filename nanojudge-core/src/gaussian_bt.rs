@@ -324,11 +324,11 @@ impl GaussianBT {
     ///
     /// # Panics
     ///
-    /// Panics if `previous_strengths` does not have one entry per item.
+    /// Panics if `previous_log_strengths` does not have one entry per item.
     #[allow(clippy::too_many_arguments)]
     pub fn calculate_incremental_with_samples(
         &mut self,
-        previous_strengths: &[f64],
+        previous_log_strengths: &[f64],
         previous_biases: &[(u64, f64)],
         judge_id_to_idx: &HashMap<u64, usize>,
         new_iterations: usize,
@@ -336,9 +336,9 @@ impl GaussianBT {
         rng: &mut StdRng,
     ) -> SamplesResult {
         let n = self.num_items;
-        assert_eq!(previous_strengths.len(), n, "Previous state size mismatch");
+        assert_eq!(previous_log_strengths.len(), n, "Previous state size mismatch");
 
-        self.log_strengths[..n].copy_from_slice(&previous_strengths[..n]);
+        self.log_strengths[..n].copy_from_slice(&previous_log_strengths[..n]);
 
         for &(judge_id, bias) in previous_biases {
             if let Some(&idx) = judge_id_to_idx.get(&judge_id) {

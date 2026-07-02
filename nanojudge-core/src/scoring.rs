@@ -161,7 +161,7 @@ fn compute_selection_weights(
 /// - `item_ids` contains a duplicate ID
 /// - a comparison references an item ID not present in `item_ids`
 /// - a comparison's `judge_id` is not present in `judge_info.judge_ids`
-/// - `options.warm_start` is set and its `item_strengths` length does not
+/// - `options.warm_start` is set and its `item_log_strengths` length does not
 ///   match `item_ids.len()`
 pub fn run_scoring(
     item_ids: &[i64],
@@ -199,12 +199,12 @@ pub fn run_scoring(
 
     let samples_result = if let Some(ref warm_start) = options.warm_start {
         assert_eq!(
-            warm_start.item_strengths.len(), num_items,
-            "warm_start item_strengths length ({}) must match num_items ({})",
-            warm_start.item_strengths.len(), num_items
+            warm_start.item_log_strengths.len(), num_items,
+            "warm_start item_log_strengths length ({}) must match num_items ({})",
+            warm_start.item_log_strengths.len(), num_items
         );
         mcmc.calculate_incremental_with_samples(
-            &warm_start.item_strengths,
+            &warm_start.item_log_strengths,
             &warm_start.judge_biases,
             &judge_id_to_idx,
             options.iterations,
@@ -252,7 +252,7 @@ pub fn run_scoring(
 
     // Build warm start state
     let warm_start_state = WarmStartState {
-        item_strengths: mcmc.get_current_state(),
+        item_log_strengths: mcmc.get_current_state(),
         judge_biases: mcmc.get_current_biases(judge_info),
     };
 
@@ -414,7 +414,7 @@ fn run_scoring_laplace(
     // The Laplace fit refits from scratch each call, so warm start is unused;
     // we still return a valid state for API symmetry with the MCMC path.
     let warm_start_state = WarmStartState {
-        item_strengths: fit.means.iter().map(|&m| m.exp()).collect(),
+        item_log_strengths: fit.means.clone(),
         judge_biases: (0..num_judges)
             .map(|k| (judge_info.judge_ids[k], fit.bias_means[k]))
             .collect(),
@@ -603,7 +603,7 @@ mod tests {
         assert_eq!(result.rankings.len(), 3);
         assert_eq!(result.rankings[0].item, 100);
         assert!(result.selection_weights.is_none());
-        assert_eq!(result.warm_start_state.item_strengths.len(), 3);
+        assert_eq!(result.warm_start_state.item_log_strengths.len(), 3);
         assert_eq!(result.sample_size, 2000);
         assert_eq!(result.judge_analytics.len(), 1);
         assert_eq!(result.judge_analytics[0].judge_id, 42);
@@ -627,11 +627,41 @@ mod tests {
         let result2 = run_scoring(&item_ids, &comparisons, &opts2, &ji);
 
         assert_eq!(result2.rankings.len(), 3);
-        assert_eq!(result2.warm_start_state.item_strengths.len(), 3);
+        assert_eq!(result2.warm_start_state.item_log_strengths.len(), 3);
     }
 
     #[test]
-    #[should_panic(expected = "warm_start item_strengths length (2) must match num_items (3)")]
+    fn test_warm_start_state_is_log_strengths_in_both_engines() {
+        // Both engines must write the SAME unit into WarmStartState: raw
+        // log-strengths (mean-centered θ). Regression test for the Laplace path
+        // exp()-ing its means — exp values are all positive, so requiring a
+        // negative entry and a ~0 sum catches any strength-space leak.
+        let item_ids = vec![10, 20, 30];
+        let comparisons: Vec<ComparisonInput> = (0..10).flat_map(|_| {
+            [make_pair(10, 20, 0.9), make_pair(20, 30, 0.9)]
+        }).flatten().collect();
+        let ji = single_judge_info();
+
+        for inference in [InferenceMode::Mcmc, InferenceMode::LaplaceLinear] {
+            let mut opts = default_scoring_options();
+            opts.inference = inference;
+            opts.seed = Some(11);
+            let state = run_scoring(&item_ids, &comparisons, &opts, &ji).warm_start_state;
+            let sum: f64 = state.item_log_strengths.iter().sum();
+            assert!(
+                sum.abs() < 1e-6,
+                "{inference:?}: log-strengths are mean-centered, sum should be ~0, got {sum}"
+            );
+            assert!(
+                state.item_log_strengths.iter().any(|&s| s < 0.0),
+                "{inference:?}: the losing item's log-strength must be negative, got {:?}",
+                state.item_log_strengths
+            );
+        }
+    }
+
+    #[test]
+    #[should_panic(expected = "warm_start item_log_strengths length (2) must match num_items (3)")]
     fn test_warm_start_wrong_length_panics() {
         let item_ids = vec![10, 20, 30];
         let comparisons: Vec<ComparisonInput> = [
@@ -641,7 +671,7 @@ mod tests {
         let ji = single_judge_info();
         let mut opts = default_scoring_options();
         opts.warm_start = Some(WarmStartState {
-            item_strengths: vec![1.0, 1.0], // Wrong length: 2 instead of 3
+            item_log_strengths: vec![1.0, 1.0], // Wrong length: 2 instead of 3
             judge_biases: vec![],
         });
 
