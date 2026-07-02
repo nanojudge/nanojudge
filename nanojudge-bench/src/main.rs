@@ -55,7 +55,7 @@ struct Args {
     comparison_distribution: String,
 
     /// Top-heavy selection sharpness forwarded to the CLI. Omit to use the CLI's
-    /// default (0.4).
+    /// default (0.7).
     #[arg(long)]
     selection_sharpness: Option<f64>,
 

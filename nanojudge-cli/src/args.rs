@@ -76,7 +76,7 @@ pub struct ConfigArgs {
     /// Top-heavy selection sharpness: each item's P(beat the current leader) is
     /// raised to this power before being used as its pairing weight. Lower =
     /// flatter = more exploration; 1.0 = raw probabilities. Must be finite and
-    /// > 0. Default: 0.4. Only used with top-heavy.
+    /// > 0. Default: 0.7. Only used with top-heavy.
     #[arg(long)]
     pub selection_sharpness: Option<f64>,
 

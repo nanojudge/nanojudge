@@ -120,7 +120,7 @@ const DEFAULT_CONFIG_TEMPLATE: &str = "\
 #             games-played^coverage, pulling cumulative comparisons toward the
 #             area-implied share. 0 = off, 1 = proportional-fair, > 1 over-corrects.
 # Only used with comparison_distribution = \"top-heavy\".
-# selection_sharpness = 0.4
+# selection_sharpness = 0.7
 # cutoff = 0.0
 # coverage = 1.0
 

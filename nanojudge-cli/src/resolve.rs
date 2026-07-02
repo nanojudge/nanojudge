@@ -306,7 +306,7 @@ pub fn resolve_config(shared: &ConfigArgs, cfg: &config::NanojudgeConfig) -> Res
 
     // Top-heavy selection tuning (only used with the top-heavy distribution).
     let selection_sharpness = merge_opt(shared.selection_sharpness, cfg.selection_sharpness, "selection-sharpness")
-        .unwrap_or(0.4);
+        .unwrap_or(0.7);
     if !selection_sharpness.is_finite() || selection_sharpness <= 0.0 {
         bail(format!("selection-sharpness={selection_sharpness}, must be finite and > 0"));
     }
