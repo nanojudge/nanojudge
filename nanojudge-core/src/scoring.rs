@@ -158,6 +158,7 @@ fn compute_selection_weights(
 /// # Panics
 ///
 /// Panics if caller-supplied data violates the input contract:
+/// - `judge_info.judge_ids` is empty (a tournament needs at least one judge)
 /// - `item_ids` contains a duplicate ID
 /// - a comparison references an item ID not present in `item_ids`
 /// - a comparison's `judge_id` is not present in `judge_info.judge_ids`
@@ -170,6 +171,10 @@ pub fn run_scoring(
     judge_info: &JudgeInfo,
 ) -> ScoringResult {
     assert!(options.iterations > 0, "iterations must be at least 1");
+    assert!(
+        !judge_info.judge_ids.is_empty(),
+        "judge_info.judge_ids must contain at least one judge"
+    );
 
     let id_map = IdMap::from_ids(item_ids);
     let num_items = id_map.len();
@@ -764,6 +769,15 @@ mod tests {
 
         let ji = single_judge_info();
         run_scoring(&item_ids, &comparisons, &default_scoring_options(), &ji);
+    }
+
+    #[test]
+    #[should_panic(expected = "at least one judge")]
+    fn test_scoring_zero_judges_panics() {
+        // An empty judge panel is an illegal state, not a case to handle:
+        // the engines would otherwise disagree on the panel bias null value.
+        let ji = JudgeInfo { judge_ids: vec![], logprobs_mode: false };
+        run_scoring(&[1, 2], &[], &default_scoring_options(), &ji);
     }
 
     #[test]
