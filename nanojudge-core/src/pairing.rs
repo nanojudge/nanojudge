@@ -77,28 +77,41 @@ pub fn get_effective_comparison_distribution(
 
 /// Generate uniform pairings for a round.
 ///
-/// `current_ratings[i]` is the rating for `item_ids[i]`.
-/// Returns pairs of item IDs.
+/// `current_ratings[i]`, `first_position_counts[i]` and `games_played[i]` all
+/// correspond to `item_ids[i]`. Returns pairs of item IDs.
+///
+/// `games_played` determines the matchmaking stage: with a maximum of 0 games
+/// (round 1) items are paired at random; at 1 game (round 2) nearest-rating
+/// neighbours are paired; from 2 games (round 3+) opponents are drawn from a
+/// rating window weighted by info gain (`sharpness` is the info-gain
+/// exponent). `first_position_counts` balances which item of each pair is
+/// listed first. Callers must pass their real cumulative counts — zeros mean
+/// "round 1" and produce purely random pairs.
 ///
 /// # Panics
 ///
-/// Panics if `current_ratings` has fewer entries than `item_ids`.
+/// Panics if `current_ratings`, `first_position_counts` or `games_played`
+/// length does not equal `item_ids` length.
 pub fn generate_uniform_pairings(
     item_ids: &[i64],
     pairs_count: usize,
     current_ratings: &[f64],
     sharpness: f64,
+    first_position_counts: &[usize],
+    games_played: &[usize],
 ) -> Vec<Pair> {
     let n = item_ids.len();
-    let zeros = vec![0usize; n];
+    assert_eq!(current_ratings.len(), n, "current_ratings length mismatch");
+    assert_eq!(first_position_counts.len(), n, "first_position_counts length mismatch");
+    assert_eq!(games_played.len(), n, "games_played length mismatch");
     let mut rng = make_rng(None, crate::seed::SUBSYSTEM_PAIRING);
     let index_pairs = generate_uniform_pairings_indexed(
         n,
         pairs_count,
         current_ratings,
         sharpness,
-        &zeros,
-        &zeros,
+        first_position_counts,
+        games_played,
         &mut rng,
     );
     index_pairs.into_iter().map(|(a, b)| (item_ids[a], item_ids[b])).collect()
@@ -111,21 +124,27 @@ pub fn generate_uniform_pairings(
 /// comparisons on the contenders. The opponent (item2) is then chosen by
 /// info-gain matchmaking from a rating window around item1 (using
 /// `current_ratings` and `matchmaking_sharpness`), exactly as uniform pairing
-/// selects opponents. Returns pairs of item IDs.
+/// selects opponents. `first_position_counts[i]` and `games_played[i]`
+/// (cumulative counts for `item_ids[i]`) balance which item of each pair is
+/// listed first. Returns pairs of item IDs.
 ///
 /// # Panics
 ///
-/// Panics if `selection_weights` or `current_ratings` length does not equal
-/// `item_ids` length, or if the total selection weight is not positive.
+/// Panics if `selection_weights`, `current_ratings`, `first_position_counts`
+/// or `games_played` length does not equal `item_ids` length, or if the total
+/// selection weight is not positive.
 pub fn generate_top_heavy_pairings(
     item_ids: &[i64],
     pairs_count: usize,
     selection_weights: &[f64],
     current_ratings: &[f64],
     matchmaking_sharpness: f64,
+    first_position_counts: &[usize],
+    games_played: &[usize],
 ) -> Vec<Pair> {
     let n = item_ids.len();
-    let zeros = vec![0usize; n];
+    assert_eq!(first_position_counts.len(), n, "first_position_counts length mismatch");
+    assert_eq!(games_played.len(), n, "games_played length mismatch");
     let mut rng = make_rng(None, crate::seed::SUBSYSTEM_PAIRING);
     let index_pairs = generate_top_heavy_pairings_indexed(
         n,
@@ -133,8 +152,8 @@ pub fn generate_top_heavy_pairings(
         selection_weights,
         current_ratings,
         matchmaking_sharpness,
-        &zeros,
-        &zeros,
+        first_position_counts,
+        games_played,
         &mut rng,
     );
     index_pairs.into_iter().map(|(a, b)| (item_ids[a], item_ids[b])).collect()
@@ -516,7 +535,8 @@ mod tests {
     fn test_uniform_pairings_coverage() {
         let item_ids: Vec<i64> = (100..110).collect(); // IDs 100-109
         let ratings = vec![1.0; 10];
-        let pairs = generate_uniform_pairings(&item_ids, 5, &ratings, 1.0);
+        let zeros = vec![0usize; 10];
+        let pairs = generate_uniform_pairings(&item_ids, 5, &ratings, 1.0, &zeros, &zeros);
 
         assert_eq!(pairs.len(), 5);
 
@@ -568,6 +588,33 @@ mod tests {
             results.iter().any(|r| *r != index_order),
             "tied-item pairing always matched the index-order fallback"
         );
+    }
+
+    #[test]
+    fn test_public_uniform_pairings_use_ratings_after_uniform_stage() {
+        // With every item at 2+ games the public wrapper must run info-gain
+        // matchmaking on the supplied ratings, pairing rating-neighbours.
+        // Regression test for the wrapper hardcoding games_played to zeros,
+        // which forced the round-1 random branch and made `current_ratings`
+        // and `sharpness` dead parameters.
+        let item_ids: Vec<i64> = (0..10).collect();
+        let ratings: Vec<f64> = (0..10).map(|i| i as f64 * 2.0).collect();
+        let first = vec![1usize; 10];
+        let games = vec![2usize; 10];
+
+        let mut total_gap = 0.0;
+        let mut count = 0usize;
+        for _ in 0..200 {
+            let pairs = generate_uniform_pairings(&item_ids, 5, &ratings, 1.0, &first, &games);
+            for (a, b) in pairs {
+                total_gap += (ratings[a as usize] - ratings[b as usize]).abs();
+                count += 1;
+            }
+        }
+        let mean_gap = total_gap / count as f64;
+        // Random pairing over ratings 0,2,…,18 averages a gap of ~7.3;
+        // info-gain matchmaking pulls it well below that.
+        assert!(mean_gap < 5.0, "expected rating-local pairs, mean gap was {mean_gap}");
     }
 
     #[test]
@@ -635,8 +682,9 @@ mod tests {
         let item_ids: Vec<i64> = (0..10).collect();
         let selection_weights: Vec<f64> = (0..10).map(|i| if i < 3 { 0.8 } else { 0.05 }).collect();
         let ratings: Vec<f64> = (0..10).map(|i| i as f64).collect();
+        let zeros = vec![0usize; 10];
 
-        let pairs = generate_top_heavy_pairings(&item_ids, 5, &selection_weights, &ratings, 1.0);
+        let pairs = generate_top_heavy_pairings(&item_ids, 5, &selection_weights, &ratings, 1.0, &zeros, &zeros);
         assert_eq!(pairs.len(), 5);
         for (a, b) in &pairs {
             assert_ne!(a, b);
@@ -653,8 +701,9 @@ mod tests {
         let item_ids: Vec<i64> = (0..10).collect();
         let selection_weights: Vec<f64> = (0..10).map(|i| if i < 3 { 1.0 } else { 0.0001 }).collect();
         let ratings: Vec<f64> = (0..10).map(|i| if i < 3 { 5.0 } else { 0.0 }).collect();
+        let zeros = vec![0usize; 10];
 
-        let pairs = generate_top_heavy_pairings(&item_ids, 200, &selection_weights, &ratings, 1.0);
+        let pairs = generate_top_heavy_pairings(&item_ids, 200, &selection_weights, &ratings, 1.0, &zeros, &zeros);
         let mut appearances = [0usize; 10];
         for (a, b) in &pairs {
             appearances[*a as usize] += 1;
@@ -673,8 +722,9 @@ mod tests {
         let item_ids: Vec<i64> = (0..10).collect();
         let selection_weights = vec![1.0; 10];
         let ratings: Vec<f64> = (0..10).map(|i| i as f64).collect();
+        let zeros = vec![0usize; 10];
 
-        let pairs = generate_top_heavy_pairings(&item_ids, 2000, &selection_weights, &ratings, 1.0);
+        let pairs = generate_top_heavy_pairings(&item_ids, 2000, &selection_weights, &ratings, 1.0, &zeros, &zeros);
         let mut total_gap = 0.0;
         for (a, b) in &pairs {
             total_gap += (ratings[*a as usize] - ratings[*b as usize]).abs();
@@ -694,8 +744,9 @@ mod tests {
         let item_ids: Vec<i64> = (0..3).collect();
         let selection_weights = vec![1.0, 0.0, 0.0];
         let ratings = vec![0.0, 1.0, 2.0];
+        let zeros = vec![0usize; 3];
 
-        let pairs = generate_top_heavy_pairings(&item_ids, 5, &selection_weights, &ratings, 1.0);
+        let pairs = generate_top_heavy_pairings(&item_ids, 5, &selection_weights, &ratings, 1.0, &zeros, &zeros);
         assert_eq!(pairs.len(), 5);
         for (a, b) in &pairs {
             assert_ne!(a, b);
