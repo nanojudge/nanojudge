@@ -476,15 +476,27 @@ pub(crate) fn generate_top_heavy_pairings_indexed(
     pairs
 }
 
+/// Sample an index proportionally to `weights` (non-negative, summing to
+/// `total_weight > 0`). Scale-invariant: `r` and the weights shrink together,
+/// so it behaves identically whether the weights sum to 1e-40 or 1e+40 — no
+/// absolute epsilon, which would misfire once the total dropped below it.
+/// Zero-weight entries are skipped outright, so they can never be selected;
+/// if floating-point residue leaves `r` a hair above zero after the loop,
+/// fall back to the last positive-weight index.
 fn weighted_random_select(weights: &[f64], total_weight: f64, rng: &mut impl Rng) -> usize {
     let mut r = rng.random::<f64>() * total_weight;
+    let mut last_positive = 0;
     for (j, &w) in weights.iter().enumerate() {
+        if w <= 0.0 {
+            continue;
+        }
+        last_positive = j;
         r -= w;
-        if r < 1e-10 {
+        if r <= 0.0 {
             return j;
         }
     }
-    weights.len() - 1
+    last_positive
 }
 
 #[cfg(test)]
@@ -675,6 +687,25 @@ mod tests {
         let limit = 0.3;
         assert!((p_large - limit).abs() < (p_mid - limit).abs());
         assert!((p_mid - limit).abs() < (p_tiny - limit).abs());
+    }
+
+    #[test]
+    fn test_weighted_random_select_tiny_weights_follow_ratios() {
+        // Underflow-scale weights — as produced when every selection area is
+        // normal_cdf of a hugely negative z — must still be sampled by their
+        // ratios. Regression test for an absolute epsilon (r < 1e-10) that made
+        // any total below it always return index 0, even a zero-weight item.
+        let weights = [0.0, 1e-45, 3e-45];
+        let total: f64 = weights.iter().sum();
+        let mut rng = make_rng(Some(3), crate::seed::SUBSYSTEM_PAIRING);
+
+        let mut counts = [0usize; 3];
+        for _ in 0..2000 {
+            counts[weighted_random_select(&weights, total, &mut rng)] += 1;
+        }
+        assert_eq!(counts[0], 0, "zero-weight item must never be selected: {counts:?}");
+        assert!(counts[1] > 0 && counts[2] > 0, "both positive-weight items should appear: {counts:?}");
+        assert!(counts[2] > counts[1], "3:1 weight ratio should show in the counts: {counts:?}");
     }
 
     #[test]
