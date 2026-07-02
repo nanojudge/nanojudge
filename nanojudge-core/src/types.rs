@@ -80,7 +80,20 @@ pub struct RankedItem {
     pub upper_bound: f64,
 }
 
-/// Options for `run_scoring()` — the unified MCMC scoring wrapper.
+/// Which inference engine `run_scoring()` uses to turn comparisons into a
+/// posterior summary `(mean, std)` per item.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub enum InferenceMode {
+    /// Gaussian-BT MCMC sampler. Samples the full posterior.
+    Mcmc,
+    /// Linear-time Laplace approximation (default): finds the posterior mode by
+    /// Newton-CG (no dense matrix) with a diagonal-Fisher std. Deterministic, no
+    /// sampling, O(#comparisons); scales to large item counts.
+    LaplaceLinear,
+}
+
+/// Options for `run_scoring()` — the unified scoring wrapper.
 #[derive(Debug, Clone)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct ScoringOptions {
@@ -112,6 +125,17 @@ pub struct ScoringOptions {
     /// standard proportional-fair; > 1 over-corrects toward equal coverage. Must
     /// be finite and >= 0. Ignored when `selection_sharpness` is `None`.
     pub selection_coverage: f64,
+    /// Info-driven blend for the selection "target" (the reference strength each
+    /// item's area is measured against). Early on the observed top strength is a
+    /// poor estimate — the leader has played few games — so the target is blended
+    /// with a prior-predicted top, `E[max]` of `num_items` draws from the strength
+    /// prior. The prior counts as `target_prior_games` pseudo-games against the
+    /// leader's actual game count `g`:
+    ///   `target = (g·observed_top + K·predicted_top) / (g + K)`.
+    /// So the prediction dominates while the leader has few games and fades as it
+    /// plays more. `target_prior_games = 0` disables the blend (pure observed
+    /// top). Must be finite and >= 0. Ignored when `selection_sharpness` is `None`.
+    pub target_prior_games: f64,
     /// Previous warm start state. `None` = cold start.
     pub warm_start: Option<WarmStartState>,
     /// Ghost player regularization strength (e.g. 0.01).
@@ -128,6 +152,8 @@ pub struct ScoringOptions {
     pub bias_prior_logit: f64,
     /// RNG seed for reproducible MCMC sampling. `None` = OS entropy.
     pub seed: Option<u64>,
+    /// Which inference engine to use (MCMC sampling or Laplace approximation).
+    pub inference: InferenceMode,
 }
 
 /// Result from `run_scoring()`.

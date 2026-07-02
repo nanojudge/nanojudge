@@ -4,6 +4,7 @@
 /// Internal functions use `usize` indices for efficient array indexing.
 use rand::Rng;
 use rand::rngs::StdRng;
+use rand::seq::SliceRandom;
 
 use crate::constants::OPPONENT_WINDOW_SIZE;
 use crate::seed::make_rng;
@@ -43,8 +44,8 @@ fn position_probability(
 /// Determine the effective comparison distribution to use for this round.
 ///
 /// Two stages:
-///   Stage 1 (Warm-up): Uniform until every item has >= min_uniform_games.
-///   Stage 2 (Main phase): Top-heavy.
+///   Stage 1 (Uniform): uniform pairing until every item has >= min_uniform_games.
+///   Stage 2 (Top-heavy): top-heavy pairing thereafter.
 ///
 /// # Panics
 ///
@@ -59,14 +60,14 @@ pub fn get_effective_comparison_distribution(
         return ComparisonDistribution::Uniform;
     }
 
-    // Stage 1: Warm-up
+    // Stage 1: uniform until every item has >= min_uniform_games.
     for &games in games_played.iter().take(num_items) {
         if games < min_uniform_games {
             return ComparisonDistribution::Uniform;
         }
     }
 
-    // Stage 2: Main phase
+    // Stage 2: top-heavy.
     ComparisonDistribution::TopHeavy
 }
 
@@ -184,29 +185,111 @@ fn generate_uniform_iteration(
     first_counts: &mut [usize],
     total_games: &mut [usize],
 ) {
-    // Sort items by rating ascending so we can pick opponents from a narrow
-    // rating-window around each item1. sorted_pool is immutable for the rest
-    // of the function; "removal" is done via tombstones so the remaining
-    // entries keep their sorted positions (and the window math stays valid).
+    // Uniform pairing gives every item one game per round, so the maximum
+    // games-played count equals the number of rounds already completed. That
+    // determines how much rating information exists, and therefore which
+    // matchmaking strategy makes sense this round:
+    //
+    //   0 rounds done (round 1): no information at all — pair uniformly at random.
+    //   1 round done  (round 2): coarse ratings — pair nearest-strength neighbours
+    //                            (in binary mode: winners with winners, losers
+    //                            with losers; in logprobs mode more finely graded).
+    //   2+ rounds done (round 3+): richer ratings — info-gain matchmaking, drawing
+    //                            each opponent from a rating window weighted toward
+    //                            closely-matched (more informative) pairs.
+    let rounds_completed = total_games.iter().copied().max().unwrap_or(0);
+    let unoriented: Vec<(usize, usize)> = if rounds_completed == 0 {
+        random_pairs(num_items, max_pairs, rng)
+    } else if rounds_completed == 1 {
+        nearest_neighbour_pairs(num_items, current_ratings, max_pairs, rng)
+    } else {
+        info_gain_pairs(num_items, current_ratings, sharpness, max_pairs, rng)
+    };
+
+    // Assign each pair an orientation (which item goes in position 1), balancing
+    // first-position counts, then record it.
+    for (item1, item2) in unoriented {
+        let p = position_probability(
+            first_counts[item1], total_games[item1],
+            first_counts[item2], total_games[item2],
+        );
+        if rng.random::<f64>() < p {
+            pairings.push((item1, item2));
+            first_counts[item1] += 1;
+        } else {
+            pairings.push((item2, item1));
+            first_counts[item2] += 1;
+        }
+        total_games[item1] += 1;
+        total_games[item2] += 1;
+    }
+}
+
+/// Round 1: no rating information exists, so pair items uniformly at random.
+fn random_pairs(num_items: usize, max_pairs: usize, rng: &mut impl Rng) -> Vec<(usize, usize)> {
+    let mut order: Vec<usize> = (0..num_items).collect();
+    order.shuffle(rng);
+    order
+        .chunks_exact(2)
+        .take(max_pairs)
+        .map(|c| (c[0], c[1]))
+        .collect()
+}
+
+/// Round 2: sort by rating and pair adjacent neighbours — the closest-strength
+/// opponent is simply the next item in sorted order. Shuffle before the stable
+/// sort so that equal-rated items are ordered randomly rather than by index.
+fn nearest_neighbour_pairs(
+    num_items: usize,
+    current_ratings: &[f64],
+    max_pairs: usize,
+    rng: &mut impl Rng,
+) -> Vec<(usize, usize)> {
+    let mut pool: Vec<(usize, f64)> = (0..num_items).map(|i| (i, current_ratings[i])).collect();
+    pool.shuffle(rng);
+    pool.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
+    pool.chunks_exact(2)
+        .take(max_pairs)
+        .map(|c| (c[0].0, c[1].0))
+        .collect()
+}
+
+/// Round 3+: info-gain matchmaking. Sort by rating, then repeatedly pick a
+/// random still-unpaired item1 and draw its opponent from a rating window
+/// around it, weighted by information gain so closely-matched (more
+/// informative) pairs are favoured. Both items are removed once paired.
+fn info_gain_pairs(
+    num_items: usize,
+    current_ratings: &[f64],
+    sharpness: f64,
+    max_pairs: usize,
+    rng: &mut impl Rng,
+) -> Vec<(usize, usize)> {
+    // Sort items by rating ascending so opponents can be picked from a narrow
+    // rating window around each item1. sorted_pool is immutable for the rest of
+    // the function; "removal" is done via tombstones so the remaining entries
+    // keep their sorted positions (and the window math stays valid).
     let mut sorted_pool: Vec<(usize, f64)> = (0..num_items)
         .map(|i| (i, current_ratings[i]))
         .collect();
     sorted_pool.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
 
     let n = sorted_pool.len();
-    // alive[p] = false means sorted_pool[p] has already been paired this iteration.
+    // alive[p] == false means sorted_pool[p] has already been paired this round.
     let mut alive = vec![true; n];
     // live_positions holds the sorted-pool indices still available. Picking
-    // item1 is a swap_remove on this list (O(1) random removal). live_idx_of
-    // is the inverse map: live_idx_of[p] = index of p inside live_positions,
-    // or None if tombstoned. It lets us also O(1)-remove item2 once we know
-    // its sorted-pool position.
+    // item1 is a swap_remove on this list (O(1) random removal). live_idx_of is
+    // the inverse map: live_idx_of[p] = index of p inside live_positions, or
+    // None if tombstoned. It lets us also O(1)-remove item2 once we know its
+    // sorted-pool position.
     let mut live_positions: Vec<usize> = (0..n).collect();
     let mut live_idx_of: Vec<Option<usize>> = (0..n).map(Some).collect();
 
     let half_w = OPPONENT_WINDOW_SIZE / 2;
     let mut weights: Vec<f64> = Vec::with_capacity(OPPONENT_WINDOW_SIZE + 1);
     let mut candidates: Vec<usize> = Vec::with_capacity(OPPONENT_WINDOW_SIZE + 1);
+
+    let mut pairs: Vec<(usize, usize)> = Vec::with_capacity(max_pairs);
 
     for _ in 0..max_pairs {
         if live_positions.len() < 2 {
@@ -231,7 +314,7 @@ fn generate_uniform_iteration(
             }
         }
         if candidates.is_empty() {
-            // Window exhausted — skip this item1 for the rest of this iteration.
+            // Window exhausted — skip this item1 for the rest of this round.
             continue;
         }
 
@@ -248,20 +331,10 @@ fn generate_uniform_iteration(
         alive[pos2] = false;
         let (item2, _) = sorted_pool[pos2];
 
-        let p = position_probability(
-            first_counts[item1], total_games[item1],
-            first_counts[item2], total_games[item2],
-        );
-        if rng.random::<f64>() < p {
-            pairings.push((item1, item2));
-            first_counts[item1] += 1;
-        } else {
-            pairings.push((item2, item1));
-            first_counts[item2] += 1;
-        }
-        total_games[item1] += 1;
-        total_games[item2] += 1;
+        pairs.push((item1, item2));
     }
+
+    pairs
 }
 
 /// Remove the entry at `live_idx` from `live_positions` in O(1) using
@@ -426,7 +499,7 @@ mod tests {
     }
 
     #[test]
-    fn test_effective_comparison_distribution_warmup_stage() {
+    fn test_effective_comparison_distribution_uniform_stage() {
         let games = vec![1, 10]; // Item 0 below minimum
         let result = get_effective_comparison_distribution(ComparisonDistribution::TopHeavy, 2, &games, 3);
         assert_eq!(result, ComparisonDistribution::Uniform);
@@ -452,6 +525,49 @@ mod tests {
             assert!(*a >= 100 && *a <= 109, "ID {} not in range", a);
             assert!(*b >= 100 && *b <= 109, "ID {} not in range", b);
         }
+    }
+
+    #[test]
+    fn test_round_two_pairs_tied_items_randomly() {
+        // Round 2 (every item has exactly 1 game) sorts by rating and pairs
+        // adjacent neighbours. When ratings are all equal — the binary case
+        // where every winner ties and every loser ties — the pairing among the
+        // tied items must be random, not a fixed index-order fallback.
+        let num_items = 8;
+        let ratings = vec![1.0; num_items]; // all tied
+        let first_counts = vec![0usize; num_items];
+        let games = vec![1usize; num_items]; // 1 game each => round-2 phase
+
+        // Unordered partnerships (sorted pair) for a given seed, so we test who
+        // is matched with whom, independent of the separate orientation flip.
+        let partnerships = |s: u64| -> Vec<(usize, usize)> {
+            let mut rng = make_rng(Some(s), crate::seed::SUBSYSTEM_PAIRING);
+            let pairs = generate_uniform_pairings_indexed(
+                num_items, num_items / 2, &ratings, 1.0, &first_counts, &games, &mut rng,
+            );
+            let mut ps: Vec<(usize, usize)> = pairs
+                .into_iter()
+                .map(|(a, b)| if a < b { (a, b) } else { (b, a) })
+                .collect();
+            ps.sort();
+            ps
+        };
+
+        // The index-order fallback a plain (non-shuffled) sort would produce.
+        let index_order: Vec<(usize, usize)> = (0..num_items / 2).map(|i| (2 * i, 2 * i + 1)).collect();
+
+        let seeds: Vec<u64> = (0..25).collect();
+        let results: Vec<Vec<(usize, usize)>> = seeds.iter().map(|&s| partnerships(s)).collect();
+
+        // (1) Varies across seeds => not deterministic.
+        let distinct: std::collections::HashSet<_> = results.iter().cloned().collect();
+        assert!(distinct.len() > 1, "tied-item pairing did not vary across seeds — it is deterministic");
+
+        // (2) Not the fixed index-order pairing (guards the plain-sort regression).
+        assert!(
+            results.iter().any(|r| *r != index_order),
+            "tied-item pairing always matched the index-order fallback"
+        );
     }
 
     #[test]

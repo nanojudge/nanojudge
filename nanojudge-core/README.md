@@ -127,10 +127,10 @@ for round in 0..20 {
 
 **Uniform**: Every item gets equal comparison time. Good when you care about the full ranking.
 
-**Top-heavy**: Focuses comparisons on items most likely to be in the top K. Bottom items get the warm-up minimum while top contenders get 10-50x more. Good for large lists where you mainly care about finding the best items.
+**Top-heavy**: Focuses comparisons on items most likely to be in the top K. Bottom items get the uniform-stage minimum while top contenders get 10-50x more. Good for large lists where you mainly care about finding the best items.
 
 The engine handles three stages automatically:
-1. **Warm-up** (first few rounds): uniform pairing until every item has minimum games
+1. **Uniform stage** (first few rounds): uniform pairing until every item has minimum games
 2. **Main phase**: your chosen distribution
 3. **Smoothing** (last round): reverts to uniform so every item gets fresh data
 

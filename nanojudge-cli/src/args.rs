@@ -95,6 +95,14 @@ pub struct ConfigArgs {
     #[arg(long)]
     pub coverage: Option<f64>,
 
+    /// Top-heavy selection target blend: the prior-predicted top strength counts
+    /// as this many pseudo-games against the observed top's game count, so the
+    /// prediction dominates early and fades as the leader plays more. Higher =
+    /// trust the prediction longer. 0 disables the blend (pure observed top).
+    /// Must be finite and >= 0. Default: 5. Only used with top-heavy.
+    #[arg(long)]
+    pub target_prior_games: Option<f64>,
+
     /// Max retries per comparison on HTTP errors. Default: 3. Set to 0 to disable.
     #[arg(long)]
     pub retries: Option<usize>,
@@ -122,6 +130,12 @@ pub struct ConfigArgs {
     #[arg(long)]
     pub regularization_strength: Option<f64>,
 
+    /// Inference engine: "laplace-linear" (deterministic MAP via Newton-CG +
+    /// diagonal-Fisher std, O(#comparisons), default) or "mcmc" (Gaussian-BT
+    /// sampler).
+    #[arg(long)]
+    pub inference: Option<String>,
+
     /// Number of post-burn-in MCMC iterations for final scoring. Default: 5000.
     #[arg(long)]
     pub mcmc_iterations: Option<usize>,
@@ -142,6 +156,14 @@ pub struct ConfigArgs {
     /// Minimum games per item before the top-heavy distribution kicks in. Default: 2.
     #[arg(long)]
     pub min_uniform_games: Option<usize>,
+
+    /// Number of scoring refits per round once top-heavy pairing is active.
+    /// 1 (default) refits once per round, as before. Higher values split each
+    /// round's pairs into that many chunks, refitting strengths/CIs and
+    /// re-deriving selection weights after each chunk — more adaptive pairing.
+    /// The uniform stage is never subdivided. Must be >= 1.
+    #[arg(long)]
+    pub refits_per_round: Option<usize>,
 
     /// Prior variance on log-strengths. Default: 10.0.
     #[arg(long)]

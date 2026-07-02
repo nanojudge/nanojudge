@@ -41,6 +41,7 @@
 //!     selection_sharpness: None,
 //!     selection_cutoff: 0.0005,
 //!     selection_coverage: 1.0,
+//!     target_prior_games: 10.0,
 //!     warm_start: None,
 //!     regularization_strength: 0.01,
 //!     prior_tau2: 10.0,
@@ -49,6 +50,7 @@
 //!     bias_proposal_std: 0.15,
 //!     bias_prior_logit: 0.0,
 //!     seed: None,
+//!     inference: nanojudge_core::InferenceMode::Mcmc,
 //! }, &judge_info);
 //!
 //! for r in &result.rankings {
@@ -60,6 +62,7 @@ pub mod bradley_terry;
 pub mod constants;
 pub mod engine;
 pub mod gaussian_bt;
+pub mod laplace_bt;
 pub mod pairing;
 pub mod scoring;
 pub mod seed;
@@ -76,6 +79,6 @@ pub use pairing::{
 };
 pub use scoring::run_scoring;
 pub use types::{
-    stable_hash, ComparisonInput, JudgeAnalytics, JudgeInfo, Pair, RankedItem, ScoringOptions,
-    ScoringResult, WarmStartState,
+    stable_hash, ComparisonInput, InferenceMode, JudgeAnalytics, JudgeInfo, Pair, RankedItem,
+    ScoringOptions, ScoringResult, WarmStartState,
 };

@@ -44,6 +44,22 @@ fn resolve_save_path(path: &Path, prefix: &str) -> PathBuf {
     }
 }
 
+/// Split a round's `total` pairs into `parts` chunk sizes that sum to `total`,
+/// as evenly as possible (the first `total % parts` chunks get one extra).
+/// Zero-sized chunks (when `parts` exceeds `total`) are dropped, so the result
+/// always has between 1 and `min(parts, total)` entries.
+fn split_round_into_chunks(total: usize, parts: usize) -> Vec<usize> {
+    if parts <= 1 || total == 0 {
+        return vec![total];
+    }
+    let base = total / parts;
+    let remainder = total % parts;
+    (0..parts)
+        .map(|i| base + usize::from(i < remainder))
+        .filter(|&size| size > 0)
+        .collect()
+}
+
 /// Parse a criterion file into a list of criteria, splitting on ---CRITERION---.
 fn parse_criteria(content: &str) -> Vec<String> {
     content
@@ -327,16 +343,38 @@ pub async fn run(args: RankArgs) {
     // When --emit-round-rankings is set, record (cumulative comparisons, ranked
     // names) after each round so the benchmark can plot per-round convergence.
     let mut round_rankings: Vec<(usize, Vec<String>)> = Vec::new();
+    let pairs_per_round = calculate_pairs_for_round(texts.len());
     for round in 0..rounds {
         if cancelled.load(Ordering::Relaxed) {
             break;
         }
-        let pairs = engine.generate_pairs_for_round(round);
-        let round_start = std::time::Instant::now();
+
+        // Decide how many refit chunks this round splits into. Only top-heavy
+        // batches may be subdivided: the uniform stage pairs every item exactly
+        // once per full round, so we keep it whole (--refits-per-round leaves
+        // the uniform stage alone). Each chunk runs its own scoring refit and
+        // re-derives selection weights, so pairing adapts mid-round.
+        let chunk_sizes: Vec<usize> = if resolved.refits_per_round > 1
+            && matches!(engine.effective_distribution(), ComparisonDistribution::TopHeavy)
+        {
+            split_round_into_chunks(pairs_per_round, resolved.refits_per_round)
+        } else {
+            vec![pairs_per_round]
+        };
 
         if resolved.verbose {
-            eprintln!("Round {}/{}: {} pairs", round + 1, rounds, pairs.len());
+            eprintln!(
+                "Round {}/{}: {} pairs in {} refit chunk(s)",
+                round + 1, rounds, pairs_per_round, chunk_sizes.len(),
+            );
         }
+
+        for chunk_size in chunk_sizes {
+        if cancelled.load(Ordering::Relaxed) {
+            break;
+        }
+        let pairs = engine.generate_pairs(chunk_size);
+        let round_start = std::time::Instant::now();
 
         cumulative_total_pairs += pairs.len();
         let pair_assignments = assign_pairs_to_judges(
@@ -590,6 +628,7 @@ pub async fn run(args: RankArgs) {
                     selection_sharpness,
                     selection_cutoff: resolved.selection_cutoff,
                     selection_coverage: resolved.selection_coverage,
+                    target_prior_games: resolved.target_prior_games,
                     warm_start: interim_warm_start.take(),
                     regularization_strength: resolved.regularization_strength,
                     prior_tau2: resolved.prior_tau2,
@@ -598,6 +637,7 @@ pub async fn run(args: RankArgs) {
                     bias_proposal_std: resolved.bias_proposal_std,
                     bias_prior_logit: resolved.bias_prior_logit,
                     seed: resolved.seed,
+                    inference: resolved.inference,
                 },
                 &judge_info,
             );
@@ -622,6 +662,7 @@ pub async fn run(args: RankArgs) {
                 );
             }
             interim_warm_start = Some(interim.warm_start_state);
+        }
         }
     }
 
@@ -648,6 +689,7 @@ pub async fn run(args: RankArgs) {
             selection_sharpness: None,
             selection_cutoff: resolved.selection_cutoff,
             selection_coverage: resolved.selection_coverage,
+            target_prior_games: resolved.target_prior_games,
             warm_start: None,
             regularization_strength: resolved.regularization_strength,
             prior_tau2: resolved.prior_tau2,
@@ -656,6 +698,7 @@ pub async fn run(args: RankArgs) {
             bias_proposal_std: resolved.bias_proposal_std,
             bias_prior_logit: resolved.bias_prior_logit,
             seed: resolved.seed,
+            inference: resolved.inference,
         },
         &judge_info,
     );
@@ -742,6 +785,29 @@ pub async fn run(args: RankArgs) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_split_round_into_chunks_even() {
+        assert_eq!(split_round_into_chunks(200, 4), vec![50, 50, 50, 50]);
+    }
+
+    #[test]
+    fn test_split_round_into_chunks_uneven_sums_to_total() {
+        let chunks = split_round_into_chunks(201, 4);
+        assert_eq!(chunks, vec![51, 50, 50, 50]);
+        assert_eq!(chunks.iter().sum::<usize>(), 201);
+    }
+
+    #[test]
+    fn test_split_round_into_chunks_single_part() {
+        assert_eq!(split_round_into_chunks(200, 1), vec![200]);
+    }
+
+    #[test]
+    fn test_split_round_into_chunks_more_parts_than_pairs() {
+        // 3 pairs, 8 requested chunks → three 1-pair chunks, zeros dropped.
+        assert_eq!(split_round_into_chunks(3, 8), vec![1, 1, 1]);
+    }
 
     #[test]
     fn test_parse_criteria_single() {

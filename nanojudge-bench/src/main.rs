@@ -29,9 +29,18 @@ struct Args {
     #[arg(short, long)]
     trials: usize,
 
-    /// Standard deviation of the true strength distribution (normal, mean 0).
+    /// Variance of the true strength distribution (normal, mean 0). Named to
+    /// parallel the model's `--prior-tau2`: the run is calibrated when
+    /// `actual_tau2 == prior_tau2`.
     #[arg(long)]
-    strength_std: f64,
+    actual_tau2: f64,
+
+    /// The model's prior variance on strengths, forwarded to the CLI as
+    /// `--prior-tau2`. This is what the model *believes* the spread is (drives
+    /// both the fit and the target prediction). Omit to use the CLI's default
+    /// (10). Set equal to `--actual-tau2` for a calibrated run.
+    #[arg(long)]
+    prior_tau2: Option<f64>,
 
     /// How many top positions to include in the displacement metric.
     #[arg(long)]
@@ -60,15 +69,32 @@ struct Args {
     #[arg(long)]
     coverage: Option<f64>,
 
+    /// Target-blend prior pseudo-games forwarded to the CLI. Omit to use the
+    /// CLI's default (5; 0 disables the blend).
+    #[arg(long)]
+    target_prior_games: Option<f64>,
+
     /// MCMC iterations forwarded to the CLI (governs both the per-round interim
     /// scoring and the final scoring). Omit to use the CLI's default (5000).
     #[arg(long)]
     mcmc_iterations: Option<usize>,
 
-    /// Minimum uniform warm-up games per item forwarded to the CLI, before
+    /// Minimum uniform-stage games per item forwarded to the CLI, before
     /// top-heavy concentration engages. Omit to use the CLI's default (2).
     #[arg(long)]
     min_uniform_games: Option<usize>,
+
+    /// Scoring refits per round forwarded to the CLI. 1 (default) refits once
+    /// per round; higher values subdivide each top-heavy round into that many
+    /// chunks, refitting and re-deriving selection weights after each — more
+    /// adaptive pairing. The uniform stage is never subdivided.
+    #[arg(long)]
+    refits_per_round: Option<usize>,
+
+    /// Inference engine forwarded to the CLI: "mcmc" or "laplace-linear". Omit to
+    /// use the CLI's default (laplace-linear).
+    #[arg(long)]
+    inference: Option<String>,
 
     /// Use logprobs mode instead of text-verdict mode.
     #[arg(long)]
@@ -156,14 +182,18 @@ fn find_nanojudge_binary(override_path: Option<PathBuf>) -> PathBuf {
 struct SharedTrialConfig {
     num_items: usize,
     rounds: usize,
-    strength_std: f64,
+    actual_tau2: f64,
+    prior_tau2: Option<f64>,
     use_logprobs: bool,
     distribution: String,
     selection_sharpness: Option<f64>,
     cutoff: Option<f64>,
     coverage: Option<f64>,
+    target_prior_games: Option<f64>,
     mcmc_iterations: Option<usize>,
     min_uniform_games: Option<usize>,
+    refits_per_round: Option<usize>,
+    inference: Option<String>,
     nanojudge_bin: PathBuf,
 }
 
@@ -183,8 +213,8 @@ async fn main() {
         eprintln!("Error: need at least 1 trial");
         std::process::exit(1);
     }
-    if !args.strength_std.is_finite() || args.strength_std <= 0.0 {
-        eprintln!("Error: --strength-std must be a positive finite number");
+    if !args.actual_tau2.is_finite() || args.actual_tau2 <= 0.0 {
+        eprintln!("Error: --actual-tau2 must be a positive finite number");
         std::process::exit(1);
     }
     if args.comparison_distribution != "uniform" && args.comparison_distribution != "top-heavy" {
@@ -216,7 +246,14 @@ async fn main() {
     eprintln!("  Rounds: {}", args.rounds);
     eprintln!("  Trials: {}", args.trials);
     eprintln!("  Comparisons per trial: {}", comparisons_per_trial);
-    eprintln!("  Strength std: {:.1}", args.strength_std);
+    eprintln!("  Actual tau2: {:.3}", args.actual_tau2);
+    eprintln!(
+        "  Prior tau2: {}",
+        match args.prior_tau2 {
+            Some(v) => format!("{v:.3}"),
+            None => "CLI default (10)".to_string(),
+        }
+    );
     eprintln!("  Logprobs: {}", args.logprobs);
     eprintln!("  Report top-K: {}", top_k);
     eprintln!("  Distribution: {}", args.comparison_distribution);
@@ -234,6 +271,17 @@ async fn main() {
             None => "CLI default (2)".to_string(),
         }
     );
+    eprintln!(
+        "  Refits per round: {}",
+        match args.refits_per_round {
+            Some(n) => n.to_string(),
+            None => "CLI default (1)".to_string(),
+        }
+    );
+    eprintln!(
+        "  Inference: {}",
+        args.inference.as_deref().unwrap_or("CLI default (laplace-linear)")
+    );
     eprintln!("  Seed: {}", master_seed);
     eprintln!("  Concurrency: {}", concurrency);
     eprintln!();
@@ -242,14 +290,18 @@ async fn main() {
     let shared = Arc::new(SharedTrialConfig {
         num_items: args.items,
         rounds: args.rounds,
-        strength_std: args.strength_std,
+        actual_tau2: args.actual_tau2,
+        prior_tau2: args.prior_tau2,
         use_logprobs: args.logprobs,
         distribution: args.comparison_distribution.clone(),
         selection_sharpness: args.selection_sharpness,
         cutoff: args.cutoff,
         coverage: args.coverage,
+        target_prior_games: args.target_prior_games,
         mcmc_iterations: args.mcmc_iterations,
         min_uniform_games: args.min_uniform_games,
+        refits_per_round: args.refits_per_round,
+        inference: args.inference.clone(),
         nanojudge_bin: nanojudge_bin.clone(),
     });
 
@@ -274,14 +326,18 @@ async fn main() {
             let config = trial::TrialConfig {
                 num_items: shared.num_items,
                 rounds: shared.rounds,
-                strength_std: shared.strength_std,
+                actual_tau2: shared.actual_tau2,
+                prior_tau2: shared.prior_tau2,
                 use_logprobs: shared.use_logprobs,
                 distribution: &shared.distribution,
                 selection_sharpness: shared.selection_sharpness,
                 cutoff: shared.cutoff,
                 coverage: shared.coverage,
+                target_prior_games: shared.target_prior_games,
                 mcmc_iterations: shared.mcmc_iterations,
                 min_uniform_games: shared.min_uniform_games,
+                refits_per_round: shared.refits_per_round,
+                inference: shared.inference.as_deref(),
                 nanojudge_bin: &shared.nanojudge_bin,
             };
             let res = trial::run(&config, trial_seed, top_k, capture_example).await;
@@ -370,7 +426,7 @@ fn print_round_convergence(results: &[trial::TrialResult], top_k: usize) {
     println!("Per-round convergence (mean across {} trials)", results.len());
     println!();
     println!(
-        "  {:>5} {:>12} {:>8} {:>8} {:>8}",
+        "  {:>5} {:>12} {:>10} {:>10} {:>10}",
         "Round",
         "Comparisons",
         "rho",
@@ -378,7 +434,7 @@ fn print_round_convergence(results: &[trial::TrialResult], top_k: usize) {
         format!("Top-{top_k}"),
     );
     println!(
-        "  {:>5} {:>12} {:>8} {:>8} {:>8}",
+        "  {:>5} {:>12} {:>10} {:>10} {:>10}",
         "-----", "-----------", "---", "-----", "-----"
     );
     for r in 0..num_rounds {
@@ -387,7 +443,7 @@ fn print_round_convergence(results: &[trial::TrialResult], top_k: usize) {
         let top1: Vec<f64> = results.iter().map(|res| res.per_round[r].top_1_displacement).collect();
         let topk: Vec<f64> = results.iter().map(|res| res.per_round[r].top_k_displacement).collect();
         println!(
-            "  {:>5} {:>12} {:>8.4} {:>8.2} {:>8.2}",
+            "  {:>5} {:>12} {:>10.6} {:>10.4} {:>10.4}",
             r + 1,
             mean(&comps) as usize,
             mean(&rhos),
@@ -407,15 +463,15 @@ fn print_summary(results: &[trial::TrialResult], top_k: usize, errors: usize) {
     println!("Results ({} trials, {} errors)", results.len(), errors);
     println!();
     println!(
-        "  {:<20} {:>8} {:>8} {:>8} {:>8}",
+        "  {:<20} {:>10} {:>10} {:>10} {:>10}",
         "Metric", "Mean", "Std", "Min", "Max"
     );
     println!(
-        "  {:<20} {:>8} {:>8} {:>8} {:>8}",
+        "  {:<20} {:>10} {:>10} {:>10} {:>10}",
         "------", "----", "---", "---", "---"
     );
     println!(
-        "  {:<20} {:>8.4} {:>8.4} {:>8.4} {:>8.4}",
+        "  {:<20} {:>10.6} {:>10.6} {:>10.6} {:>10.6}",
         "Spearman rho",
         mean(&rhos),
         std_dev(&rhos),
@@ -423,7 +479,7 @@ fn print_summary(results: &[trial::TrialResult], top_k: usize, errors: usize) {
         fmax(&rhos),
     );
     println!(
-        "  {:<20} {:>8.2} {:>8.2} {:>8.2} {:>8.2}",
+        "  {:<20} {:>10.4} {:>10.4} {:>10.4} {:>10.4}",
         "Top-1 displacement",
         mean(&top1_disp),
         std_dev(&top1_disp),
@@ -431,7 +487,7 @@ fn print_summary(results: &[trial::TrialResult], top_k: usize, errors: usize) {
         fmax(&top1_disp),
     );
     println!(
-        "  {:<20} {:>8.2} {:>8.2} {:>8.2} {:>8.2}",
+        "  {:<20} {:>10.4} {:>10.4} {:>10.4} {:>10.4}",
         format!("Top-{top_k} displacement"),
         mean(&topk_disp),
         std_dev(&topk_disp),
@@ -439,7 +495,7 @@ fn print_summary(results: &[trial::TrialResult], top_k: usize, errors: usize) {
         fmax(&topk_disp),
     );
     println!(
-        "  {:<20} {:>8.2}s {:>7.2}s {:>7.2}s {:>7.2}s",
+        "  {:<20} {:>9.3}s {:>9.3}s {:>9.3}s {:>9.3}s",
         "Time/trial",
         mean(&times),
         std_dev(&times),

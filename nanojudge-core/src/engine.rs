@@ -49,7 +49,7 @@ pub struct RankingEngine {
     /// Per-item selection weights for top-heavy pairing (indexed 0..num_items,
     /// same order as item_ids). Caller MUST set this before calling
     /// `generate_pairs_for_round()` when using the TopHeavy distribution past
-    /// warm-up. The engine will panic if missing.
+    /// the uniform stage. The engine will panic if missing.
     pub selection_weights: Option<Vec<f64>>,
 
     config: EngineConfig,
@@ -94,19 +94,37 @@ impl RankingEngine {
     /// Panics if the round's effective distribution is top-heavy and the MCMC
     /// data is missing or malformed. The effective distribution is top-heavy
     /// when the engine is configured with `ComparisonDistribution::TopHeavy`
-    /// and every item has reached `min_uniform_games` (warm-up rounds use
-    /// uniform pairing and need no MCMC data). In a top-heavy round
-    /// `selection_weights` must be set, with one entry per item.
+    /// and every item has reached `min_uniform_games` (the uniform stage needs
+    /// no MCMC data). In a top-heavy round `selection_weights` must be set, with
+    /// one entry per item.
     pub fn generate_pairs_for_round(&mut self, _round_index: usize) -> Vec<Pair> {
-        let num_items = self.id_map.len();
-        let pairs_count = calculate_pairs_for_round(num_items);
+        let pairs_count = calculate_pairs_for_round(self.id_map.len());
+        self.generate_pairs(pairs_count)
+    }
 
-        let effective_comparison_distribution = get_effective_comparison_distribution(
+    /// The comparison distribution the next generated batch will use, given the
+    /// games played so far. Top-heavy only once every item has reached
+    /// `min_uniform_games` (otherwise uniform pairing). Lets the caller decide
+    /// whether a round may be subdivided into finer refit chunks: only top-heavy
+    /// batches are safe to split, since the uniform stage pairs every item
+    /// exactly once per full round.
+    pub fn effective_distribution(&self) -> ComparisonDistribution {
+        get_effective_comparison_distribution(
             self.config.comparison_distribution,
-            num_items,
+            self.id_map.len(),
             &self.games_played,
             self.config.min_uniform_games,
-        );
+        )
+    }
+
+    /// Generate a batch of `pairs_count` pairs using the current effective
+    /// distribution. A full round is `calculate_pairs_for_round(num_items)`
+    /// pairs; passing a smaller count yields a sub-round batch (used to refit
+    /// more often than once per round in top-heavy mode).
+    pub fn generate_pairs(&mut self, pairs_count: usize) -> Vec<Pair> {
+        let num_items = self.id_map.len();
+
+        let effective_comparison_distribution = self.effective_distribution();
 
         let index_pairs = match effective_comparison_distribution {
             ComparisonDistribution::Uniform => generate_uniform_pairings_indexed(

@@ -404,7 +404,7 @@ impl GaussianBT {
 mod tests {
     use super::*;
     use crate::seed;
-    use crate::types::ScoringOptions;
+    use crate::types::{InferenceMode, ScoringOptions};
 
     fn single_judge_info() -> JudgeInfo {
         JudgeInfo {
@@ -427,6 +427,7 @@ mod tests {
             selection_sharpness: None,
             selection_cutoff: 0.05,
             selection_coverage: 0.0,
+            target_prior_games: 10.0,
             warm_start: None,
             regularization_strength: 0.01,
             prior_tau2: 10.0,
@@ -435,6 +436,7 @@ mod tests {
             bias_proposal_std: 0.15,
             bias_prior_logit: 0.0,
             seed: None,
+            inference: InferenceMode::Mcmc,
         }
     }
 

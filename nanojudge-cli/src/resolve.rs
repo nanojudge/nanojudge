@@ -1,7 +1,7 @@
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
-use nanojudge_core::{ComparisonDistribution, stable_hash};
+use nanojudge_core::{ComparisonDistribution, InferenceMode, stable_hash};
 
 use crate::args::{ConfigArgs, OutputFormat};
 use crate::bail;
@@ -47,17 +47,22 @@ pub struct ResolvedConfig {
     pub selection_cutoff: f64,
     /// Top-heavy proportional-fair coverage pull. Finite and >= 0; 0 disables it.
     pub selection_coverage: f64,
+    /// Top-heavy target-blend: prior-predicted top counts as this many pseudo-games.
+    /// Finite and >= 0; 0 disables the blend.
+    pub target_prior_games: f64,
     pub retries: usize,
     pub analysis_length: String,
     pub reasoning_enabled: bool,
     pub prompt_template: String,
     pub confidence_level: f64,
     pub regularization_strength: f64,
+    pub inference: InferenceMode,
     pub mcmc_iterations: usize,
     pub mcmc_burn_in: usize,
     pub bias_prior_logit: f64,
     pub matchmaking_sharpness: f64,
     pub min_uniform_games: usize,
+    pub refits_per_round: usize,
     pub prior_tau2: f64,
     pub proposal_std: f64,
     pub bias_prior_tau2: f64,
@@ -315,6 +320,11 @@ pub fn resolve_config(shared: &ConfigArgs, cfg: &config::NanojudgeConfig) -> Res
     if !selection_coverage.is_finite() || selection_coverage < 0.0 {
         bail(format!("coverage={selection_coverage}, must be finite and >= 0 (0 disables it)"));
     }
+    let target_prior_games = merge_opt(shared.target_prior_games, cfg.target_prior_games, "target-prior-games")
+        .unwrap_or(5.0);
+    if !target_prior_games.is_finite() || target_prior_games < 0.0 {
+        bail(format!("target-prior-games={target_prior_games}, must be finite and >= 0 (0 disables the blend)"));
+    }
     let retries = merge_opt(shared.retries, cfg.retries, "retries")
         .unwrap_or(DEFAULT_MAX_RETRIES);
     let analysis_length = merge_opt(shared.analysis_length.clone(), cfg.analysis_length.clone(), "analysis-length")
@@ -332,6 +342,13 @@ pub fn resolve_config(shared: &ConfigArgs, cfg: &config::NanojudgeConfig) -> Res
     if !regularization_strength.is_finite() || regularization_strength <= 0.0 {
         bail(format!("regularization-strength={regularization_strength}, must be finite and > 0"));
     }
+    let inference = match shared.inference.as_deref() {
+        None | Some("laplace-linear") => InferenceMode::LaplaceLinear,
+        Some("mcmc") => InferenceMode::Mcmc,
+        Some(other) => bail(format!(
+            "inference={other}, must be \"mcmc\" or \"laplace-linear\""
+        )),
+    };
     let mcmc_iterations = merge_opt(shared.mcmc_iterations, cfg.mcmc_iterations, "mcmc-iterations")
         .unwrap_or(5000);
     if mcmc_iterations == 0 {
@@ -346,6 +363,11 @@ pub fn resolve_config(shared: &ConfigArgs, cfg: &config::NanojudgeConfig) -> Res
     }
     let min_uniform_games = merge_opt(shared.min_uniform_games, cfg.min_uniform_games, "min-uniform-games")
         .unwrap_or(2);
+    let refits_per_round = merge_opt(shared.refits_per_round, cfg.refits_per_round, "refits-per-round")
+        .unwrap_or(1);
+    if refits_per_round == 0 {
+        bail("refits-per-round must be at least 1");
+    }
     let prior_tau2 = merge_opt(shared.prior_tau2, cfg.prior_tau2, "prior-tau2")
         .unwrap_or(10.0);
     if !prior_tau2.is_finite() || prior_tau2 <= 0.0 {
@@ -444,17 +466,20 @@ pub fn resolve_config(shared: &ConfigArgs, cfg: &config::NanojudgeConfig) -> Res
         selection_sharpness,
         selection_cutoff,
         selection_coverage,
+        target_prior_games,
         retries,
         analysis_length,
         reasoning_enabled,
         prompt_template,
         confidence_level,
         regularization_strength,
+        inference,
         mcmc_iterations,
         mcmc_burn_in,
         bias_prior_logit,
         matchmaking_sharpness,
         min_uniform_games,
+        refits_per_round,
         prior_tau2,
         proposal_std,
         bias_prior_tau2,
@@ -486,17 +511,20 @@ mod tests {
             selection_sharpness: None,
             cutoff: None,
             coverage: None,
+            target_prior_games: None,
             retries: None,
             analysis_length: None,
             reasoning: None,
             prompt_template: None,
             confidence_level: None,
             regularization_strength: None,
+            inference: None,
             mcmc_iterations: None,
             mcmc_burn_in: None,
             bias_prior: None,
             matchmaking_sharpness: None,
             min_uniform_games: None,
+            refits_per_round: None,
             prior_tau2: None,
             proposal_std: None,
             bias_prior_tau2: None,

@@ -5,10 +5,11 @@
 use std::collections::HashMap;
 
 use crate::gaussian_bt::GaussianBT;
+use crate::laplace_bt;
 use crate::seed;
 use crate::types::{
-    ComparisonInput, IdMap, JudgeAnalytics, JudgeInfo, ScoringOptions, ScoringResult,
-    WarmStartState,
+    ComparisonInput, IdMap, IndexedComparison, InferenceMode, JudgeAnalytics, JudgeInfo,
+    RankedItem, ScoringOptions, ScoringResult, WarmStartState,
 };
 
 /// Compute confidence interval from sorted samples.
@@ -69,6 +70,7 @@ fn normal_cdf(x: f64) -> f64 {
 ///
 /// Weights are returned unnormalized; the pairing layer normalizes by its
 /// running total.
+#[allow(clippy::too_many_arguments)]
 fn compute_selection_weights(
     means: &[f64],
     stds: &[f64],
@@ -76,19 +78,48 @@ fn compute_selection_weights(
     selection_sharpness: f64,
     selection_cutoff: f64,
     selection_coverage: f64,
+    prior_tau2: f64,
+    target_prior_games: f64,
 ) -> Vec<f64> {
     let n = means.len();
-    let top_mean = means.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+    if n == 0 {
+        return Vec::new();
+    }
 
-    // Raw area per item: P(item's strength exceeds the leader's mean).
+    // The selection target: the reference strength each item's area is measured
+    // against. The observed top (max posterior mean) is unreliable early — the
+    // leader has few games and, in binary mode, wins never pin its magnitude — so
+    // blend it with a prior-predicted top via a pseudo-count. The prediction is
+    // worth `target_prior_games` games against the leader's actual game count `g`:
+    //   `target = (g·observed_top + K·predicted_top) / (g + K)`.
+    // `target_prior_games = 0` falls straight back to the observed top.
+    let top_idx = (0..n)
+        .max_by(|&a, &b| means[a].partial_cmp(&means[b]).unwrap_or(std::cmp::Ordering::Equal))
+        .unwrap();
+    let observed_top = means[top_idx];
+    let target = if target_prior_games > 0.0 {
+        let predicted_top = predicted_top_strength(means, prior_tau2);
+        let g = games_played[top_idx] as f64;
+        (g * observed_top + target_prior_games * predicted_top) / (g + target_prior_games)
+    } else {
+        observed_top
+    };
+
+    // Raw area per item: P(item's strength exceeds the target).
     let areas: Vec<f64> = (0..n)
         .map(|i| {
             if stds[i] <= 1e-12 {
-                // Degenerate point mass: only an item sitting at the top mean
-                // reaches it (the leader). Everything below contributes nothing.
-                if means[i] >= top_mean { 0.5 } else { 0.0 }
+                // Degenerate point mass: strictly-above the target counts fully,
+                // exactly-at counts half, below counts nothing.
+                if means[i] > target {
+                    1.0
+                } else if means[i] >= target {
+                    0.5
+                } else {
+                    0.0
+                }
             } else {
-                normal_cdf((means[i] - top_mean) / stds[i])
+                normal_cdf((means[i] - target) / stds[i])
             }
         })
         .collect();
@@ -111,8 +142,8 @@ fn compute_selection_weights(
             };
             // Proportional-fair coverage: divide by games-played^selection_coverage. Guard
             // the denominator at 1 so an item not yet played doesn't blow up
-            // (warm-up guarantees >= min_uniform_games before these weights are
-            // actually used for pairing).
+            // (the uniform stage guarantees >= min_uniform_games before these
+            // weights are actually used for pairing).
             let served = (games_played[i] as f64).max(1.0);
             base / served.powf(selection_coverage)
         })
@@ -150,6 +181,12 @@ pub fn run_scoring(
     }
 
     let indexed = id_map.convert_comparisons(comparisons, &judge_id_to_idx);
+
+    // Laplace path: deterministic MAP + curvature, no sampling. Produces the
+    // same ScoringResult shape as the MCMC path below.
+    if options.inference == InferenceMode::LaplaceLinear {
+        return run_scoring_laplace(&id_map, num_items, &indexed, options, judge_info);
+    }
 
     let mut mcmc = GaussianBT::new(
         num_items,
@@ -236,6 +273,8 @@ pub fn run_scoring(
             selection_sharpness,
             options.selection_cutoff,
             options.selection_coverage,
+            options.prior_tau2,
+            options.target_prior_games,
         )
     });
 
@@ -244,6 +283,191 @@ pub fn run_scoring(
         selection_weights,
         warm_start_state,
         sample_size: options.iterations,
+        judge_analytics,
+        panel_positional_bias,
+        panel_positional_bias_ci,
+    }
+}
+
+/// Inverse standard-normal CDF for a confidence level, via bisection on
+/// `normal_cdf` (run once per scoring call). Returns `z` such that
+/// `normal_cdf(z) = 1 − (1 − confidence_level)/2`.
+fn z_for_confidence(confidence_level: f64) -> f64 {
+    let target = 1.0 - (1.0 - confidence_level) / 2.0;
+    let (mut lo, mut hi) = (0.0_f64, 10.0_f64);
+    for _ in 0..100 {
+        let mid = 0.5 * (lo + hi);
+        if normal_cdf(mid) < target {
+            lo = mid;
+        } else {
+            hi = mid;
+        }
+    }
+    0.5 * (lo + hi)
+}
+
+/// Inverse standard-normal CDF (probit) for an arbitrary probability `p` in
+/// (0, 1), via bisection on `normal_cdf`. Returns `z` such that
+/// `normal_cdf(z) = p`. Used to place the prior-predicted top strength.
+fn inverse_normal_cdf(p: f64) -> f64 {
+    let (mut lo, mut hi) = (-10.0_f64, 10.0_f64);
+    for _ in 0..100 {
+        let mid = 0.5 * (lo + hi);
+        if normal_cdf(mid) < p {
+            lo = mid;
+        } else {
+            hi = mid;
+        }
+    }
+    0.5 * (lo + hi)
+}
+
+/// Prior-predicted strength of the top item: `E[max]` of `n` draws from the
+/// strength prior `N(center, prior_tau2)`, where `center` is the observed mean
+/// of the posterior means (which is well-determined even when the top item's
+/// magnitude is not). The expected maximum order statistic is approximated by
+/// Blom's plotting position `Φ⁻¹((n − 0.375)/(n + 0.25))`, scaled by the prior
+/// std and shifted to the observed center.
+fn predicted_top_strength(means: &[f64], prior_tau2: f64) -> f64 {
+    let n = means.len();
+    let center = means.iter().sum::<f64>() / n as f64;
+    let sigma0 = prior_tau2.max(0.0).sqrt();
+    let nf = n as f64;
+    let p = (nf - 0.375) / (nf + 0.25);
+    center + sigma0 * inverse_normal_cdf(p)
+}
+
+/// Numerically stable sigmoid.
+fn sigmoid_scalar(x: f64) -> f64 {
+    if x >= 0.0 {
+        1.0 / (1.0 + (-x).exp())
+    } else {
+        let e = x.exp();
+        e / (1.0 + e)
+    }
+}
+
+/// Laplace-approximation scoring path: deterministic MAP fit + curvature, no
+/// sampling. Produces the same `ScoringResult` shape as the MCMC path, with CIs
+/// computed analytically as symmetric Gaussian intervals from the per-parameter
+/// standard deviations.
+#[allow(clippy::needless_range_loop)]
+fn run_scoring_laplace(
+    id_map: &IdMap,
+    num_items: usize,
+    indexed: &[IndexedComparison],
+    options: &ScoringOptions,
+    judge_info: &JudgeInfo,
+) -> ScoringResult {
+    const MAX_NEWTON_ITERS: usize = 100;
+    const NEWTON_TOL: f64 = 1e-8;
+
+    let num_judges = judge_info.judge_ids.len();
+    let fit = laplace_bt::fit_linear(
+        num_items,
+        num_judges,
+        indexed,
+        options.prior_tau2,
+        options.regularization_strength,
+        options.bias_prior_logit,
+        options.bias_prior_tau2,
+        MAX_NEWTON_ITERS,
+        NEWTON_TOL,
+    );
+
+    let z = z_for_confidence(options.confidence_level);
+
+    // Rankings: score = MAP log-strength, symmetric Gaussian CI = mean ± z·std.
+    let mut rankings: Vec<RankedItem> = (0..num_items)
+        .map(|i| RankedItem {
+            item: id_map.to_id(i),
+            score: fit.means[i],
+            lower_bound: fit.means[i] - z * fit.stds[i],
+            upper_bound: fit.means[i] + z * fit.stds[i],
+        })
+        .collect();
+    rankings.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+
+    // Per-item and per-judge comparison counts.
+    let mut games_per_item = vec![0usize; num_items];
+    let mut comparisons_per_judge = vec![0usize; num_judges];
+    for &(i, j, _, k) in indexed {
+        games_per_item[i] += 1;
+        games_per_item[j] += 1;
+        comparisons_per_judge[k] += 1;
+    }
+
+    // Selection weights reuse the shared Gaussian-area helper on (mean, std).
+    let selection_weights = options.selection_sharpness.map(|sharpness| {
+        compute_selection_weights(
+            &fit.means,
+            &fit.stds,
+            &games_per_item,
+            sharpness,
+            options.selection_cutoff,
+            options.selection_coverage,
+            options.prior_tau2,
+            options.target_prior_games,
+        )
+    });
+
+    // The Laplace fit refits from scratch each call, so warm start is unused;
+    // we still return a valid state for API symmetry with the MCMC path.
+    let warm_start_state = WarmStartState {
+        item_strengths: fit.means.iter().map(|&m| m.exp()).collect(),
+        judge_biases: (0..num_judges)
+            .map(|k| (judge_info.judge_ids[k], fit.bias_means[k]))
+            .collect(),
+    };
+
+    // Per-judge analytics: bias in probability space with a symmetric CI.
+    let judge_analytics: Vec<JudgeAnalytics> = (0..num_judges)
+        .map(|k| {
+            let b = fit.bias_means[k];
+            let s = fit.bias_stds[k];
+            JudgeAnalytics {
+                judge_id: judge_info.judge_ids[k],
+                positional_bias: sigmoid_scalar(b),
+                positional_bias_ci: (sigmoid_scalar(b - z * s), sigmoid_scalar(b + z * s)),
+                num_comparisons: comparisons_per_judge[k],
+            }
+        })
+        .collect();
+
+    // Panel bias: comparison-count-weighted average of the judges' bias
+    // probabilities (equal weights when there are no comparisons), with the CI
+    // propagated from the per-judge bias variances via the delta method.
+    let total_comparisons: usize = comparisons_per_judge.iter().sum();
+    let (panel_positional_bias, panel_var) = if num_judges == 0 {
+        (0.5, 0.0)
+    } else {
+        let mut mean = 0.0;
+        let mut var = 0.0;
+        for k in 0..num_judges {
+            let w = if total_comparisons == 0 {
+                1.0 / num_judges as f64
+            } else {
+                comparisons_per_judge[k] as f64 / total_comparisons as f64
+            };
+            let p = sigmoid_scalar(fit.bias_means[k]);
+            mean += w * p;
+            // dp/dβ = p(1−p); Var(p) ≈ (p(1−p)·std_β)².
+            let dp = p * (1.0 - p) * fit.bias_stds[k];
+            var += (w * dp) * (w * dp);
+        }
+        (mean, var)
+    };
+    let panel_sd = panel_var.sqrt();
+    let panel_positional_bias_ci = (
+        (panel_positional_bias - z * panel_sd).clamp(0.0, 1.0),
+        (panel_positional_bias + z * panel_sd).clamp(0.0, 1.0),
+    );
+
+    ScoringResult {
+        rankings,
+        selection_weights,
+        warm_start_state,
+        sample_size: 0,
         judge_analytics,
         panel_positional_bias,
         panel_positional_bias_ci,
@@ -285,6 +509,7 @@ mod tests {
             selection_sharpness: None,
             selection_cutoff: 0.05,
             selection_coverage: 0.0,
+            target_prior_games: 10.0,
             warm_start: None,
             regularization_strength: 0.01,
             prior_tau2: 10.0,
@@ -294,6 +519,41 @@ mod tests {
 
             bias_prior_logit: 0.0,
             seed: None,
+            inference: InferenceMode::Mcmc,
+        }
+    }
+
+    #[test]
+    fn test_laplace_and_mcmc_agree_on_ordering() {
+        // Both engines fit the same posterior, so on clear data they must
+        // produce the same ranking order.
+        let item_ids = vec![10, 20, 30];
+        let mut comparisons: Vec<ComparisonInput> = Vec::new();
+        for _ in 0..10 {
+            comparisons.extend(make_pair(10, 20, 0.9));
+            comparisons.extend(make_pair(20, 30, 0.9));
+            comparisons.extend(make_pair(10, 30, 0.95));
+        }
+        let ji = single_judge_info();
+
+        let mut mcmc_opts = default_scoring_options();
+        mcmc_opts.iterations = 3000;
+        mcmc_opts.burn_in = 500;
+        mcmc_opts.seed = Some(7);
+        let mut laplace_opts = mcmc_opts.clone();
+        laplace_opts.inference = InferenceMode::LaplaceLinear;
+
+        let mcmc = run_scoring(&item_ids, &comparisons, &mcmc_opts, &ji);
+        let laplace = run_scoring(&item_ids, &comparisons, &laplace_opts, &ji);
+
+        let mcmc_order: Vec<i64> = mcmc.rankings.iter().map(|r| r.item).collect();
+        let laplace_order: Vec<i64> = laplace.rankings.iter().map(|r| r.item).collect();
+        assert_eq!(mcmc_order, vec![10, 20, 30]);
+        assert_eq!(laplace_order, vec![10, 20, 30]);
+        // Laplace CIs are finite and bracket the score.
+        for r in &laplace.rankings {
+            assert!(r.lower_bound <= r.score && r.score <= r.upper_bound);
+            assert!(r.lower_bound.is_finite() && r.upper_bound.is_finite());
         }
     }
 
@@ -588,9 +848,39 @@ mod tests {
         let stds = vec![0.5, 0.5, 0.5, 0.5];
         let games = vec![10, 10, 10, 10];
         // sharpness 1, no cutoff, no coverage pull → pure area.
-        let w = compute_selection_weights(&means, &stds, &games, 1.0, 0.0, 0.0);
+        let w = compute_selection_weights(&means, &stds, &games, 1.0, 0.0, 0.0, 10.0, 0.0);
         assert!((w[0] - 0.5).abs() < 1e-6, "leader area should be 0.5, got {}", w[0]);
         assert!(w[0] > w[1] && w[1] > w[2] && w[2] > w[3]);
+    }
+
+    #[test]
+    fn test_target_blend_pulls_toward_prediction_early_then_observed() {
+        // 50 items whose observed top (0.5) is modest, but the strength prior
+        // (tau2 = 10 → σ₀ ≈ 3.16) predicts a much higher top over 50 draws. When
+        // the leader has few games the prediction dominates the target, so even
+        // the leader sits below it (area < 0.5). As the leader's game count grows
+        // the observed top takes over and its area returns to 0.5.
+        let n = 50;
+        let mut means = vec![0.0; n];
+        means[0] = 0.5; // modest observed top
+        let stds = vec![1.0; n];
+        let prior_tau2 = 10.0;
+
+        // Few games on the leader → prediction-dominated target → area < 0.5.
+        let mut games_few = vec![10usize; n];
+        games_few[0] = 2;
+        let w_early = compute_selection_weights(&means, &stds, &games_few, 1.0, 0.0, 0.0, prior_tau2, 10.0);
+        assert!(w_early[0] < 0.45, "early: leader area should be pulled below 0.5, got {}", w_early[0]);
+
+        // Many games on the leader → observed-dominated target → area ≈ 0.5.
+        let mut games_many = vec![10usize; n];
+        games_many[0] = 1000;
+        let w_late = compute_selection_weights(&means, &stds, &games_many, 1.0, 0.0, 0.0, prior_tau2, 10.0);
+        assert!((w_late[0] - 0.5).abs() < 0.05, "late: leader area should approach 0.5, got {}", w_late[0]);
+
+        // Blend disabled (prior games = 0) → leader exactly at 0.5 regardless of games.
+        let w_off = compute_selection_weights(&means, &stds, &games_few, 1.0, 0.0, 0.0, prior_tau2, 0.0);
+        assert!((w_off[0] - 0.5).abs() < 1e-9, "blend off: leader area should be 0.5, got {}", w_off[0]);
     }
 
     #[test]
@@ -599,8 +889,8 @@ mod tests {
         let means = vec![2.0, 1.0];
         let stds = vec![1.0, 1.0];
         let games = vec![10, 10];
-        let sharp = compute_selection_weights(&means, &stds, &games, 1.0, 0.0, 0.0);
-        let soft = compute_selection_weights(&means, &stds, &games, 0.5, 0.0, 0.0);
+        let sharp = compute_selection_weights(&means, &stds, &games, 1.0, 0.0, 0.0, 10.0, 0.0);
+        let soft = compute_selection_weights(&means, &stds, &games, 0.5, 0.0, 0.0, 10.0, 0.0);
         let ratio_sharp = sharp[0] / sharp[1];
         let ratio_soft = soft[0] / soft[1];
         assert!(ratio_soft < ratio_sharp, "lower sharpness should flatten the ratio");
@@ -615,10 +905,10 @@ mod tests {
         let stds = vec![1.0, 1.0];
         let games = vec![2, 50]; // item 0 under-served, item 1 over-served
 
-        let no_pull = compute_selection_weights(&means, &stds, &games, 1.0, 0.0, 0.0);
+        let no_pull = compute_selection_weights(&means, &stds, &games, 1.0, 0.0, 0.0, 10.0, 0.0);
         assert!((no_pull[0] - no_pull[1]).abs() < 1e-12, "coverage 0 should ignore games");
 
-        let pull = compute_selection_weights(&means, &stds, &games, 1.0, 0.0, 1.0);
+        let pull = compute_selection_weights(&means, &stds, &games, 1.0, 0.0, 1.0, 10.0, 0.0);
         assert!(
             pull[0] > pull[1],
             "under-served item should outweigh over-served one under coverage pull: {} vs {}",

@@ -14,14 +14,18 @@ use crate::server;
 pub struct TrialConfig<'a> {
     pub num_items: usize,
     pub rounds: usize,
-    pub strength_std: f64,
+    pub actual_tau2: f64,
+    pub prior_tau2: Option<f64>,
     pub use_logprobs: bool,
     pub distribution: &'a str,
     pub selection_sharpness: Option<f64>,
     pub cutoff: Option<f64>,
     pub coverage: Option<f64>,
+    pub target_prior_games: Option<f64>,
     pub mcmc_iterations: Option<usize>,
     pub min_uniform_games: Option<usize>,
+    pub refits_per_round: Option<usize>,
+    pub inference: Option<&'a str>,
     pub nanojudge_bin: &'a Path,
 }
 
@@ -56,12 +60,13 @@ pub async fn run(
     let start = std::time::Instant::now();
     let mut rng = StdRng::seed_from_u64(seed);
 
-    // Draw strengths from N(0, spread), then assign names by rank so that
+    // Draw strengths from N(0, actual_tau2), then assign names by rank so that
     // item_0001 is the strongest, item_0002 the second strongest, and so on.
     // This makes ranking errors obvious by eye in the example table (a perfect
     // recovery is item_0001, item_0002, … in order).
+    let strength_std = config.actual_tau2.sqrt();
     let mut sampled_strengths: Vec<f64> = (0..config.num_items)
-        .map(|_| sample_normal(&mut rng) * config.strength_std)
+        .map(|_| sample_normal(&mut rng) * strength_std)
         .collect();
     sampled_strengths.sort_by(|a, b| b.partial_cmp(a).unwrap()); // strongest first
 
@@ -77,10 +82,17 @@ pub async fn run(
     let items_file = tempfile::NamedTempFile::new().map_err(|e| e.to_string())?;
     let config_file = tempfile::NamedTempFile::new().map_err(|e| e.to_string())?;
 
-    let items_text: String = (0..config.num_items)
+    // Shuffle the order items are presented to the CLI so the input order
+    // carries NO ground-truth signal. (true_order, used for metrics, stays in
+    // strength order.) Without this, the CLI receives items in true-strength
+    // order and any stable tie-break in its ranking defaults to the true order,
+    // spuriously inflating accuracy when scores are tied (sparse early rounds).
+    let mut item_names: Vec<String> = (0..config.num_items)
         .map(|i| format!("item_{:04}", i + 1))
-        .collect::<Vec<_>>()
-        .join("\n");
+        .collect();
+    use rand::seq::SliceRandom;
+    item_names.shuffle(&mut rng);
+    let items_text: String = item_names.join("\n");
     std::fs::write(items_file.path(), &items_text).map_err(|e| e.to_string())?;
 
     // Start fake server.
@@ -142,11 +154,23 @@ pub async fn run(
     if let Some(coverage) = config.coverage {
         cmd.arg("--coverage").arg(coverage.to_string());
     }
+    if let Some(target_prior_games) = config.target_prior_games {
+        cmd.arg("--target-prior-games").arg(target_prior_games.to_string());
+    }
+    if let Some(prior_tau2) = config.prior_tau2 {
+        cmd.arg("--prior-tau2").arg(prior_tau2.to_string());
+    }
     if let Some(mcmc_iterations) = config.mcmc_iterations {
         cmd.arg("--mcmc-iterations").arg(mcmc_iterations.to_string());
     }
     if let Some(min_uniform_games) = config.min_uniform_games {
         cmd.arg("--min-uniform-games").arg(min_uniform_games.to_string());
+    }
+    if let Some(refits_per_round) = config.refits_per_round {
+        cmd.arg("--refits-per-round").arg(refits_per_round.to_string());
+    }
+    if let Some(inference) = config.inference {
+        cmd.arg("--inference").arg(inference);
     }
 
     let output = cmd
