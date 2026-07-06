@@ -19,6 +19,7 @@ pub struct TrialConfig<'a> {
     pub use_logprobs: bool,
     pub distribution: &'a str,
     pub selection_sharpness: Option<f64>,
+    pub anchor_index: Option<f64>,
     pub cutoff: Option<f64>,
     pub coverage: Option<f64>,
     pub target_prior_games: Option<f64>,
@@ -147,6 +148,9 @@ pub async fn run(
     // Forward top-heavy selection tuning if the bench was given it.
     if let Some(selection_sharpness) = config.selection_sharpness {
         cmd.arg("--selection-sharpness").arg(selection_sharpness.to_string());
+    }
+    if let Some(anchor_index) = config.anchor_index {
+        cmd.arg("--anchor-index").arg(anchor_index.to_string());
     }
     if let Some(cutoff) = config.cutoff {
         cmd.arg("--cutoff").arg(cutoff.to_string());

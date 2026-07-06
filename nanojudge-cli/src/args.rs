@@ -73,33 +73,44 @@ pub struct ConfigArgs {
     #[arg(long)]
     pub comparison_distribution: Option<String>,
 
-    /// Top-heavy selection sharpness: each item's P(beat the current leader) is
-    /// raised to this power before being used as its pairing weight. Lower =
-    /// flatter = more exploration; 1.0 = raw probabilities. Must be finite and
-    /// > 0. Default: 0.7. Only used with top-heavy.
+    /// Top-heavy selection sharpness: each item's uncertainty ratio around the
+    /// anchor — min/max of the posterior area above vs below the anchor's mean,
+    /// 1 = straddles the anchor, near 0 = confidently on one side — is raised
+    /// to this power before being used as its pairing weight. Lower = flatter =
+    /// more exploration; 1.0 = raw ratios. Must be finite and > 0.
+    /// Default: 0.7. Only used with top-heavy.
     #[arg(long)]
     pub selection_sharpness: Option<f64>,
 
-    /// Top-heavy selection cutoff: an item needs at least this P(beat the
-    /// leader's mean) to stay a candidate; items below are dropped (the two
-    /// strongest are always kept). In [0, 1); 0 disables the cutoff. Default: 0
-    /// (no cutoff — sharpness does the shaping). Only used with top-heavy.
+    /// Top-heavy anchor rank, 0-based into the ranking sorted best-first: 0.0
+    /// anchors selection on the current leader, 9.0 on the 10th-best (right for
+    /// "find the top ten, order within them doesn't matter"). Fractional values
+    /// interpolate between adjacent ranks. Must be finite, >= 0, and <= number
+    /// of items - 1. Default: 0. Only used with top-heavy.
+    #[arg(long)]
+    pub anchor_index: Option<f64>,
+
+    /// Top-heavy selection cutoff: an item needs at least this uncertainty
+    /// ratio to stay a candidate; items below are dropped (the two highest are
+    /// always kept). In [0, 1); 0 disables the cutoff. Default: 0 (no cutoff —
+    /// sharpness does the shaping). Only used with top-heavy.
     #[arg(long)]
     pub cutoff: Option<f64>,
 
     /// Top-heavy coverage pull (proportional-fair). Each item's weight is divided
     /// by games-played^coverage, pulling its cumulative comparison count toward
-    /// its area-implied share. 0 = off, 1 = standard proportional-fair, > 1
+    /// its ratio-implied share. 0 = off, 1 = standard proportional-fair, > 1
     /// over-corrects toward equal coverage. Must be finite and >= 0. Default: 1.
     /// Only used with top-heavy.
     #[arg(long)]
     pub coverage: Option<f64>,
 
-    /// Top-heavy selection target blend: the prior-predicted top strength counts
-    /// as this many pseudo-games against the observed top's game count, so the
-    /// prediction dominates early and fades as the leader plays more. Higher =
-    /// trust the prediction longer. 0 disables the blend (pure observed top).
-    /// Must be finite and >= 0. Default: 5. Only used with top-heavy.
+    /// Top-heavy selection target blend: the prior-predicted anchor strength
+    /// counts as this many pseudo-games against the observed anchor's game
+    /// count, so the prediction dominates early and fades as the anchor plays
+    /// more. Higher = trust the prediction longer. 0 disables the blend (pure
+    /// observed anchor). Must be finite and >= 0. Default: 5. Only used with
+    /// top-heavy.
     #[arg(long)]
     pub target_prior_games: Option<f64>,
 

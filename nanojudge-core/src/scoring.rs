@@ -54,18 +54,24 @@ fn normal_cdf(x: f64) -> f64 {
 
 /// Build top-heavy item-selection weights from each item's posterior summary.
 ///
-/// For each item the base weight is the area of its posterior lying above the
-/// top item's mean — `P(strength_i ≥ top_mean)` under a `Gaussian(mean, std)`
-/// summary — raised to `selection_sharpness` (lower = flatter = more
-/// exploration). The leader sits at area 0.5. Items whose area is below
-/// `selection_cutoff` are dropped to 0, except the two highest-area items, which
-/// are always kept so the pairing layer can always draw two distinct contenders.
+/// For each item, split its posterior at the anchor's mean: with
+/// `A = P(strength_i ≥ anchor_mean)` under a `Gaussian(mean, std)` summary,
+/// the base weight is the uncertainty ratio `min(A, 1−A) / max(A, 1−A)` —
+/// 1 when the posterior sits astride the anchor (maximally unsure which side
+/// the item belongs on), decaying toward 0 as the item resolves confidently
+/// above or below it — raised to `selection_sharpness` (lower = flatter =
+/// more exploration). The anchor is the item at rank `anchor_index` (0-based,
+/// posterior means sorted descending; fractional values interpolate between
+/// the two adjacent ranks); the anchor itself sits at ratio 1. Items whose
+/// ratio is below `selection_cutoff` are dropped to 0, except the two
+/// highest-ratio items, which are always kept so the pairing layer can always
+/// draw two distinct contenders.
 ///
 /// The base weight is then divided by `games_played^selection_coverage` — a
 /// proportional-fair coverage pull that drives each item's cumulative comparison
-/// count toward its area-implied share (`selection_coverage = 0` disables it, `1`
+/// count toward its ratio-implied share (`selection_coverage = 0` disables it, `1`
 /// is standard proportional-fair). `games_played` uses the current cumulative
-/// counts, so a resolved item (area → 0) sheds its weight rather than carrying
+/// counts, so a resolved item (ratio → 0) sheds its weight rather than carrying
 /// stale "owed" comparisons.
 ///
 /// Weights are returned unnormalized; the pairing layer normalizes by its
@@ -76,6 +82,7 @@ fn compute_selection_weights(
     stds: &[f64],
     games_played: &[usize],
     selection_sharpness: f64,
+    anchor_index: f64,
     selection_cutoff: f64,
     selection_coverage: f64,
     prior_tau2: f64,
@@ -85,30 +92,47 @@ fn compute_selection_weights(
     if n == 0 {
         return Vec::new();
     }
+    assert!(
+        anchor_index.is_finite() && anchor_index >= 0.0 && anchor_index <= (n - 1) as f64,
+        "anchor_index={anchor_index}, must be finite and in [0, num_items - 1 = {}]",
+        n - 1
+    );
 
-    // The selection target: the reference strength each item's area is measured
-    // against. The observed top (max posterior mean) is unreliable early — the
-    // leader has few games and, in binary mode, wins never pin its magnitude — so
-    // blend it with a prior-predicted top via a pseudo-count. The prediction is
-    // worth `target_prior_games` games against the leader's actual game count `g`:
-    //   `target = (g·observed_top + K·predicted_top) / (g + K)`.
-    // `target_prior_games = 0` falls straight back to the observed top.
-    let top_idx = (0..n)
-        .max_by(|&a, &b| means[a].partial_cmp(&means[b]).unwrap_or(std::cmp::Ordering::Equal))
-        .unwrap();
-    let observed_top = means[top_idx];
+    // The anchor: the item at rank `anchor_index` when posterior means are
+    // sorted descending. Fractional indices interpolate linearly between the
+    // two adjacent ranks — for both the anchor's mean and its game count.
+    let mut by_mean: Vec<usize> = (0..n).collect();
+    by_mean.sort_by(|&a, &b| means[b].partial_cmp(&means[a]).unwrap_or(std::cmp::Ordering::Equal));
+    let lo_rank = anchor_index.floor() as usize;
+    let hi_rank = anchor_index.ceil() as usize;
+    let frac = anchor_index - lo_rank as f64;
+    let (lo_idx, hi_idx) = (by_mean[lo_rank], by_mean[hi_rank]);
+    let observed_anchor = means[lo_idx] + frac * (means[hi_idx] - means[lo_idx]);
+
+    // The selection target: the reference strength each item's uncertainty
+    // ratio is measured against. The observed anchor is unreliable early — it has few games and,
+    // in binary mode, wins never pin its magnitude — so blend it with a
+    // prior-predicted anchor via a pseudo-count. The prediction is worth
+    // `target_prior_games` games against the anchor's actual game count `g`:
+    //   `target = (g·observed_anchor + K·predicted_anchor) / (g + K)`.
+    // `target_prior_games = 0` falls straight back to the observed anchor.
     let target = if target_prior_games > 0.0 {
-        let predicted_top = predicted_top_strength(means, prior_tau2);
-        let g = games_played[top_idx] as f64;
-        (g * observed_top + target_prior_games * predicted_top) / (g + target_prior_games)
+        let predicted_anchor = predicted_rank_strength(means, prior_tau2, anchor_index);
+        let g_lo = games_played[lo_idx] as f64;
+        let g_hi = games_played[hi_idx] as f64;
+        let g = g_lo + frac * (g_hi - g_lo);
+        (g * observed_anchor + target_prior_games * predicted_anchor) / (g + target_prior_games)
     } else {
-        observed_top
+        observed_anchor
     };
 
-    // Raw area per item: P(item's strength exceeds the target).
-    let areas: Vec<f64> = (0..n)
+    // Uncertainty ratio per item: split the posterior at the target into the
+    // area above (A) and below (1−A); the ratio min/max is 1 when the item
+    // straddles the target and decays toward 0 once it is confidently on
+    // either side. max(A, 1−A) >= 0.5, so the division is always safe.
+    let ratios: Vec<f64> = (0..n)
         .map(|i| {
-            if stds[i] <= 1e-12 {
+            let above = if stds[i] <= 1e-12 {
                 // Degenerate point mass: strictly-above the target counts fully,
                 // exactly-at counts half, below counts nothing.
                 if means[i] > target {
@@ -120,23 +144,25 @@ fn compute_selection_weights(
                 }
             } else {
                 normal_cdf((means[i] - target) / stds[i])
-            }
+            };
+            let below = 1.0 - above;
+            above.min(below) / above.max(below)
         })
         .collect();
 
-    // Always keep the two highest-area items regardless of cutoff, so the
+    // Always keep the two highest-ratio items regardless of cutoff, so the
     // candidate pool never collapses below the two needed to form a pair.
     let mut kept = vec![false; n];
     let mut order: Vec<usize> = (0..n).collect();
-    order.sort_by(|&a, &b| areas[b].partial_cmp(&areas[a]).unwrap_or(std::cmp::Ordering::Equal));
+    order.sort_by(|&a, &b| ratios[b].partial_cmp(&ratios[a]).unwrap_or(std::cmp::Ordering::Equal));
     for &idx in order.iter().take(2) {
         kept[idx] = true;
     }
 
     (0..n)
         .map(|i| {
-            let base = if areas[i] >= selection_cutoff || kept[i] {
-                areas[i].powf(selection_sharpness)
+            let base = if ratios[i] >= selection_cutoff || kept[i] {
+                ratios[i].powf(selection_sharpness)
             } else {
                 0.0
             };
@@ -164,6 +190,8 @@ fn compute_selection_weights(
 /// - a comparison's `judge_id` is not present in `judge_info.judge_ids`
 /// - `options.warm_start` is set and its `item_log_strengths` length does not
 ///   match `item_ids.len()`
+/// - `options.selection_sharpness` is set and `options.anchor_index` is not
+///   finite or lies outside `[0, item_ids.len() - 1]`
 pub fn run_scoring(
     item_ids: &[i64],
     comparisons: &[ComparisonInput],
@@ -261,9 +289,9 @@ pub fn run_scoring(
         judge_biases: mcmc.get_current_biases(judge_info),
     };
 
-    // Top-heavy selection weights: each item's softened P(beat the leader's
-    // mean), built from the posterior (mean, std) summary, with a
-    // proportional-fair coverage pull. `None` for uniform.
+    // Top-heavy selection weights: each item's sharpened uncertainty ratio
+    // around the anchor's mean, built from the posterior (mean, std) summary,
+    // with a proportional-fair coverage pull. `None` for uniform.
     let selection_weights = options.selection_sharpness.map(|selection_sharpness| {
         // Comparisons played per item so far (each comparison touches two items).
         let mut games_per_item = vec![0usize; num_items];
@@ -276,6 +304,7 @@ pub fn run_scoring(
             &samples_result.stds,
             &games_per_item,
             selection_sharpness,
+            options.anchor_index,
             options.selection_cutoff,
             options.selection_coverage,
             options.prior_tau2,
@@ -313,7 +342,7 @@ fn z_for_confidence(confidence_level: f64) -> f64 {
 
 /// Inverse standard-normal CDF (probit) for an arbitrary probability `p` in
 /// (0, 1), via bisection on `normal_cdf`. Returns `z` such that
-/// `normal_cdf(z) = p`. Used to place the prior-predicted top strength.
+/// `normal_cdf(z) = p`. Used to place the prior-predicted anchor strength.
 fn inverse_normal_cdf(p: f64) -> f64 {
     let (mut lo, mut hi) = (-10.0_f64, 10.0_f64);
     for _ in 0..100 {
@@ -327,18 +356,22 @@ fn inverse_normal_cdf(p: f64) -> f64 {
     0.5 * (lo + hi)
 }
 
-/// Prior-predicted strength of the top item: `E[max]` of `n` draws from the
-/// strength prior `N(center, prior_tau2)`, where `center` is the observed mean
-/// of the posterior means (which is well-determined even when the top item's
-/// magnitude is not). The expected maximum order statistic is approximated by
-/// Blom's plotting position `Φ⁻¹((n − 0.375)/(n + 0.25))`, scaled by the prior
-/// std and shifted to the observed center.
-fn predicted_top_strength(means: &[f64], prior_tau2: f64) -> f64 {
+/// Prior-predicted strength of the item at rank `anchor_index` (0-based from
+/// the top, fractional allowed): the expected `(anchor_index + 1)`-th largest
+/// of `n` draws from the strength prior `N(center, prior_tau2)`, where `center`
+/// is the observed mean of the posterior means (which is well-determined even
+/// when individual magnitudes are not). The expected order statistic is
+/// approximated by Blom's plotting position for the r-th largest,
+/// `Φ⁻¹((n − r + 0.625)/(n + 0.25))` with `r = anchor_index + 1`, scaled by the
+/// prior std and shifted to the observed center. Continuous in `anchor_index`,
+/// so fractional anchors need no separate interpolation; `anchor_index = 0`
+/// reproduces the classic `E[max]` position `Φ⁻¹((n − 0.375)/(n + 0.25))`.
+fn predicted_rank_strength(means: &[f64], prior_tau2: f64, anchor_index: f64) -> f64 {
     let n = means.len();
     let center = means.iter().sum::<f64>() / n as f64;
     let sigma0 = prior_tau2.max(0.0).sqrt();
     let nf = n as f64;
-    let p = (nf - 0.375) / (nf + 0.25);
+    let p = (nf - anchor_index - 0.375) / (nf + 0.25);
     center + sigma0 * inverse_normal_cdf(p)
 }
 
@@ -409,6 +442,7 @@ fn run_scoring_laplace(
             &fit.stds,
             &games_per_item,
             sharpness,
+            options.anchor_index,
             options.selection_cutoff,
             options.selection_coverage,
             options.prior_tau2,
@@ -512,6 +546,7 @@ mod tests {
             burn_in: 100,
             confidence_level: 0.95,
             selection_sharpness: None,
+            anchor_index: 0.0,
             selection_cutoff: 0.05,
             selection_coverage: 0.0,
             target_prior_games: 10.0,
@@ -886,14 +921,15 @@ mod tests {
 
     #[test]
     fn test_compute_selection_weights_leader_and_ordering() {
-        // means descending; the leader (index 0) must land at area 0.5, and
-        // weights must be non-increasing in distance below the leader.
+        // means descending; with anchor_index 0 the leader straddles its own
+        // mean (A = 0.5) so its ratio is exactly 1, and weights must decrease
+        // with distance below the leader.
         let means = vec![2.0, 1.5, 1.0, 0.0];
         let stds = vec![0.5, 0.5, 0.5, 0.5];
         let games = vec![10, 10, 10, 10];
-        // sharpness 1, no cutoff, no coverage pull → pure area.
-        let w = compute_selection_weights(&means, &stds, &games, 1.0, 0.0, 0.0, 10.0, 0.0);
-        assert!((w[0] - 0.5).abs() < 1e-6, "leader area should be 0.5, got {}", w[0]);
+        // sharpness 1, no cutoff, no coverage pull → pure ratio.
+        let w = compute_selection_weights(&means, &stds, &games, 1.0, 0.0, 0.0, 0.0, 10.0, 0.0);
+        assert!((w[0] - 1.0).abs() < 1e-6, "leader ratio should be 1, got {}", w[0]);
         assert!(w[0] > w[1] && w[1] > w[2] && w[2] > w[3]);
     }
 
@@ -902,29 +938,102 @@ mod tests {
         // 50 items whose observed top (0.5) is modest, but the strength prior
         // (tau2 = 10 → σ₀ ≈ 3.16) predicts a much higher top over 50 draws. When
         // the leader has few games the prediction dominates the target, so even
-        // the leader sits below it (area < 0.5). As the leader's game count grows
-        // the observed top takes over and its area returns to 0.5.
+        // the leader sits confidently below it (ratio ≪ 1). As the leader's game
+        // count grows the observed top takes over, the leader straddles the
+        // target again, and its ratio returns toward 1.
         let n = 50;
         let mut means = vec![0.0; n];
         means[0] = 0.5; // modest observed top
         let stds = vec![1.0; n];
         let prior_tau2 = 10.0;
 
-        // Few games on the leader → prediction-dominated target → area < 0.5.
+        // Few games on the leader → prediction-dominated target → ratio ≪ 1.
         let mut games_few = vec![10usize; n];
         games_few[0] = 2;
-        let w_early = compute_selection_weights(&means, &stds, &games_few, 1.0, 0.0, 0.0, prior_tau2, 10.0);
-        assert!(w_early[0] < 0.45, "early: leader area should be pulled below 0.5, got {}", w_early[0]);
+        let w_early = compute_selection_weights(&means, &stds, &games_few, 1.0, 0.0, 0.0, 0.0, prior_tau2, 10.0);
+        assert!(w_early[0] < 0.45, "early: leader ratio should be pulled well below 1, got {}", w_early[0]);
 
-        // Many games on the leader → observed-dominated target → area ≈ 0.5.
+        // Many games on the leader → observed-dominated target → ratio near 1.
         let mut games_many = vec![10usize; n];
         games_many[0] = 1000;
-        let w_late = compute_selection_weights(&means, &stds, &games_many, 1.0, 0.0, 0.0, prior_tau2, 10.0);
-        assert!((w_late[0] - 0.5).abs() < 0.05, "late: leader area should approach 0.5, got {}", w_late[0]);
+        let w_late = compute_selection_weights(&means, &stds, &games_many, 1.0, 0.0, 0.0, 0.0, prior_tau2, 10.0);
+        assert!(w_late[0] > 0.8, "late: leader ratio should approach 1, got {}", w_late[0]);
+        assert!(w_late[0] > w_early[0]);
 
-        // Blend disabled (prior games = 0) → leader exactly at 0.5 regardless of games.
-        let w_off = compute_selection_weights(&means, &stds, &games_few, 1.0, 0.0, 0.0, prior_tau2, 0.0);
-        assert!((w_off[0] - 0.5).abs() < 1e-9, "blend off: leader area should be 0.5, got {}", w_off[0]);
+        // Blend disabled (prior games = 0) → leader exactly at ratio 1 regardless of games.
+        let w_off = compute_selection_weights(&means, &stds, &games_few, 1.0, 0.0, 0.0, 0.0, prior_tau2, 0.0);
+        assert!((w_off[0] - 1.0).abs() < 1e-8, "blend off: leader ratio should be 1, got {}", w_off[0]);
+    }
+
+    #[test]
+    fn test_anchor_index_moves_anchor_down_the_ranking() {
+        // With anchor_index 1.0 the 2nd-best item becomes the anchor: it sits
+        // at ratio 1 (maximum focus), while items equidistant on either side
+        // of it get equal, lower weight — the leader is no longer special once
+        // it is confidently above the boundary. Blend disabled so the target
+        // is the pure observed anchor.
+        let means = vec![2.0, 1.5, 1.0, 0.0];
+        let stds = vec![0.5, 0.5, 0.5, 0.5];
+        let games = vec![10, 10, 10, 10];
+        let w = compute_selection_weights(&means, &stds, &games, 1.0, 1.0, 0.0, 0.0, 10.0, 0.0);
+        assert!((w[1] - 1.0).abs() < 1e-6, "anchor (rank 1) ratio should be 1, got {}", w[1]);
+        assert!(w[1] > w[0], "anchor should outweigh the confident leader");
+        assert!(
+            (w[0] - w[2]).abs() < 1e-9,
+            "items equidistant above/below the anchor should weigh the same: {} vs {}",
+            w[0], w[2]
+        );
+        assert!(w[2] > w[3], "farther below the anchor should weigh less");
+    }
+
+    #[test]
+    fn test_anchor_index_fractional_interpolates() {
+        // anchor_index 0.5 targets the midpoint of the rank-0 and rank-1 means
+        // (2.0 and 1.5 → 1.75). The two items sit at ±0.5σ from that target,
+        // so both get the identical ratio Φ(−0.5)/Φ(0.5). Also continuous:
+        // every weight lies strictly between its anchor-0 and anchor-1 weights.
+        let means = vec![2.0, 1.0, 1.5, 0.0];
+        let stds = vec![0.5, 0.5, 0.5, 0.5];
+        let games = vec![10, 10, 10, 10];
+        let w_mid = compute_selection_weights(&means, &stds, &games, 1.0, 0.5, 0.0, 0.0, 10.0, 0.0);
+        let expected = normal_cdf(-0.5) / normal_cdf(0.5);
+        assert!((w_mid[0] - expected).abs() < 1e-6, "leader ratio should be Φ(−0.5)/Φ(0.5), got {}", w_mid[0]);
+        assert!((w_mid[2] - expected).abs() < 1e-6, "rank-1 ratio should be Φ(−0.5)/Φ(0.5), got {}", w_mid[2]);
+
+        let w0 = compute_selection_weights(&means, &stds, &games, 1.0, 0.0, 0.0, 0.0, 10.0, 0.0);
+        let w1 = compute_selection_weights(&means, &stds, &games, 1.0, 1.0, 0.0, 0.0, 10.0, 0.0);
+        for i in 0..means.len() {
+            assert!(
+                w_mid[i] > w0[i].min(w1[i]) && w_mid[i] < w0[i].max(w1[i]),
+                "fractional anchor weight should sit strictly between integer-anchor weights for item {i}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_predicted_rank_strength_decreases_with_anchor_index() {
+        // The predicted order statistic must decrease monotonically as the
+        // anchor moves down the ranking, and anchor 0 must reproduce the
+        // classic E[max] plotting position.
+        let means = vec![0.0; 20];
+        let prior_tau2 = 10.0;
+        let p0 = predicted_rank_strength(&means, prior_tau2, 0.0);
+        let p_half = predicted_rank_strength(&means, prior_tau2, 0.5);
+        let p1 = predicted_rank_strength(&means, prior_tau2, 1.0);
+        let p9 = predicted_rank_strength(&means, prior_tau2, 9.0);
+        assert!(p0 > p_half && p_half > p1 && p1 > p9);
+        let nf = 20.0_f64;
+        let expected_max = prior_tau2.sqrt() * inverse_normal_cdf((nf - 0.375) / (nf + 0.25));
+        assert!((p0 - expected_max).abs() < 1e-9);
+    }
+
+    #[test]
+    #[should_panic(expected = "anchor_index")]
+    fn test_anchor_index_beyond_last_item_panics() {
+        let means = vec![1.0, 0.0];
+        let stds = vec![0.5, 0.5];
+        let games = vec![10, 10];
+        compute_selection_weights(&means, &stds, &games, 1.0, 1.5, 0.0, 0.0, 10.0, 0.0);
     }
 
     #[test]
@@ -933,8 +1042,8 @@ mod tests {
         let means = vec![2.0, 1.0];
         let stds = vec![1.0, 1.0];
         let games = vec![10, 10];
-        let sharp = compute_selection_weights(&means, &stds, &games, 1.0, 0.0, 0.0, 10.0, 0.0);
-        let soft = compute_selection_weights(&means, &stds, &games, 0.5, 0.0, 0.0, 10.0, 0.0);
+        let sharp = compute_selection_weights(&means, &stds, &games, 1.0, 0.0, 0.0, 0.0, 10.0, 0.0);
+        let soft = compute_selection_weights(&means, &stds, &games, 0.5, 0.0, 0.0, 0.0, 10.0, 0.0);
         let ratio_sharp = sharp[0] / sharp[1];
         let ratio_soft = soft[0] / soft[1];
         assert!(ratio_soft < ratio_sharp, "lower sharpness should flatten the ratio");
@@ -949,10 +1058,10 @@ mod tests {
         let stds = vec![1.0, 1.0];
         let games = vec![2, 50]; // item 0 under-served, item 1 over-served
 
-        let no_pull = compute_selection_weights(&means, &stds, &games, 1.0, 0.0, 0.0, 10.0, 0.0);
+        let no_pull = compute_selection_weights(&means, &stds, &games, 1.0, 0.0, 0.0, 0.0, 10.0, 0.0);
         assert!((no_pull[0] - no_pull[1]).abs() < 1e-12, "coverage 0 should ignore games");
 
-        let pull = compute_selection_weights(&means, &stds, &games, 1.0, 0.0, 1.0, 10.0, 0.0);
+        let pull = compute_selection_weights(&means, &stds, &games, 1.0, 0.0, 0.0, 1.0, 10.0, 0.0);
         assert!(
             pull[0] > pull[1],
             "under-served item should outweigh over-served one under coverage pull: {} vs {}",

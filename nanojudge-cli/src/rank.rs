@@ -114,6 +114,19 @@ pub async fn run(args: RankArgs) {
     let (titles, texts) = load_items(&args);
     let item_ids: Vec<i64> = (0..texts.len() as i64).collect();
 
+    // The anchor rank must exist: fail here, before any LLM spend, rather than
+    // at the first scoring pass. Only top-heavy uses the anchor.
+    if matches!(resolved.comparison_distribution, ComparisonDistribution::TopHeavy)
+        && resolved.anchor_index > (texts.len().saturating_sub(1)) as f64
+    {
+        bail(format!(
+            "anchor-index={} exceeds the last rank ({}) for {} items",
+            resolved.anchor_index,
+            texts.len().saturating_sub(1),
+            texts.len(),
+        ));
+    }
+
     let rounds = if let Some(target) = resolved.comparisons {
         let pairs_per_round = calculate_pairs_for_round(texts.len());
         if pairs_per_round == 0 {
@@ -279,7 +292,8 @@ pub async fn run(args: RankArgs) {
     let comparison_distribution = resolved.comparison_distribution;
 
     // Top-heavy selection: when active, each interim scoring pass turns the
-    // posterior into per-item pairing weights (softened P(beat the leader)).
+    // posterior into per-item pairing weights (sharpened uncertainty ratio
+    // around the anchor).
     // `None` for uniform, which needs no selection weights.
     let selection_sharpness = match comparison_distribution {
         ComparisonDistribution::TopHeavy => Some(resolved.selection_sharpness),
@@ -604,6 +618,7 @@ pub async fn run(args: RankArgs) {
                     burn_in: if interim_warm_start.is_some() { 0 } else { 100 },
                     confidence_level: resolved.confidence_level,
                     selection_sharpness,
+                    anchor_index: resolved.anchor_index,
                     selection_cutoff: resolved.selection_cutoff,
                     selection_coverage: resolved.selection_coverage,
                     target_prior_games: resolved.target_prior_games,
@@ -665,6 +680,7 @@ pub async fn run(args: RankArgs) {
             burn_in: resolved.mcmc_burn_in,
             confidence_level: resolved.confidence_level,
             selection_sharpness: None,
+            anchor_index: resolved.anchor_index,
             selection_cutoff: resolved.selection_cutoff,
             selection_coverage: resolved.selection_coverage,
             target_prior_games: resolved.target_prior_games,

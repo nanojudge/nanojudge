@@ -59,6 +59,11 @@ struct Args {
     #[arg(long)]
     selection_sharpness: Option<f64>,
 
+    /// Top-heavy anchor rank forwarded to the CLI (0-based, fractional
+    /// interpolates). Omit to use the CLI's default (0 = anchor on the leader).
+    #[arg(long)]
+    anchor_index: Option<f64>,
+
     /// Top-heavy selection cutoff forwarded to the CLI. Omit to use the CLI's
     /// default (0 = no cutoff).
     #[arg(long)]
@@ -187,6 +192,7 @@ struct SharedTrialConfig {
     use_logprobs: bool,
     distribution: String,
     selection_sharpness: Option<f64>,
+    anchor_index: Option<f64>,
     cutoff: Option<f64>,
     coverage: Option<f64>,
     target_prior_games: Option<f64>,
@@ -295,6 +301,7 @@ async fn main() {
         use_logprobs: args.logprobs,
         distribution: args.comparison_distribution.clone(),
         selection_sharpness: args.selection_sharpness,
+        anchor_index: args.anchor_index,
         cutoff: args.cutoff,
         coverage: args.coverage,
         target_prior_games: args.target_prior_games,
@@ -331,6 +338,7 @@ async fn main() {
                 use_logprobs: shared.use_logprobs,
                 distribution: &shared.distribution,
                 selection_sharpness: shared.selection_sharpness,
+                anchor_index: shared.anchor_index,
                 cutoff: shared.cutoff,
                 coverage: shared.coverage,
                 target_prior_games: shared.target_prior_games,

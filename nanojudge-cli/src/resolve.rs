@@ -39,15 +39,19 @@ pub struct ResolvedConfig {
     pub rounds: Option<usize>,
     pub comparisons: Option<usize>,
     pub comparison_distribution: ComparisonDistribution,
-    /// Top-heavy selection sharpness (power applied to each item's P(beat leader)).
-    /// Finite and > 0.
+    /// Top-heavy selection sharpness (power applied to each item's uncertainty
+    /// ratio around the anchor). Finite and > 0.
     pub selection_sharpness: f64,
-    /// Top-heavy selection cutoff (minimum P(beat leader's mean) to stay a
+    /// Top-heavy anchor rank (0-based, fractional interpolates between adjacent
+    /// ranks; 0 = the current leader). Finite and >= 0; the upper bound
+    /// (num_items - 1) is enforced at rank time once the item count is known.
+    pub anchor_index: f64,
+    /// Top-heavy selection cutoff (minimum uncertainty ratio to stay a
     /// candidate). In [0, 1); 0 disables the cutoff.
     pub selection_cutoff: f64,
     /// Top-heavy proportional-fair coverage pull. Finite and >= 0; 0 disables it.
     pub selection_coverage: f64,
-    /// Top-heavy target-blend: prior-predicted top counts as this many pseudo-games.
+    /// Top-heavy target-blend: prior-predicted anchor counts as this many pseudo-games.
     /// Finite and >= 0; 0 disables the blend.
     pub target_prior_games: f64,
     pub retries: usize,
@@ -310,6 +314,11 @@ pub fn resolve_config(shared: &ConfigArgs, cfg: &config::NanojudgeConfig) -> Res
     if !selection_sharpness.is_finite() || selection_sharpness <= 0.0 {
         bail(format!("selection-sharpness={selection_sharpness}, must be finite and > 0"));
     }
+    let anchor_index = merge_opt(shared.anchor_index, cfg.anchor_index, "anchor-index")
+        .unwrap_or(0.0);
+    if !anchor_index.is_finite() || anchor_index < 0.0 {
+        bail(format!("anchor-index={anchor_index}, must be finite and >= 0 (0 anchors on the leader)"));
+    }
     let selection_cutoff = merge_opt(shared.cutoff, cfg.cutoff, "cutoff")
         .unwrap_or(0.0);
     if !selection_cutoff.is_finite() || !(0.0..1.0).contains(&selection_cutoff) {
@@ -464,6 +473,7 @@ pub fn resolve_config(shared: &ConfigArgs, cfg: &config::NanojudgeConfig) -> Res
         comparisons,
         comparison_distribution,
         selection_sharpness,
+        anchor_index,
         selection_cutoff,
         selection_coverage,
         target_prior_games,
@@ -509,6 +519,7 @@ mod tests {
             min_logprob_coverage: None,
             comparison_distribution: None,
             selection_sharpness: None,
+            anchor_index: None,
             cutoff: None,
             coverage: None,
             target_prior_games: None,

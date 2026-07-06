@@ -39,6 +39,7 @@
 //!     burn_in: 100,
 //!     confidence_level: 0.95,
 //!     selection_sharpness: None,
+//!     anchor_index: 0.0,
 //!     selection_cutoff: 0.0005,
 //!     selection_coverage: 1.0,
 //!     target_prior_games: 10.0,

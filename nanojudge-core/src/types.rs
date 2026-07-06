@@ -107,34 +107,48 @@ pub struct ScoringOptions {
     pub confidence_level: f64,
     /// Top-heavy item-selection weighting. `None` skips it entirely (uniform
     /// pairing needs no selection weights, and the result's `selection_weights`
-    /// is then `None`). `Some(sharpness)` computes, per item, the area of its
-    /// posterior lying above the top item's mean — P(item beats the current
-    /// leader) under a Gaussian summary `(mean, std)` of its samples — then
-    /// raises that area to `sharpness`. Lower sharpness flattens the distribution
-    /// (more exploration); `1.0` leaves the areas as-is. Must be finite and > 0.
+    /// is then `None`). `Some(sharpness)` computes, per item, the uncertainty
+    /// ratio around the anchor's mean (see `anchor_index`): with
+    /// `A = P(item beats the anchor)` under a Gaussian summary `(mean, std)` of
+    /// its samples, the ratio is `min(A, 1−A) / max(A, 1−A)` — 1 when the item's
+    /// posterior straddles the anchor, decaying toward 0 as the item resolves
+    /// confidently above or below it — then raises that ratio to `sharpness`.
+    /// Lower sharpness flattens the distribution (more exploration); `1.0`
+    /// leaves the ratios as-is. Must be finite and > 0.
     pub selection_sharpness: Option<f64>,
-    /// Minimum area (P(item beats the leader's mean)) an item needs to stay a
-    /// selection candidate. Items below are dropped to weight 0, except the two
-    /// highest-area items, which are always kept so a pair can always be formed.
-    /// In [0, 1); 0 disables the cutoff. Ignored when `selection_sharpness` is
-    /// `None`.
+    /// Which rank anchors the selection target, as a 0-based (possibly
+    /// fractional) index into the items sorted by posterior mean descending.
+    /// `0.0` anchors on the top item (classic top-heavy); `9.0` anchors on the
+    /// 10th-best — right for "find the top ten, order within them doesn't
+    /// matter", since comparisons then concentrate on the boundary around rank
+    /// 10 while items confidently inside or outside the top ten shed weight.
+    /// Fractional values interpolate linearly (in log-strength space) between
+    /// the two adjacent ranks: `0.5` targets the midpoint of the 1st and 2nd
+    /// items' means. Must be finite, >= 0, and <= num_items − 1. Ignored when
+    /// `selection_sharpness` is `None`.
+    pub anchor_index: f64,
+    /// Minimum uncertainty ratio an item needs to stay a selection candidate.
+    /// Items below are dropped to weight 0, except the two highest-ratio items,
+    /// which are always kept so a pair can always be formed. In [0, 1); 0
+    /// disables the cutoff. Ignored when `selection_sharpness` is `None`.
     pub selection_cutoff: f64,
-    /// Proportional-fair coverage pull. Each item's area weight is divided by
+    /// Proportional-fair coverage pull. Each item's ratio weight is divided by
     /// `games_played^selection_coverage`, pulling its cumulative comparison count
-    /// toward its area-implied share. 0 disables it (pure area sampling); 1 is
+    /// toward its ratio-implied share. 0 disables it (pure ratio sampling); 1 is
     /// standard proportional-fair; > 1 over-corrects toward equal coverage. Must
     /// be finite and >= 0. Ignored when `selection_sharpness` is `None`.
     pub selection_coverage: f64,
     /// Info-driven blend for the selection "target" (the reference strength each
-    /// item's area is measured against). Early on the observed top strength is a
-    /// poor estimate — the leader has played few games — so the target is blended
-    /// with a prior-predicted top, `E[max]` of `num_items` draws from the strength
-    /// prior. The prior counts as `target_prior_games` pseudo-games against the
-    /// leader's actual game count `g`:
-    ///   `target = (g·observed_top + K·predicted_top) / (g + K)`.
-    /// So the prediction dominates while the leader has few games and fades as it
+    /// item's area is measured against). Early on the observed anchor strength is
+    /// a poor estimate — the anchor item has played few games — so the target is
+    /// blended with a prior-predicted anchor: the expected `anchor_index`-th
+    /// order statistic of `num_items` draws from the strength prior. The prior
+    /// counts as `target_prior_games` pseudo-games against the anchor's actual
+    /// game count `g` (interpolated for fractional `anchor_index`):
+    ///   `target = (g·observed_anchor + K·predicted_anchor) / (g + K)`.
+    /// So the prediction dominates while the anchor has few games and fades as it
     /// plays more. `target_prior_games = 0` disables the blend (pure observed
-    /// top). Must be finite and >= 0. Ignored when `selection_sharpness` is `None`.
+    /// anchor). Must be finite and >= 0. Ignored when `selection_sharpness` is `None`.
     pub target_prior_games: f64,
     /// Previous warm start state. `None` = cold start.
     pub warm_start: Option<WarmStartState>,
@@ -163,9 +177,9 @@ pub struct ScoringResult {
     /// Ranked items, sorted by score descending.
     pub rankings: Vec<RankedItem>,
     /// Top-heavy item-selection weights per item, in the same order as input
-    /// `item_ids`: each item's softened P(beat the leader's mean), with
-    /// sub-cutoff items zeroed. Drives both-items-from-the-weights pairing.
-    /// `None` when `selection_sharpness` was `None`.
+    /// `item_ids`: each item's sharpened uncertainty ratio around the anchor's
+    /// mean, with sub-cutoff items zeroed. Drives both-items-from-the-weights
+    /// pairing. `None` when `selection_sharpness` was `None`.
     pub selection_weights: Option<Vec<f64>>,
     /// Warm start state for next round.
     pub warm_start_state: WarmStartState,

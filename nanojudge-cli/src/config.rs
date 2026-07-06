@@ -42,6 +42,7 @@ pub struct NanojudgeConfig {
     pub analysis_length: Option<String>,
     pub comparison_distribution: Option<String>,
     pub selection_sharpness: Option<f64>,
+    pub anchor_index: Option<f64>,
     pub cutoff: Option<f64>,
     pub coverage: Option<f64>,
     pub target_prior_games: Option<f64>,
@@ -109,18 +110,27 @@ const DEFAULT_CONFIG_TEMPLATE: &str = "\
 # comparison_distribution = \"uniform\"
 
 # Tuning for the top-heavy distribution. Each item's pairing weight is its
-# probability of beating the current leader (from the posterior mean/std),
-# raised to `selection_sharpness`. Both items in each comparison are drawn from
-# these weights, so contenders are compared against contenders.
-#   selection_sharpness: lower = flatter = more exploration; 1.0 = raw probabilities (> 0).
-#   cutoff:   minimum P(beat the leader's mean) to stay a candidate; items below
-#             are dropped, except the two strongest, which are always kept.
+# uncertainty ratio around the anchor: min/max of the posterior area above vs
+# below the anchor's mean — 1 when the item straddles the anchor, near 0 once
+# it is confidently above or below — raised to `selection_sharpness`. Both
+# items in each comparison are drawn from these weights, so the contested
+# boundary gets the comparisons.
+#   selection_sharpness: lower = flatter = more exploration; 1.0 = raw ratios (> 0).
+#   anchor_index: which rank is the anchor, 0-based into the ranking sorted
+#             best-first. 0.0 = the current leader; 9.0 = the 10th-best (right
+#             for \"find the top ten, order within them doesn't matter\").
+#             Fractional values interpolate between adjacent ranks: 0.5 targets
+#             the midpoint of the 1st and 2nd items. Must be finite, >= 0, and
+#             <= number of items - 1.
+#   cutoff:   minimum uncertainty ratio to stay a candidate; items below are
+#             dropped, except the two highest, which are always kept.
 #             [0,1); 0 disables the cutoff.
 #   coverage: proportional-fair pull. Each weight is divided by
 #             games-played^coverage, pulling cumulative comparisons toward the
-#             area-implied share. 0 = off, 1 = proportional-fair, > 1 over-corrects.
+#             ratio-implied share. 0 = off, 1 = proportional-fair, > 1 over-corrects.
 # Only used with comparison_distribution = \"top-heavy\".
 # selection_sharpness = 0.7
+# anchor_index = 0.0
 # cutoff = 0.0
 # coverage = 1.0
 

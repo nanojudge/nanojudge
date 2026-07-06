@@ -26,8 +26,10 @@ let result = run_scoring(&item_ids, &comparisons, &ScoringOptions {
     burn_in: 100,
     confidence_level: 0.95,
     selection_sharpness: None,
+    anchor_index: 0.0,
     selection_cutoff: 0.0005,
     selection_coverage: 1.0,
+    target_prior_games: 5.0,
     warm_start: None,
     regularization_strength: 0.01,
     prior_tau2: 10.0,
@@ -36,6 +38,7 @@ let result = run_scoring(&item_ids, &comparisons, &ScoringOptions {
     bias_proposal_std: 0.15,
     bias_prior_logit: 0.0,
     seed: None,
+    inference: nanojudge_core::InferenceMode::Mcmc,
 }, &judge_info);
 
 for r in &result.rankings {
@@ -72,12 +75,16 @@ for round in 0..20 {
             iterations: 200,
             burn_in: 100,
             confidence_level: 0.95,
-            // Top-heavy selection: weight each item by its softened probability
-            // of beating the current leader. Both compared items are drawn from
-            // these weights. `None` would disable top-heavy weighting.
+            // Top-heavy selection: weight each item by its sharpened
+            // uncertainty ratio around the anchor (anchor_index 0.0 = the
+            // current leader) — items straddling the anchor get the focus.
+            // Both compared items are drawn from these weights. `None` would
+            // disable top-heavy weighting.
             selection_sharpness: Some(0.5),
+            anchor_index: 0.0,
             selection_cutoff: 0.0005,
             selection_coverage: 1.0,
+            target_prior_games: 5.0,
             warm_start: None,
             regularization_strength: 0.01,
             prior_tau2: 10.0,
@@ -86,6 +93,7 @@ for round in 0..20 {
             bias_proposal_std: 0.15,
             bias_prior_logit: 0.0,
             seed: None,
+            inference: nanojudge_core::InferenceMode::Mcmc,
         }, &judge_info);
         engine.selection_weights = scoring.selection_weights;
     }
@@ -108,7 +116,7 @@ for round in 0..20 {
 ## The math
 
 1. **Bradley-Terry MLE** — fast iterative algorithm for point-estimate scores from pairwise win rates
-2. **Gaussian BT MCMC** — Bayesian posterior sampling via Metropolis-Hastings within Gibbs, producing confidence intervals and per-item selection weights (each item's softened probability of beating the current leader)
+2. **Gaussian BT MCMC** — Bayesian posterior sampling via Metropolis-Hastings within Gibbs, producing confidence intervals and per-item selection weights (each item's uncertainty ratio around the anchor — by default the current leader, configurable via `anchor_index` — so the contested boundary gets the comparisons)
 3. **Positional bias estimation** — jointly estimated during MCMC sampling. LLMs tend to favor whichever option is shown first; the sampler detects and corrects for this automatically
 4. **Smart pairing** — decides which pairs to compare next to maximize information gain per comparison
 
@@ -127,7 +135,7 @@ for round in 0..20 {
 
 **Uniform**: Every item gets equal comparison time. Good when you care about the full ranking.
 
-**Top-heavy**: Focuses comparisons on items most likely to be in the top K. Bottom items get the uniform-stage minimum while top contenders get 10-50x more. Good for large lists where you mainly care about finding the best items.
+**Top-heavy**: Focuses comparisons on items whose standing around the anchor rank is still uncertain. Confidently placed items (on either side) get the uniform-stage minimum while contested boundary items get many times more. Good for large lists where you mainly care about finding the best items.
 
 The engine handles three stages automatically:
 1. **Uniform stage** (first few rounds): uniform pairing until every item has minimum games

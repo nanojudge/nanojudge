@@ -425,6 +425,7 @@ mod tests {
             burn_in: 100,
             confidence_level: 0.95,
             selection_sharpness: None,
+            anchor_index: 0.0,
             selection_cutoff: 0.05,
             selection_coverage: 0.0,
             target_prior_games: 10.0,
