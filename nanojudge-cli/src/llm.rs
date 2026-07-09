@@ -1,6 +1,9 @@
 /// OpenAI-compatible API client for pairwise comparisons.
-use crate::parse::{LogprobContent, ParseResult, parse_response, parse_response_text};
-use crate::prompt::build_prompt;
+use crate::parse::{
+    LogprobContent, ParseResult, parse_response, parse_response_text, parse_three_way,
+    parse_three_way_text,
+};
+use crate::prompt::{build_prompt, build_three_way_prompt};
 use rand::Rng;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
@@ -147,15 +150,16 @@ pub(crate) fn jittered_temperature(base: f64, jitter_std: f64, rng: &mut impl Rn
     base * multiplier
 }
 
-/// Send one HTTP request to the LLM and parse the response.
-/// Returns Ok on any successful HTTP response (even if verdict is unparseable).
-/// Returns Err only on HTTP/network failures.
-pub async fn send_comparison_request(
+/// Send one chat request to the LLM and return the raw pieces the callers need:
+/// the response text, the token logprobs (empty in text mode), token usage, and
+/// whether the response hit `max_tokens`. Returns Err only on HTTP/network
+/// failures. Bails (fatal) if logprobs were requested but none came back, since
+/// that is a misconfiguration rather than a per-comparison failure.
+async fn send_chat_raw(
     client: &Client,
     config: &LlmConfig,
     prompt: &str,
-    min_logprob_coverage: f64,
-) -> Result<(ParseResult, String, Option<Usage>, bool), String> {
+) -> Result<(String, Vec<LogprobContent>, Option<Usage>, bool), String> {
     let request = ChatCompletionRequest {
         model: config.model.clone(),
         messages: vec![ChatMessage {
@@ -205,22 +209,37 @@ pub async fn send_comparison_request(
     let content = choice.message.content.unwrap_or_default();
     let hit_max_tokens = choice.finish_reason.as_deref() == Some("length");
 
-    let parse_result = if config.logprobs {
-        let logprobs = choice
-            .logprobs
-            .and_then(|lp| lp.content)
-            .unwrap_or_default();
-
-        if logprobs.is_empty() {
+    let logprobs = if config.logprobs {
+        let lp = choice.logprobs.and_then(|lp| lp.content).unwrap_or_default();
+        if lp.is_empty() {
             crate::bail(format!("{} returned no logprobs. If your endpoint does not support logprobs, disable logprobs in your config.", config.model));
         }
+        lp
+    } else {
+        Vec::new()
+    };
 
+    Ok((content, logprobs, data.usage, hit_max_tokens))
+}
+
+/// Send one HTTP request to the LLM and parse the pairwise verdict.
+/// Returns Ok on any successful HTTP response (even if verdict is unparseable).
+/// Returns Err only on HTTP/network failures.
+pub async fn send_comparison_request(
+    client: &Client,
+    config: &LlmConfig,
+    prompt: &str,
+    min_logprob_coverage: f64,
+) -> Result<(ParseResult, String, Option<Usage>, bool), String> {
+    let (content, logprobs, usage, hit_max_tokens) = send_chat_raw(client, config, prompt).await?;
+
+    let parse_result = if config.logprobs {
         parse_response(&logprobs, min_logprob_coverage)
     } else {
         parse_response_text(&content)
     };
 
-    Ok((parse_result, content, data.usage, hit_max_tokens))
+    Ok((parse_result, content, usage, hit_max_tokens))
 }
 
 /// Call the LLM to compare two items, with retries on HTTP errors.
@@ -272,6 +291,99 @@ pub async fn compare_pair(
                             truncate_for_log(item1_name, 200),
                             truncate_for_log(item2_name, 200),
                             judge_name, last_err
+                        );
+                    }
+                    let backoff = std::time::Duration::from_secs(4u64.pow(attempt as u32).min(16));
+                    tokio::time::sleep(backoff).await;
+                }
+            }
+        }
+    }
+
+    Err(last_err)
+}
+
+/// Result of a single 3-way (three-item) comparison call.
+pub struct ThreeWayResult {
+    pub item_a_id: i64,
+    pub item_b_id: i64,
+    pub item_c_id: i64,
+    /// Winner-distribution `[q_A, q_B, q_C]` (probability each option is best),
+    /// aligned to items a, b, c. None if the response was unparseable.
+    pub winner_dist: Option<[f64; 3]>,
+    pub response_text: String,
+    pub prompt: String,
+    pub retries_used: usize,
+    pub usage: Option<Usage>,
+    pub hit_max_tokens: bool,
+}
+
+/// Send one HTTP request for a 3-way comparison and fold the response into a
+/// winner-distribution over the three options. Returns Err only on HTTP/network
+/// failures; an unparseable ranking yields `Ok` with `winner_dist = None`.
+async fn send_three_way_request(
+    client: &Client,
+    config: &LlmConfig,
+    prompt: &str,
+    min_logprob_coverage: f64,
+) -> Result<(Option<[f64; 3]>, String, Option<Usage>, bool), String> {
+    let (content, logprobs, usage, hit_max_tokens) = send_chat_raw(client, config, prompt).await?;
+
+    let winner_dist = if config.logprobs {
+        parse_three_way(&logprobs, min_logprob_coverage)
+    } else {
+        parse_three_way_text(&content)
+    };
+
+    Ok((winner_dist, content, usage, hit_max_tokens))
+}
+
+/// Call the LLM to rank three items, with retries on HTTP errors. Mirrors
+/// `compare_pair`: retries only HTTP/network errors, never an unparseable
+/// ranking.
+#[allow(clippy::too_many_arguments)]
+pub async fn compare_triple(
+    client: &Client,
+    config: &LlmConfig,
+    template: &str,
+    criterion: &str,
+    option_a: &str,
+    option_b: &str,
+    option_c: &str,
+    item_a_id: i64,
+    item_b_id: i64,
+    item_c_id: i64,
+    min_logprob_coverage: f64,
+    analysis_length: &str,
+    max_retries: usize,
+    verbose: bool,
+    judge_name: &str,
+) -> Result<ThreeWayResult, String> {
+    let prompt = build_three_way_prompt(template, criterion, option_a, option_b, option_c, analysis_length);
+
+    let mut last_err = String::new();
+    for attempt in 0..=max_retries {
+        match send_three_way_request(client, config, &prompt, min_logprob_coverage).await {
+            Ok((winner_dist, content, usage, hit_max_tokens)) => {
+                return Ok(ThreeWayResult {
+                    item_a_id,
+                    item_b_id,
+                    item_c_id,
+                    winner_dist,
+                    response_text: content,
+                    prompt: prompt.clone(),
+                    retries_used: attempt,
+                    usage,
+                    hit_max_tokens,
+                });
+            }
+            Err(e) => {
+                last_err = e;
+                if attempt < max_retries {
+                    if verbose {
+                        eprintln!(
+                            "  Retry {}/{} for 3-way [{}]: {}",
+                            attempt + 1, max_retries, judge_name, last_err
                         );
                     }
                     let backoff = std::time::Duration::from_secs(4u64.pow(attempt as u32).min(16));

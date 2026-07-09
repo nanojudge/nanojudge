@@ -27,6 +27,7 @@ pub struct TrialConfig<'a> {
     pub min_uniform_games: Option<usize>,
     pub refits_per_round: Option<usize>,
     pub inference: Option<&'a str>,
+    pub items_per_comparison: usize,
     pub nanojudge_bin: &'a Path,
 }
 
@@ -175,6 +176,9 @@ pub async fn run(
     }
     if let Some(inference) = config.inference {
         cmd.arg("--inference").arg(inference);
+    }
+    if config.items_per_comparison != 2 {
+        cmd.arg("--items-per-comparison").arg(config.items_per_comparison.to_string());
     }
 
     let output = cmd

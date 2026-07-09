@@ -39,6 +39,8 @@ pub struct ResolvedConfig {
     pub rounds: Option<usize>,
     pub comparisons: Option<usize>,
     pub comparison_distribution: ComparisonDistribution,
+    /// How many items each judgment compares at once: 2 (pairwise) or 3 (three-way).
+    pub items_per_comparison: usize,
     /// Top-heavy selection sharpness (power applied to each item's uncertainty
     /// ratio around the anchor). Finite and > 0.
     pub selection_sharpness: f64,
@@ -308,6 +310,13 @@ pub fn resolve_config(shared: &ConfigArgs, cfg: &config::NanojudgeConfig) -> Res
         other => bail(format!("Unknown comparison distribution \"{other}\". Use \"uniform\" or \"top-heavy\".")),
     };
 
+    let items_per_comparison = merge_opt(shared.items_per_comparison, cfg.items_per_comparison, "items-per-comparison")
+        .unwrap_or(2);
+    if items_per_comparison != 2 && items_per_comparison != 3 {
+        bail(format!("items-per-comparison={items_per_comparison}, must be 2 (pairwise) or 3 (three-way)"));
+    }
+    let three_way = items_per_comparison == 3;
+
     // Top-heavy selection tuning (only used with the top-heavy distribution).
     let selection_sharpness = merge_opt(shared.selection_sharpness, cfg.selection_sharpness, "selection-sharpness")
         .unwrap_or(0.7);
@@ -462,7 +471,10 @@ pub fn resolve_config(shared: &ConfigArgs, cfg: &config::NanojudgeConfig) -> Res
 
         let template_path = cli_path.or(cfg_path);
         match template_path {
+            Some(path) if three_way => prompt::load_three_way_template(&path),
             Some(path) => prompt::load_template(&path, reasoning_enabled),
+            None if three_way && reasoning_enabled => prompt::DEFAULT_THREE_WAY_TEMPLATE.to_string(),
+            None if three_way => prompt::DEFAULT_THREE_WAY_TEMPLATE_NO_REASONING.to_string(),
             None if reasoning_enabled => prompt::DEFAULT_TEMPLATE.to_string(),
             None => prompt::DEFAULT_TEMPLATE_NO_REASONING.to_string(),
         }
@@ -472,6 +484,7 @@ pub fn resolve_config(shared: &ConfigArgs, cfg: &config::NanojudgeConfig) -> Res
         rounds,
         comparisons,
         comparison_distribution,
+        items_per_comparison,
         selection_sharpness,
         anchor_index,
         selection_cutoff,
@@ -518,6 +531,7 @@ mod tests {
             concurrency: None,
             min_logprob_coverage: None,
             comparison_distribution: None,
+            items_per_comparison: None,
             selection_sharpness: None,
             anchor_index: None,
             cutoff: None,

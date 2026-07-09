@@ -1,7 +1,8 @@
 use nanojudge_core::{
     ComparisonInput, EngineConfig, JudgeInfo, RankingEngine, ScoringOptions, ComparisonDistribution,
     calculate_pairs_for_round, calculate_rounds_for_target_comparisons,
-    calculate_total_expected_comparisons, run_scoring,
+    calculate_total_expected_comparisons, calculate_triples_for_round, run_scoring,
+    winner_dist_to_edges,
 };
 use nanojudge_core::seed;
 use rand::seq::SliceRandom;
@@ -16,7 +17,7 @@ use crate::args::{OutputFormat, RankArgs};
 use crate::bail;
 use crate::config;
 use crate::items::load_items;
-use crate::llm::{LlmConfig, compare_pair};
+use crate::llm::{LlmConfig, compare_pair, compare_triple};
 use crate::output;
 use crate::resolve::{resolve_config, resolve_judges};
 
@@ -102,6 +103,13 @@ pub async fn run(args: RankArgs) {
     let config_path = args.config.clone().unwrap_or_else(config::config_path);
     let cfg = config::load_config(&config_path);
     let resolved = resolve_config(&args.cfg, &cfg);
+
+    // Three-item comparisons run a separate acquisition loop; the pairwise path
+    // below is left untouched.
+    if resolved.items_per_comparison == 3 {
+        run_three_way(&args, &config_path, &cfg, &resolved).await;
+        return;
+    }
 
     // Resolve judges from [[judge]] blocks
     let judges = resolve_judges(&args.cfg, &cfg, &config_path, resolved.reasoning_enabled);
@@ -502,12 +510,12 @@ pub async fn run(args: RankArgs) {
                             let _ = f.flush();
                         }
 
-                        round_results.push(ComparisonInput {
-                            item1: result.item1_id,
-                            item2: result.item2_id,
+                        round_results.push(ComparisonInput::pairwise(
+                            result.item1_id,
+                            result.item2_id,
                             category_probs,
-                            judge_id: assigned_judge_id,
-                        });
+                            assigned_judge_id,
+                        ));
                     } else {
                         failed_parse += 1;
                         if let Some(ref file_mutex) = failures_file {
@@ -772,6 +780,569 @@ pub async fn run(args: RankArgs) {
             &judge_names,
             &judge_tokens,
             &judge_avg_wall_time,
+        ),
+    }
+}
+
+/// Three-way (3-item) acquisition loop. Selects triples, asks each judge to rank
+/// them, folds the winner-distribution into up to three pairwise edges, and feeds
+/// those to the same scoring engine the pairwise path uses. `total_comparisons`
+/// here counts LLM calls (triples), so accuracy-per-call is directly comparable
+/// to pairwise; each call contributes up to three edges to the fit.
+async fn run_three_way(
+    args: &RankArgs,
+    config_path: &Path,
+    cfg: &config::NanojudgeConfig,
+    resolved: &crate::resolve::ResolvedConfig,
+) {
+    let mut judges = resolve_judges(&args.cfg, cfg, config_path, resolved.reasoning_enabled);
+    let logprobs_mode = judges[0].logprobs;
+
+    // No-reasoning mode forces max_tokens to 16 (calibrated for a single verdict
+    // line). The 3-way ranking output is three lines (~20 tokens), which 16
+    // truncates — cutting off the third line so the parser discards it. Give it
+    // enough room.
+    if !resolved.reasoning_enabled {
+        for j in &mut judges {
+            j.max_tokens = 48;
+        }
+    }
+
+    if !logprobs_mode {
+        eprintln!("Warning: three-way without logprobs keeps only each triple's winner (2 edges instead of 3, dropping the 2nd-vs-3rd comparison). Enable logprobs for full information.");
+    }
+
+    let (titles, texts) = load_items(args);
+    let item_ids: Vec<i64> = (0..texts.len() as i64).collect();
+
+    if texts.len() < 3 {
+        bail(format!("Three-way comparisons need at least 3 items; got {}.", texts.len()));
+    }
+
+    if matches!(resolved.comparison_distribution, ComparisonDistribution::TopHeavy)
+        && resolved.anchor_index > (texts.len().saturating_sub(1)) as f64
+    {
+        bail(format!(
+            "anchor-index={} exceeds the last rank ({}) for {} items",
+            resolved.anchor_index,
+            texts.len().saturating_sub(1),
+            texts.len(),
+        ));
+    }
+
+    let triples_per_round = calculate_triples_for_round(texts.len());
+
+    let rounds = if let Some(target) = resolved.comparisons {
+        let r = target.div_ceil(triples_per_round);
+        if r == 0 {
+            bail(format!(
+                "--comparisons ({target}) is less than one round ({triples_per_round} three-way comparisons). Use at least {triples_per_round}.",
+            ));
+        }
+        let actual = triples_per_round * r;
+        if actual != target {
+            eprintln!(
+                "Running {} three-way comparisons instead of {}, to align with round boundaries ({} per round).",
+                actual, target, triples_per_round,
+            );
+        }
+        r
+    } else {
+        resolved.rounds.unwrap_or_else(|| {
+            bail(format!("No rounds or comparisons specified. Pass --rounds, --comparisons, or set it in {}", config_path.display()));
+        })
+    };
+
+    let judge_ids: Vec<u64> = judges.iter().map(|j| j.judge_id).collect();
+    let judge_info = JudgeInfo {
+        judge_ids: judge_ids.clone(),
+        logprobs_mode,
+    };
+
+    let judge_llm_configs: Vec<Arc<LlmConfig>> = judges.iter().map(|j| {
+        Arc::new(LlmConfig {
+            endpoint: j.endpoint.clone(),
+            model: j.model.clone(),
+            api_key: j.api_key.clone(),
+            temperature: j.temperature,
+            temperature_jitter: j.temperature_jitter,
+            presence_penalty: j.presence_penalty,
+            top_p: j.top_p,
+            logprobs: j.logprobs,
+            max_tokens: j.max_tokens,
+            reasoning_effort: j.reasoning_effort.clone(),
+            chat_template_kwargs: j.chat_template_kwargs.clone(),
+        })
+    }).collect();
+
+    let judge_semaphores: Vec<Arc<tokio::sync::Semaphore>> = judges.iter()
+        .map(|j| Arc::new(tokio::sync::Semaphore::new(j.concurrency)))
+        .collect();
+
+    let total_weight: f64 = judges.iter().map(|j| j.weight).sum();
+    let normalized_weights: Vec<f64> = judges.iter().map(|j| j.weight / total_weight).collect();
+    let judge_min_logprob_coverages: Vec<f64> = judges.iter().map(|j| j.min_logprob_coverage).collect();
+
+    let criteria: Vec<String> = if let Some(ref path) = args.criterion_file {
+        let content = std::fs::read_to_string(path)
+            .unwrap_or_else(|e| bail(format!("Failed to read criterion file {}: {e}", path.display())));
+        let parts = parse_criteria(&content);
+        if parts.is_empty() {
+            bail(format!("No criteria found in {}", path.display()));
+        }
+        parts
+    } else {
+        vec![args.criterion.clone().unwrap()]
+    };
+
+    let template = Arc::new(resolved.prompt_template.clone());
+
+    let client = Client::new();
+    let titles = Arc::new(titles);
+    let texts = Arc::new(texts);
+
+    let total_planned = triples_per_round * rounds;
+    if resolved.verbose {
+        eprintln!(
+            "Ranking {} items across {} rounds ({} three-way comparisons planned)",
+            texts.len(), rounds, total_planned,
+        );
+        if criteria.len() == 1 {
+            eprintln!("Criterion: \"{}\"", criteria[0]);
+        }
+        if judges.len() == 1 {
+            eprintln!("Endpoint: {} | Model: {}", judges[0].endpoint, judges[0].model);
+        }
+    }
+
+    let save_file = if let Some(ref save_path) = resolved.save_comparisons {
+        let path = resolve_save_path(save_path, "comparisons");
+        let file = std::fs::OpenOptions::new().create(true).append(true).open(&path)
+            .unwrap_or_else(|e| bail(format!("Failed to open {}: {e}", path.display())));
+        if resolved.verbose {
+            eprintln!("Saving comparisons to {}", path.display());
+        }
+        Some(std::sync::Mutex::new(file))
+    } else {
+        None
+    };
+
+    let failures_file = if let Some(ref save_path) = resolved.save_failures {
+        let path = resolve_save_path(save_path, "failures");
+        let file = std::fs::OpenOptions::new().create(true).append(true).open(&path)
+            .unwrap_or_else(|e| bail(format!("Failed to open {}: {e}", path.display())));
+        Some(std::sync::Mutex::new(file))
+    } else {
+        None
+    };
+
+    let comparison_distribution = resolved.comparison_distribution;
+    let selection_sharpness = match comparison_distribution {
+        ComparisonDistribution::TopHeavy => Some(resolved.selection_sharpness),
+        ComparisonDistribution::Uniform => None,
+    };
+
+    let engine_config = EngineConfig {
+        comparison_distribution,
+        matchmaking_sharpness: resolved.matchmaking_sharpness,
+        min_uniform_games: resolved.min_uniform_games,
+        seed: resolved.seed,
+    };
+    let mut engine = RankingEngine::new(&item_ids, engine_config);
+
+    let analysis_length = resolved.analysis_length.clone();
+    let max_retries = resolved.retries;
+
+    let judge_display_names: Arc<Vec<String>> = Arc::new(judges.iter().map(|j| j.display_name.clone()).collect());
+    let judge_models: Arc<Vec<String>> = Arc::new(judges.iter().map(|j| j.model.clone()).collect());
+    let judge_endpoints: Arc<Vec<String>> = Arc::new(judges.iter().map(|j| j.endpoint.clone()).collect());
+
+    // total_comparisons counts LLM calls (successfully-parsed triples).
+    let mut total_comparisons: usize = 0;
+    let mut total_retries: usize = 0;
+    let mut failed_http: usize = 0;
+    let mut failed_parse: usize = 0;
+    let mut judge_stats: Vec<JudgeStats> = (0..judges.len()).map(|_| JudgeStats::default()).collect();
+
+    let cancelled = Arc::new(AtomicBool::new(false));
+    {
+        let cancelled = cancelled.clone();
+        tokio::spawn(async move {
+            let _ = tokio::signal::ctrl_c().await;
+            cancelled.store(true, Ordering::Relaxed);
+        });
+    }
+
+    let mut cumulative_judge_pairs: Vec<usize> = vec![0; judges.len()];
+    let mut cumulative_criterion_pairs: Vec<usize> = vec![0; criteria.len()];
+    let mut cumulative_total_pairs: usize = 0;
+    let mut judge_assign_rng = seed::make_rng(resolved.seed, seed::SUBSYSTEM_JUDGE_ASSIGN);
+    let mut jitter_rng = seed::make_rng(resolved.seed, seed::SUBSYSTEM_TEMP_JITTER);
+    // RNG for shuffling the three items into random presentation slots (A/B/C).
+    // Combined with the engine's per-slot bias correction, this both keeps slot
+    // placement unbiased and lets the bias be estimated out.
+    let mut slot_rng = seed::make_rng(resolved.seed, seed::SUBSYSTEM_EDGE_ORIENTATION);
+
+    let mut interim_warm_start: Option<nanojudge_core::WarmStartState> = None;
+    let mut round_rankings: Vec<(usize, Vec<String>)> = Vec::new();
+
+    for round in 0..rounds {
+        if cancelled.load(Ordering::Relaxed) {
+            break;
+        }
+
+        // Split the round into refit chunks (only top-heavy subdivides); each
+        // chunk runs its own scoring refit and re-derives selection weights.
+        let chunk_sizes = engine.round_chunk_sizes_triples(resolved.refits_per_round);
+        if resolved.verbose {
+            eprintln!(
+                "Round {}/{}: {} triples in {} refit chunk(s)",
+                round + 1, rounds, triples_per_round, chunk_sizes.len(),
+            );
+        }
+
+        for chunk_size in chunk_sizes {
+        if cancelled.load(Ordering::Relaxed) {
+            break;
+        }
+        let triples = engine.generate_triples(chunk_size);
+        let round_start = std::time::Instant::now();
+
+        cumulative_total_pairs += triples.len();
+        let judge_assignments = assign_pairs_to_judges(
+            triples.len(), &normalized_weights, &mut cumulative_judge_pairs,
+            cumulative_total_pairs, &mut judge_assign_rng,
+        );
+        let criterion_weights: Vec<f64> = vec![1.0 / criteria.len() as f64; criteria.len()];
+        let criterion_assignments = assign_pairs_to_judges(
+            triples.len(), &criterion_weights, &mut cumulative_criterion_pairs,
+            cumulative_total_pairs, &mut judge_assign_rng,
+        );
+
+        let precomputed_temperatures: Vec<f64> = (0..triples.len()).map(|idx| {
+            let judge_idx = judge_assignments[idx];
+            let base = judge_llm_configs[judge_idx].temperature;
+            let jitter = judge_llm_configs[judge_idx].temperature_jitter;
+            crate::llm::jittered_temperature(base, jitter, &mut jitter_rng)
+        }).collect();
+
+        let mut handles = Vec::with_capacity(triples.len());
+        for (triple_idx, &(t_a, t_b, t_c)) in triples.iter().enumerate() {
+            // Shuffle the three items into random slot order so no item has a
+            // fixed presentation position (each of the 6 permutations equally
+            // likely). winner_dist stays aligned because compare_triple maps
+            // option A/B/C to whatever ids we pass here.
+            let mut slots = [t_a, t_b, t_c];
+            slots.shuffle(&mut slot_rng);
+            let (id_a, id_b, id_c) = (slots[0], slots[1], slots[2]);
+            let judge_idx = judge_assignments[triple_idx];
+            let sem = judge_semaphores[judge_idx].clone();
+            let client = client.clone();
+            let base_config = &judge_llm_configs[judge_idx];
+            let llm_config = Arc::new(LlmConfig {
+                temperature: precomputed_temperatures[triple_idx],
+                temperature_jitter: 0.0,
+                endpoint: base_config.endpoint.clone(),
+                model: base_config.model.clone(),
+                api_key: base_config.api_key.clone(),
+                presence_penalty: base_config.presence_penalty,
+                top_p: base_config.top_p,
+                logprobs: base_config.logprobs,
+                max_tokens: base_config.max_tokens,
+                reasoning_effort: base_config.reasoning_effort.clone(),
+                chat_template_kwargs: base_config.chat_template_kwargs.clone(),
+            });
+            let texts = texts.clone();
+            let criterion = criteria[criterion_assignments[triple_idx]].clone();
+            let analysis_length = analysis_length.clone();
+            let template = template.clone();
+            let min_logprob_coverage = judge_min_logprob_coverages[judge_idx];
+            let assigned_judge_id = judge_ids[judge_idx];
+            let judge_name = judge_display_names[judge_idx].clone();
+            let verbose = resolved.verbose;
+
+            let handle = tokio::spawn(async move {
+                let _permit = sem.acquire().await.unwrap();
+                let result = compare_triple(
+                    &client, &llm_config, &template, &criterion,
+                    &texts[id_a as usize], &texts[id_b as usize], &texts[id_c as usize],
+                    id_a, id_b, id_c,
+                    min_logprob_coverage, &analysis_length, max_retries, verbose, &judge_name,
+                ).await;
+                (result, assigned_judge_id, judge_idx, std::time::Instant::now())
+            });
+            handles.push((handle, judge_idx));
+        }
+
+        let mut round_results: Vec<ComparisonInput> = Vec::new();
+        let mut round_llm_calls: usize = 0;
+        let mut judge_last_finish: Vec<Option<std::time::Instant>> = vec![None; judges.len()];
+        let mut judge_aborted: Vec<usize> = vec![0; judges.len()];
+
+        for (handle, handle_judge_idx) in handles {
+            if cancelled.load(Ordering::Relaxed) {
+                handle.abort();
+                judge_aborted[handle_judge_idx] += 1;
+                continue;
+            }
+            let cancelled_ref = &cancelled;
+            let result = tokio::select! {
+                r = handle => r,
+                _ = async { while !cancelled_ref.load(Ordering::Relaxed) { tokio::time::sleep(std::time::Duration::from_millis(50)).await; } } => {
+                    judge_aborted[handle_judge_idx] += 1;
+                    continue;
+                }
+            };
+            match result {
+                Ok((Ok(tw), assigned_judge_id, judge_idx, finished_at)) => {
+                    let entry = &mut judge_last_finish[judge_idx];
+                    if entry.is_none() || finished_at > entry.unwrap() {
+                        *entry = Some(finished_at);
+                    }
+                    total_retries += tw.retries_used;
+                    judge_stats[judge_idx].total_responses += 1;
+                    if tw.hit_max_tokens {
+                        judge_stats[judge_idx].max_tokens_hits += 1;
+                    }
+                    if let Some(usage) = &tw.usage {
+                        judge_stats[judge_idx].input_tokens += usage.prompt_tokens;
+                        judge_stats[judge_idx].output_tokens += usage.completion_tokens;
+                    }
+                    if let Some(winner_dist) = tw.winner_dist {
+                        round_llm_calls += 1;
+                        if let Some(ref file_mutex) = save_file {
+                            let line = serde_json::json!({
+                                "round": round + 1,
+                                "item1": titles[tw.item_a_id as usize],
+                                "item2": titles[tw.item_b_id as usize],
+                                "item3": titles[tw.item_c_id as usize],
+                                "winner_dist": winner_dist,
+                                "judge_model": judge_models[judge_idx],
+                                "judge_endpoint": judge_endpoints[judge_idx],
+                                "response": tw.response_text,
+                            });
+                            let mut f = file_mutex.lock().unwrap();
+                            let _ = writeln!(f, "{}", line);
+                            let _ = f.flush();
+                        }
+
+                        // Each edge already carries the true presentation slots
+                        // (from the shuffled A/B/C order), so the scoring engine
+                        // estimates and corrects the per-slot positional bias — no
+                        // orientation coin needed. Feed the edges as-is.
+                        let edges = winner_dist_to_edges(
+                            [tw.item_a_id, tw.item_b_id, tw.item_c_id],
+                            winner_dist,
+                            assigned_judge_id,
+                        );
+                        round_results.extend(edges);
+                    } else {
+                        failed_parse += 1;
+                        if let Some(ref file_mutex) = failures_file {
+                            let line = serde_json::json!({
+                                "round": round + 1,
+                                "item1": titles[tw.item_a_id as usize],
+                                "item2": titles[tw.item_b_id as usize],
+                                "item3": titles[tw.item_c_id as usize],
+                                "judge_model": judge_models[judge_idx],
+                                "judge_endpoint": judge_endpoints[judge_idx],
+                                "prompt": tw.prompt,
+                                "response": tw.response_text,
+                            });
+                            let mut f = file_mutex.lock().unwrap();
+                            let _ = writeln!(f, "{}", line);
+                            let _ = f.flush();
+                        }
+                        if resolved.verbose {
+                            eprintln!(
+                                "  Warning: unparseable 3-way ranking for {} / {} / {}, skipping",
+                                titles[tw.item_a_id as usize],
+                                titles[tw.item_b_id as usize],
+                                titles[tw.item_c_id as usize],
+                            );
+                        }
+                    }
+                }
+                Ok((Err(e), _judge_id, judge_idx, finished_at)) => {
+                    let entry = &mut judge_last_finish[judge_idx];
+                    if entry.is_none() || finished_at > entry.unwrap() {
+                        *entry = Some(finished_at);
+                    }
+                    failed_http += 1;
+                    if resolved.verbose {
+                        eprintln!(
+                            "  Error [{}] (after exhausting {} retries): {e}",
+                            judge_display_names[judge_idx], max_retries,
+                        );
+                    }
+                }
+                Err(e) => {
+                    failed_http += 1;
+                    if resolved.verbose {
+                        eprintln!("  Task panicked: {e}");
+                    }
+                }
+            }
+        }
+
+        if cancelled.load(Ordering::Relaxed) {
+            for (i, judge) in judges.iter().enumerate() {
+                if judge_aborted[i] > 0 {
+                    eprintln!("  {} had {} in-flight requests", judge.display_name, judge_aborted[i]);
+                }
+            }
+            break;
+        }
+
+        for (j, finish) in judge_last_finish.iter().enumerate() {
+            if let Some(t) = finish {
+                judge_stats[j].wall_time_sum += t.duration_since(round_start).as_secs_f64();
+                judge_stats[j].round_count += 1;
+            }
+        }
+
+        total_comparisons += round_llm_calls;
+
+        if resolved.verbose {
+            eprintln!(
+                "  Completed: {} successful, {} failed ({} edges fed)",
+                round_llm_calls, triples.len() - round_llm_calls, round_results.len(),
+            );
+        }
+
+        if round_llm_calls == 0 && !triples.is_empty() {
+            eprintln!(
+                "Warning: all {} three-way comparisons in a round-{} chunk failed.",
+                triples.len(), round + 1,
+            );
+        }
+
+        engine.record_results(&round_results);
+        engine.update_current_ratings();
+
+        let need_interim = matches!(comparison_distribution, ComparisonDistribution::TopHeavy)
+            || resolved.live_top.is_some()
+            || resolved.emit_round_rankings;
+        if need_interim && !engine.completed_comparisons.is_empty() {
+            let interim = run_scoring(
+                &item_ids,
+                &engine.completed_comparisons,
+                &ScoringOptions {
+                    iterations: resolved.mcmc_iterations,
+                    burn_in: if interim_warm_start.is_some() { 0 } else { 100 },
+                    confidence_level: resolved.confidence_level,
+                    selection_sharpness,
+                    anchor_index: resolved.anchor_index,
+                    selection_cutoff: resolved.selection_cutoff,
+                    selection_coverage: resolved.selection_coverage,
+                    target_prior_games: resolved.target_prior_games,
+                    warm_start: interim_warm_start.take(),
+                    regularization_strength: resolved.regularization_strength,
+                    prior_tau2: resolved.prior_tau2,
+                    proposal_std: resolved.proposal_std,
+                    bias_prior_tau2: resolved.bias_prior_tau2,
+                    bias_proposal_std: resolved.bias_proposal_std,
+                    bias_prior_logit: resolved.bias_prior_logit,
+                    seed: resolved.seed,
+                    inference: resolved.inference,
+                },
+                &judge_info,
+            );
+            if resolved.emit_round_rankings {
+                let order: Vec<String> = interim.rankings.iter()
+                    .map(|r| titles[r.item as usize].clone())
+                    .collect();
+                round_rankings.push((total_comparisons, order));
+            }
+            if matches!(comparison_distribution, ComparisonDistribution::TopHeavy) {
+                engine.selection_weights = interim.selection_weights;
+            }
+            if let Some(limit) = resolved.live_top {
+                output::print_live_table(&interim.rankings, &titles, round + 1, total_comparisons, limit);
+            }
+            interim_warm_start = Some(interim.warm_start_state);
+        }
+        }
+    }
+
+    if cancelled.load(Ordering::Relaxed) {
+        eprintln!("\nCancelled. {} three-way comparisons completed before interrupt.", total_comparisons);
+    }
+
+    if total_comparisons == 0 {
+        bail("All three-way comparisons failed. No results to score.");
+    }
+
+    if resolved.verbose {
+        eprintln!("Running final MCMC scoring ({} three-way comparisons, {} edges)...",
+            total_comparisons, engine.completed_comparisons.len());
+    }
+
+    let scoring_result = run_scoring(
+        &item_ids,
+        &engine.completed_comparisons,
+        &ScoringOptions {
+            iterations: resolved.mcmc_iterations,
+            burn_in: resolved.mcmc_burn_in,
+            confidence_level: resolved.confidence_level,
+            selection_sharpness: None,
+            anchor_index: resolved.anchor_index,
+            selection_cutoff: resolved.selection_cutoff,
+            selection_coverage: resolved.selection_coverage,
+            target_prior_games: resolved.target_prior_games,
+            warm_start: None,
+            regularization_strength: resolved.regularization_strength,
+            prior_tau2: resolved.prior_tau2,
+            proposal_std: resolved.proposal_std,
+            bias_prior_tau2: resolved.bias_prior_tau2,
+            bias_proposal_std: resolved.bias_proposal_std,
+            bias_prior_logit: resolved.bias_prior_logit,
+            seed: resolved.seed,
+            inference: resolved.inference,
+        },
+        &judge_info,
+    );
+
+    if resolved.verbose {
+        if total_retries > 0 {
+            eprintln!("HTTP retries: {total_retries}");
+        }
+        if failed_http > 0 {
+            eprintln!("HTTP failures (after exhausting retries): {failed_http}");
+        }
+        if failed_parse > 0 {
+            eprintln!("Unparseable rankings: {failed_parse}");
+        }
+    }
+
+    let judge_names: HashMap<u64, String> = judges.iter()
+        .map(|j| (j.judge_id, j.display_name.clone()))
+        .collect();
+    let judge_tokens: HashMap<u64, (u64, u64)> = judges.iter().enumerate()
+        .map(|(i, j)| (j.judge_id, (judge_stats[i].input_tokens, judge_stats[i].output_tokens)))
+        .collect();
+    let judge_avg_wall_time: HashMap<u64, f64> = judges.iter().enumerate()
+        .map(|(i, j)| {
+            let avg = if judge_stats[i].round_count > 0 {
+                judge_stats[i].wall_time_sum / judge_stats[i].round_count as f64
+            } else {
+                0.0
+            };
+            (j.judge_id, avg)
+        })
+        .collect();
+
+    match resolved.output_format {
+        OutputFormat::Json => output::print_json(
+            &scoring_result.rankings, &titles, &engine.games_played, rounds, total_comparisons,
+            &scoring_result.judge_analytics,
+            scoring_result.panel_positional_bias, scoring_result.panel_positional_bias_ci,
+            if resolved.emit_round_rankings { Some(round_rankings.as_slice()) } else { None },
+        ),
+        OutputFormat::Table => output::print_table(
+            &scoring_result.rankings, &titles, &engine.games_played, rounds, total_comparisons,
+            resolved.confidence_level, &scoring_result.judge_analytics,
+            &judge_names, &judge_tokens, &judge_avg_wall_time,
         ),
     }
 }

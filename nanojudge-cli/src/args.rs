@@ -73,6 +73,14 @@ pub struct ConfigArgs {
     #[arg(long)]
     pub comparison_distribution: Option<String>,
 
+    /// How many items each judgment compares at once: 2 (pairwise, default) or 3.
+    /// With 3, each judgment ranks three items and the winner-distribution is
+    /// folded into up to three pairwise edges, so one LLM call yields more
+    /// comparisons. 3 needs logprobs for full information (text mode keeps only
+    /// the winner).
+    #[arg(long)]
+    pub items_per_comparison: Option<usize>,
+
     /// Top-heavy selection sharpness: each item's uncertainty ratio around the
     /// anchor — min/max of the posterior area above vs below the anchor's mean,
     /// 1 = straddles the anchor, near 0 = confidently on one side — is raised

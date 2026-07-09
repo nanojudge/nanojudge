@@ -41,6 +41,8 @@ pub struct NanojudgeConfig {
     pub logprobs: Option<bool>,
     pub analysis_length: Option<String>,
     pub comparison_distribution: Option<String>,
+    /// How many items each judgment compares at once: 2 (pairwise) or 3 (three-way).
+    pub items_per_comparison: Option<usize>,
     pub selection_sharpness: Option<f64>,
     pub anchor_index: Option<f64>,
     pub cutoff: Option<f64>,
@@ -108,6 +110,12 @@ const DEFAULT_CONFIG_TEMPLATE: &str = "\
 # Comparison distribution: \"uniform\" or \"top-heavy\".
 # Uniform gives equal attention to all items. Top-heavy focuses on contenders.
 # comparison_distribution = \"uniform\"
+
+# How many items each judgment compares at once: 2 (pairwise, default) or 3.
+# With 3, each judgment ranks three items and is folded into up to three pairwise
+# comparisons, so one LLM call yields more information. Requires logprobs for the
+# full benefit.
+# items_per_comparison = 2
 
 # Tuning for the top-heavy distribution. Each item's pairing weight is its
 # uncertainty ratio around the anchor: min/max of the posterior area above vs

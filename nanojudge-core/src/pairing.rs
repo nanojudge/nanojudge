@@ -8,7 +8,7 @@ use rand::seq::SliceRandom;
 
 use crate::constants::OPPONENT_WINDOW_SIZE;
 use crate::seed::make_rng;
-use crate::types::{IndexedPair, Pair};
+use crate::types::{IndexedPair, IndexedTriple, Pair};
 
 /// Comparison distribution enum.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -476,6 +476,248 @@ pub(crate) fn generate_top_heavy_pairings_indexed(
     pairs
 }
 
+// ---------------------------------------------------------------------------
+// Triple generation (3-way comparisons)
+// ---------------------------------------------------------------------------
+//
+// A 3-way comparison shows the judge three items at once. Triple selection
+// mirrors pair selection stage-for-stage — random, then nearest-neighbour, then
+// info-gain matchmaking — but groups items in threes. No position orientation
+// is assigned here: 3-slot positional bias is not modelled in this version, and
+// the caller randomizes each folded edge's orientation instead.
+
+/// Number of triples in one full round: every item gets compared roughly once
+/// (integer division drops the 1–2 leftover items, same as `num_items / 2` for
+/// pairs).
+pub fn calculate_triples_for_round(num_items: usize) -> usize {
+    num_items / 3
+}
+
+/// Generate uniform triples for a round. Mirrors
+/// `generate_uniform_pairings_indexed`: round 1 (0 games) random triples;
+/// round 2 (1 game) rating-adjacent triples; round 3+ info-gain triples.
+pub(crate) fn generate_uniform_triples_indexed(
+    num_items: usize,
+    triples_count: usize,
+    current_ratings: &[f64],
+    sharpness: f64,
+    games_played: &[usize],
+    rng: &mut StdRng,
+) -> Vec<IndexedTriple> {
+    if num_items < 3 {
+        return Vec::new();
+    }
+    let rounds_completed = games_played.iter().copied().max().unwrap_or(0);
+    if rounds_completed == 0 {
+        random_triples(num_items, triples_count, rng)
+    } else if rounds_completed == 1 {
+        nearest_neighbour_triples(num_items, current_ratings, triples_count, rng)
+    } else {
+        info_gain_triples(num_items, current_ratings, sharpness, triples_count, rng)
+    }
+}
+
+/// Round 1: no ratings yet — group items into random triples.
+fn random_triples(num_items: usize, max_triples: usize, rng: &mut impl Rng) -> Vec<IndexedTriple> {
+    let mut order: Vec<usize> = (0..num_items).collect();
+    order.shuffle(rng);
+    order
+        .chunks_exact(3)
+        .take(max_triples)
+        .map(|c| (c[0], c[1], c[2]))
+        .collect()
+}
+
+/// Round 2: sort by rating and group adjacent rating-neighbours into triples.
+/// Shuffle before the stable sort so equal-rated items order randomly.
+fn nearest_neighbour_triples(
+    num_items: usize,
+    current_ratings: &[f64],
+    max_triples: usize,
+    rng: &mut impl Rng,
+) -> Vec<IndexedTriple> {
+    let mut pool: Vec<(usize, f64)> = (0..num_items).map(|i| (i, current_ratings[i])).collect();
+    pool.shuffle(rng);
+    pool.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
+    pool.chunks_exact(3)
+        .take(max_triples)
+        .map(|c| (c[0].0, c[1].0, c[2].0))
+        .collect()
+}
+
+/// Round 3+: info-gain triples. Pick a random unpaired item1, then draw two
+/// distinct opponents from the rating window around it, each weighted by info
+/// gain so closely-matched (more informative) trios are favoured. All three are
+/// removed once grouped. Mirrors `info_gain_pairs` with two opponent draws.
+fn info_gain_triples(
+    num_items: usize,
+    current_ratings: &[f64],
+    sharpness: f64,
+    max_triples: usize,
+    rng: &mut impl Rng,
+) -> Vec<IndexedTriple> {
+    let mut sorted_pool: Vec<(usize, f64)> = (0..num_items)
+        .map(|i| (i, current_ratings[i]))
+        .collect();
+    sorted_pool.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
+
+    let n = sorted_pool.len();
+    let mut alive = vec![true; n];
+    let mut live_positions: Vec<usize> = (0..n).collect();
+    let mut live_idx_of: Vec<Option<usize>> = (0..n).map(Some).collect();
+    let half_w = OPPONENT_WINDOW_SIZE / 2;
+
+    let mut triples: Vec<IndexedTriple> = Vec::with_capacity(max_triples);
+
+    for _ in 0..max_triples {
+        if live_positions.len() < 3 {
+            break;
+        }
+
+        // item1: random live entry.
+        let live_idx1 = rng.random_range(0..live_positions.len());
+        let pos1 = swap_remove_live(&mut live_positions, &mut live_idx_of, live_idx1);
+        alive[pos1] = false;
+        let (item1, item1_rating) = sorted_pool[pos1];
+
+        // Two opponents from the rating window around pos1.
+        let mut picked: Vec<usize> = Vec::with_capacity(2);
+        for _ in 0..2 {
+            if let Some(pos) = pick_window_opponent(
+                &sorted_pool, &alive, pos1, item1_rating, sharpness, half_w, n, rng,
+            ) {
+                let live_idx = live_idx_of[pos].expect("candidate must be alive");
+                swap_remove_live(&mut live_positions, &mut live_idx_of, live_idx);
+                alive[pos] = false;
+                picked.push(pos);
+            }
+        }
+        if picked.len() < 2 {
+            // Window around item1 was exhausted — skip item1 this round.
+            continue;
+        }
+        triples.push((item1, sorted_pool[picked[0]].0, sorted_pool[picked[1]].0));
+    }
+
+    triples
+}
+
+/// Pick one alive opponent from the rating window around `pos1`, weighted by
+/// info gain against `item1_rating`. Returns the chosen sorted-pool position, or
+/// `None` if the window holds no alive candidates. Does not mutate `alive` — the
+/// caller marks the returned position dead.
+#[allow(clippy::too_many_arguments)]
+fn pick_window_opponent(
+    sorted_pool: &[(usize, f64)],
+    alive: &[bool],
+    pos1: usize,
+    item1_rating: f64,
+    sharpness: f64,
+    half_w: usize,
+    n: usize,
+    rng: &mut impl Rng,
+) -> Option<usize> {
+    let window_start = pos1.saturating_sub(half_w);
+    let window_end = (pos1 + half_w + 1).min(n);
+    let mut candidates: Vec<usize> = Vec::new();
+    let mut weights: Vec<f64> = Vec::new();
+    for p in window_start..window_end {
+        if alive[p] {
+            candidates.push(p);
+            weights.push(calculate_info_gain(item1_rating, sorted_pool[p].1, sharpness));
+        }
+    }
+    if candidates.is_empty() {
+        return None;
+    }
+    let total_weight: f64 = weights.iter().sum();
+    let selected = if total_weight == 0.0 {
+        rng.random_range(0..candidates.len())
+    } else {
+        weighted_random_select(&weights, total_weight, rng)
+    };
+    Some(candidates[selected])
+}
+
+/// Generate top-heavy triples. item1 is sampled from the selection weights
+/// (concentrating on contenders); item2 and item3 are two distinct info-gain
+/// opponents from the rating window around item1. Mirrors
+/// `generate_top_heavy_pairings_indexed` with a second opponent draw.
+pub(crate) fn generate_top_heavy_triples_indexed(
+    num_items: usize,
+    triples_count: usize,
+    selection_weights: &[f64],
+    current_ratings: &[f64],
+    matchmaking_sharpness: f64,
+    rng: &mut StdRng,
+) -> Vec<IndexedTriple> {
+    if num_items < 3 {
+        return Vec::new();
+    }
+    assert_eq!(selection_weights.len(), num_items, "selection_weights length mismatch");
+    assert_eq!(current_ratings.len(), num_items, "current_ratings length mismatch");
+
+    let total_weight: f64 = selection_weights.iter().sum();
+    assert!(
+        total_weight > 0.0,
+        "top-heavy triple selection requires positive total item-selection weight"
+    );
+
+    let mut sorted_pool: Vec<(usize, f64)> = (0..num_items)
+        .map(|i| (i, current_ratings[i]))
+        .collect();
+    sorted_pool.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
+    let mut sorted_position = vec![0usize; num_items];
+    for (pos, &(item, _)) in sorted_pool.iter().enumerate() {
+        sorted_position[item] = pos;
+    }
+
+    let half_w = OPPONENT_WINDOW_SIZE / 2;
+    let n = num_items;
+
+    let mut triples: Vec<IndexedTriple> = Vec::with_capacity(triples_count);
+
+    for _ in 0..triples_count {
+        let item1 = weighted_random_select(selection_weights, total_weight, rng);
+        let item1_rating = current_ratings[item1];
+        let pos1 = sorted_position[item1];
+
+        // Two distinct opponents from the window around item1. `chosen` marks
+        // item1 and any already-picked opponent as unavailable within this
+        // triple (sampling item1 is with-replacement across triples, so no
+        // global alive array — exclusion is per-triple).
+        let mut chosen = vec![false; n];
+        chosen[pos1] = true;
+        let mut opponents: Vec<usize> = Vec::with_capacity(2);
+        for _ in 0..2 {
+            let window_start = pos1.saturating_sub(half_w);
+            let window_end = (pos1 + half_w + 1).min(n);
+            let mut candidates: Vec<usize> = Vec::new();
+            let mut weights: Vec<f64> = Vec::new();
+            for p in window_start..window_end {
+                if !chosen[p] {
+                    candidates.push(p);
+                    weights.push(calculate_info_gain(item1_rating, sorted_pool[p].1, matchmaking_sharpness));
+                }
+            }
+            // For num_items >= 3 the window always holds two other items.
+            debug_assert!(!candidates.is_empty(), "top-heavy triple window was empty");
+            let total_candidate_weight: f64 = weights.iter().sum();
+            let selected = if total_candidate_weight == 0.0 {
+                rng.random_range(0..candidates.len())
+            } else {
+                weighted_random_select(&weights, total_candidate_weight, rng)
+            };
+            let pos = candidates[selected];
+            chosen[pos] = true;
+            opponents.push(sorted_pool[pos].0);
+        }
+        triples.push((item1, opponents[0], opponents[1]));
+    }
+
+    triples
+}
+
 /// Sample an index proportionally to `weights` (non-negative, summing to
 /// `total_weight > 0`). Scale-invariant: `r` and the weights shrink together,
 /// so it behaves identically whether the weights sum to 1e-40 or 1e+40 — no
@@ -764,6 +1006,84 @@ mod tests {
         // A uniformly-random opponent over ratings 0..9 averages a gap of ~3.3;
         // info-gain matchmaking pulls this well below that.
         assert!(mean_gap < 2.5, "info-gain opponents should be rating-local; mean gap was {mean_gap}");
+    }
+
+    // --- Triple generation tests ---
+
+    #[test]
+    fn test_calculate_triples_for_round() {
+        assert_eq!(calculate_triples_for_round(9), 3);
+        assert_eq!(calculate_triples_for_round(10), 3);
+        assert_eq!(calculate_triples_for_round(3), 1);
+        assert_eq!(calculate_triples_for_round(2), 0);
+    }
+
+    /// All three members of every triple are distinct.
+    fn assert_triples_distinct(triples: &[IndexedTriple]) {
+        for &(a, b, c) in triples {
+            assert!(a != b && a != c && b != c, "triple ({a},{b},{c}) has a repeat");
+        }
+    }
+
+    #[test]
+    fn test_uniform_triples_round1_random_distinct() {
+        let ratings = vec![1.0; 12];
+        let games = vec![0usize; 12]; // round 1
+        let mut rng = make_rng(Some(1), crate::seed::SUBSYSTEM_PAIRING);
+        let triples = generate_uniform_triples_indexed(12, 4, &ratings, 1.0, &games, &mut rng);
+        assert_eq!(triples.len(), 4);
+        assert_triples_distinct(&triples);
+    }
+
+    #[test]
+    fn test_uniform_triples_info_gain_stage_distinct() {
+        let ratings: Vec<f64> = (0..12).map(|i| i as f64).collect();
+        let games = vec![2usize; 12]; // round 3+ info-gain stage
+        let mut rng = make_rng(Some(2), crate::seed::SUBSYSTEM_PAIRING);
+        let triples = generate_uniform_triples_indexed(12, 4, &ratings, 1.0, &games, &mut rng);
+        assert_eq!(triples.len(), 4);
+        assert_triples_distinct(&triples);
+    }
+
+    #[test]
+    fn test_top_heavy_triples_distinct_and_sized() {
+        let selection_weights: Vec<f64> = (0..10).map(|i| if i < 3 { 0.8 } else { 0.05 }).collect();
+        let ratings: Vec<f64> = (0..10).map(|i| i as f64).collect();
+        let mut rng = make_rng(Some(3), crate::seed::SUBSYSTEM_PAIRING);
+        let triples = generate_top_heavy_triples_indexed(10, 5, &selection_weights, &ratings, 1.0, &mut rng);
+        assert_eq!(triples.len(), 5);
+        assert_triples_distinct(&triples);
+    }
+
+    #[test]
+    fn test_top_heavy_triples_concentrate_on_contenders() {
+        // Items 0,1,2 hold the weight and share a high rating; the rest are near
+        // zero. Every triple's item1 is a contender, and its info-gain opponents
+        // are the nearest in rating (also contenders), so the top three vastly
+        // out-appear the tail.
+        let selection_weights: Vec<f64> = (0..12).map(|i| if i < 3 { 1.0 } else { 0.0001 }).collect();
+        let ratings: Vec<f64> = (0..12).map(|i| if i < 3 { 5.0 } else { 0.0 }).collect();
+        let mut rng = make_rng(Some(4), crate::seed::SUBSYSTEM_PAIRING);
+        let triples = generate_top_heavy_triples_indexed(12, 200, &selection_weights, &ratings, 1.0, &mut rng);
+        let mut appearances = [0usize; 12];
+        for &(a, b, c) in &triples {
+            appearances[a] += 1;
+            appearances[b] += 1;
+            appearances[c] += 1;
+        }
+        let top_3: usize = appearances[0] + appearances[1] + appearances[2];
+        let tail: usize = appearances[3..].iter().sum();
+        assert!(top_3 > tail, "contenders ({top_3}) should out-appear tail ({tail})");
+    }
+
+    #[test]
+    fn test_triples_empty_below_three_items() {
+        let ratings = vec![1.0; 2];
+        let games = vec![0usize; 2];
+        let mut rng = make_rng(Some(5), crate::seed::SUBSYSTEM_PAIRING);
+        assert!(generate_uniform_triples_indexed(2, 4, &ratings, 1.0, &games, &mut rng).is_empty());
+        let weights = vec![1.0; 2];
+        assert!(generate_top_heavy_triples_indexed(2, 4, &weights, &ratings, 1.0, &mut rng).is_empty());
     }
 
     #[test]

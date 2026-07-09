@@ -25,8 +25,8 @@
 //!
 //! // category_probs = [P(A clear win), P(B narrow win), P(C narrow loss), P(D clear loss)]
 //! let comparisons = vec![
-//!     ComparisonInput { item1: 100, item2: 200, category_probs: [0.0, 1.0, 0.0, 0.0], judge_id },
-//!     ComparisonInput { item1: 200, item2: 300, category_probs: [0.7, 0.3, 0.0, 0.0], judge_id },
+//!     ComparisonInput { slot1: 0, slot2: 1, item1: 100, item2: 200, category_probs: [0.0, 1.0, 0.0, 0.0], judge_id },
+//!     ComparisonInput { slot1: 0, slot2: 1, item1: 200, item2: 300, category_probs: [0.7, 0.3, 0.0, 0.0], judge_id },
 //! ];
 //!
 //! let judge_info = JudgeInfo {
@@ -67,6 +67,7 @@ pub mod laplace_bt;
 pub mod pairing;
 pub mod scoring;
 pub mod seed;
+pub mod three_way;
 pub mod types;
 
 // Re-export primary public API at crate root.
@@ -76,10 +77,11 @@ pub use engine::{
     RankingEngine,
 };
 pub use pairing::{
-    calculate_info_gain, generate_uniform_pairings, generate_top_heavy_pairings,
-    get_effective_comparison_distribution, ComparisonDistribution,
+    calculate_info_gain, calculate_triples_for_round, generate_uniform_pairings,
+    generate_top_heavy_pairings, get_effective_comparison_distribution, ComparisonDistribution,
 };
 pub use scoring::run_scoring;
+pub use three_way::winner_dist_to_edges;
 pub use types::{
     stable_hash, ComparisonInput, InferenceMode, JudgeAnalytics, JudgeInfo, Pair, RankedItem,
     ScoringOptions, ScoringResult, WarmStartState,

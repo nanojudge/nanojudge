@@ -124,6 +124,36 @@ fn extract_items(prompt: &str) -> (String, String) {
     (item1, item2)
 }
 
+/// True if this is a three-way (3-item) comparison prompt.
+fn is_three_way(prompt: &str) -> bool {
+    prompt.contains("Option A:\n")
+}
+
+/// Extract the three item texts from a three-way prompt. Mirrors `extract_items`
+/// but for the "Option A:/Option B:/Option C:" layout.
+fn extract_three_items(prompt: &str) -> (String, String, String) {
+    let a_marker = "Option A:\n";
+    let b_marker = "Option B:\n";
+    let c_marker = "Option C:\n";
+
+    let a_start = prompt.find(a_marker).expect("prompt missing 'Option A:' marker") + a_marker.len();
+    let b_pos = prompt.find(b_marker).expect("prompt missing 'Option B:' marker");
+    let item_a = prompt[a_start..b_pos].trim().to_string();
+
+    let b_start = b_pos + b_marker.len();
+    let c_pos = prompt.find(c_marker).expect("prompt missing 'Option C:' marker");
+    let item_b = prompt[b_start..c_pos].trim().to_string();
+
+    let c_start = c_pos + c_marker.len();
+    let c_end = prompt[c_start..]
+        .find("\n\nInstructions:")
+        .map(|p| c_start + p)
+        .unwrap_or(prompt.len());
+    let item_c = prompt[c_start..c_end].trim().to_string();
+
+    (item_a, item_b, item_c)
+}
+
 // ---------------------------------------------------------------------------
 // Verdict generation
 // ---------------------------------------------------------------------------
@@ -198,6 +228,99 @@ fn build_logprobs_payload(letter: char) -> ChoiceLogprobs {
     }
 }
 
+/// Softmax over three strengths, numerically stabilized.
+fn softmax3(vals: [f64; 3]) -> [f64; 3] {
+    let m = vals[0].max(vals[1]).max(vals[2]);
+    let e = [(vals[0] - m).exp(), (vals[1] - m).exp(), (vals[2] - m).exp()];
+    let sum = e[0] + e[1] + e[2];
+    [e[0] / sum, e[1] / sum, e[2] / sum]
+}
+
+/// Sample an index from a length-3 probability vector.
+fn sample3(p: [f64; 3], rng: &mut impl Rng) -> usize {
+    let r: f64 = rng.random();
+    if r < p[0] {
+        0
+    } else if r < p[0] + p[1] {
+        1
+    } else {
+        2
+    }
+}
+
+/// A three-way ranking drawn from the Plackett-Luce model on the three
+/// strengths: sample 1st place ∝ softmax(strength), then 2nd place ∝ softmax
+/// among the remaining two. Returns the sampled order (indices into A,B,C), the
+/// 1st-place distribution `p1` over all three, and the 2nd-place distribution
+/// `p2` over the three (mass only on the two non-winners).
+fn three_way_ranking(
+    strengths: [f64; 3],
+    rng: &mut impl Rng,
+) -> ([usize; 3], [f64; 3], [f64; 3]) {
+    let p1 = softmax3(strengths);
+    let first = sample3(p1, rng);
+
+    // Remaining two, softmax over just their strengths.
+    let rest: Vec<usize> = (0..3).filter(|&i| i != first).collect();
+    let (i, j) = (rest[0], rest[1]);
+    let m = strengths[i].max(strengths[j]);
+    let (ei, ej) = ((strengths[i] - m).exp(), (strengths[j] - m).exp());
+    let (pi, pj) = (ei / (ei + ej), ej / (ei + ej));
+
+    let second_is_i = rng.random::<f64>() < pi;
+    let second = if second_is_i { i } else { j };
+    let third = if second_is_i { j } else { i };
+
+    let mut p2 = [0.0_f64; 3];
+    p2[i] = pi;
+    p2[j] = pj;
+
+    ([first, second, third], p1, p2)
+}
+
+const RANK_LETTERS: [char; 3] = ['A', 'B', 'C'];
+
+/// Render the three-way ranking as the "Nth place is Option X" lines the
+/// default three-way template asks for.
+fn three_way_text(order: [usize; 3]) -> String {
+    format!(
+        "First place is Option {}\nSecond place is Option {}\nThird place is Option {}",
+        RANK_LETTERS[order[0]], RANK_LETTERS[order[1]], RANK_LETTERS[order[2]],
+    )
+}
+
+/// Build the logprobs payload for a three-way ranking. Each "Nth place is
+/// Option" line ends in a letter token carrying that slot's distribution over
+/// A/B/C: 1st gets `p1`, 2nd gets `p2` (mass on the two non-winners), 3rd is
+/// one-hot on the remaining option. "Option" is the parser's anchor.
+fn build_three_way_logprobs(order: [usize; 3], p1: [f64; 3], p2: [f64; 3]) -> ChoiceLogprobs {
+    let mut p3 = [0.0_f64; 3];
+    p3[order[2]] = 1.0;
+
+    let slot = |ordinal: &str, letter_idx: usize, dist: [f64; 3]| -> Vec<LogprobToken> {
+        let top: Vec<TopLogprobEntry> = (0..3)
+            .map(|i| TopLogprobEntry {
+                token: RANK_LETTERS[i].to_string(),
+                logprob: if dist[i] > 0.0 { dist[i].ln() } else { -100.0 },
+            })
+            .collect();
+        vec![
+            LogprobToken { token: ordinal.to_string(), top_logprobs: None },
+            LogprobToken { token: " place".to_string(), top_logprobs: None },
+            LogprobToken { token: " is".to_string(), top_logprobs: None },
+            LogprobToken { token: " Option".to_string(), top_logprobs: None },
+            LogprobToken { token: format!(" {}", RANK_LETTERS[letter_idx]), top_logprobs: Some(top) },
+            LogprobToken { token: "\n".to_string(), top_logprobs: None },
+        ]
+    };
+
+    let mut content = Vec::new();
+    content.extend(slot("First", order[0], p1));
+    content.extend(slot("Second", order[1], p2));
+    content.extend(slot("Third", order[2], p3));
+    ChoiceLogprobs { content }
+}
+
 // ---------------------------------------------------------------------------
 // Handler
 // ---------------------------------------------------------------------------
@@ -207,6 +330,12 @@ async fn handle_chat(
     Json(request): Json<ChatRequest>,
 ) -> Json<ChatResponse> {
     let prompt = &request.messages.last().expect("empty messages array").content;
+    let want_logprobs = request.logprobs.unwrap_or(false);
+
+    if is_three_way(prompt) {
+        return handle_three_way(state, prompt, want_logprobs);
+    }
+
     let (item1, item2) = extract_items(prompt);
 
     let s1 = *state
@@ -232,8 +361,6 @@ async fn handle_chat(
         verdict_letter(s1, s2, &mut rng)
     };
 
-    let want_logprobs = request.logprobs.unwrap_or(false);
-
     Json(ChatResponse {
         choices: vec![Choice {
             message: ResponseMessage {
@@ -250,6 +377,55 @@ async fn handle_chat(
         usage: ResponseUsage {
             prompt_tokens: 50,
             completion_tokens: 5,
+        },
+    })
+}
+
+/// Handle a three-way comparison request: draw a Plackett-Luce ranking from the
+/// three items' strengths and return it (with per-slot logprobs when requested).
+fn handle_three_way(
+    state: Arc<JudgeState>,
+    prompt: &str,
+    want_logprobs: bool,
+) -> Json<ChatResponse> {
+    let (item_a, item_b, item_c) = extract_three_items(prompt);
+    let sa = *state.strengths.get(&item_a).unwrap_or_else(|| panic!("unknown item: {item_a:?}"));
+    let sb = *state.strengths.get(&item_b).unwrap_or_else(|| panic!("unknown item: {item_b:?}"));
+    let sc = *state.strengths.get(&item_c).unwrap_or_else(|| panic!("unknown item: {item_c:?}"));
+
+    // Independent draw per repeated (ordered) triple, keyed via the shared
+    // encounter counter (the second key slot is unused for triples).
+    let key = (format!("{item_a}\u{0}{item_b}\u{0}{item_c}"), String::new());
+    let encounter = {
+        let mut counts = state.pair_counts.lock().unwrap();
+        let n = counts.entry(key).or_insert(0);
+        let current = *n;
+        *n += 1;
+        current
+    };
+    let seed = deterministic_pair_seed(state.seed, &item_a, &item_b, encounter.wrapping_add(sc.to_bits()));
+    let mut rng = StdRng::seed_from_u64(seed);
+
+    let (order, p1, p2) = three_way_ranking([sa, sb, sc], &mut rng);
+    let content = three_way_text(order);
+    let logprobs = if want_logprobs {
+        Some(build_three_way_logprobs(order, p1, p2))
+    } else {
+        None
+    };
+
+    Json(ChatResponse {
+        choices: vec![Choice {
+            message: ResponseMessage {
+                role: "assistant".to_string(),
+                content,
+            },
+            logprobs,
+            finish_reason: "stop".to_string(),
+        }],
+        usage: ResponseUsage {
+            prompt_tokens: 75,
+            completion_tokens: 18,
         },
     })
 }

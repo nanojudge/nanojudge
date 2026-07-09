@@ -105,6 +105,13 @@ struct Args {
     #[arg(long)]
     logprobs: bool,
 
+    /// How many items each judgment compares at once: 2 (pairwise, default) or 3.
+    /// With 3, each LLM call ranks three items; `comparisons` then counts LLM
+    /// calls, so the accuracy-per-comparison curve is directly comparable to
+    /// pairwise.
+    #[arg(long, default_value_t = 2)]
+    items_per_comparison: usize,
+
     /// Path to the nanojudge binary (auto-detected from sibling binary if omitted).
     #[arg(long)]
     bin: Option<PathBuf>,
@@ -200,6 +207,7 @@ struct SharedTrialConfig {
     min_uniform_games: Option<usize>,
     refits_per_round: Option<usize>,
     inference: Option<String>,
+    items_per_comparison: usize,
     nanojudge_bin: PathBuf,
 }
 
@@ -207,8 +215,13 @@ struct SharedTrialConfig {
 async fn main() {
     let args = Args::parse();
 
-    if args.items < 2 {
-        eprintln!("Error: need at least 2 items");
+    if args.items_per_comparison != 2 && args.items_per_comparison != 3 {
+        eprintln!("Error: --items-per-comparison must be 2 or 3");
+        std::process::exit(1);
+    }
+    let min_items = if args.items_per_comparison == 3 { 3 } else { 2 };
+    if args.items < min_items {
+        eprintln!("Error: need at least {min_items} items");
         std::process::exit(1);
     }
     if args.rounds == 0 {
@@ -245,7 +258,11 @@ async fn main() {
         std::process::exit(1);
     }
 
-    let comparisons_per_trial = (args.items / 2) * args.rounds;
+    let comparisons_per_trial = if args.items_per_comparison == 3 {
+        (args.items / 3) * args.rounds
+    } else {
+        (args.items / 2) * args.rounds
+    };
 
     eprintln!("NanoJudge Synthetic Benchmark");
     eprintln!("  Items: {}", args.items);
@@ -261,6 +278,7 @@ async fn main() {
         }
     );
     eprintln!("  Logprobs: {}", args.logprobs);
+    eprintln!("  Items per comparison: {}", args.items_per_comparison);
     eprintln!("  Report top-K: {}", top_k);
     eprintln!("  Distribution: {}", args.comparison_distribution);
     eprintln!(
@@ -309,6 +327,7 @@ async fn main() {
         min_uniform_games: args.min_uniform_games,
         refits_per_round: args.refits_per_round,
         inference: args.inference.clone(),
+        items_per_comparison: args.items_per_comparison,
         nanojudge_bin: nanojudge_bin.clone(),
     });
 
@@ -346,6 +365,7 @@ async fn main() {
                 min_uniform_games: shared.min_uniform_games,
                 refits_per_round: shared.refits_per_round,
                 inference: shared.inference.as_deref(),
+                items_per_comparison: shared.items_per_comparison,
                 nanojudge_bin: &shared.nanojudge_bin,
             };
             let res = trial::run(&config, trial_seed, top_k, capture_example).await;

@@ -7,11 +7,13 @@
 use crate::bradley_terry::BradleyTerry;
 use crate::constants::INITIAL_BRADLEY_TERRY_RATING;
 use crate::pairing::{
-    generate_uniform_pairings_indexed, generate_top_heavy_pairings_indexed,
-    get_effective_comparison_distribution, ComparisonDistribution,
+    calculate_triples_for_round, generate_uniform_pairings_indexed,
+    generate_top_heavy_pairings_indexed, generate_uniform_triples_indexed,
+    generate_top_heavy_triples_indexed, get_effective_comparison_distribution,
+    ComparisonDistribution,
 };
 use crate::seed::make_rng;
-use crate::types::{ComparisonInput, IdMap, Pair};
+use crate::types::{ComparisonInput, IdMap, Pair, Triple};
 use rand::rngs::StdRng;
 
 /// Collapse a categorical verdict distribution into a scalar P(item1 wins) for the
@@ -143,6 +145,26 @@ impl RankingEngine {
         }
     }
 
+    /// The three-way analogue of `round_chunk_sizes`: chunk sizes in triples that
+    /// sum to one full round (`calculate_triples_for_round(num_items)`). Same
+    /// policy — only top-heavy rounds subdivide (for mid-round refits); the
+    /// uniform stage always returns a single full-round chunk.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `refits_per_round` is 0.
+    pub fn round_chunk_sizes_triples(&self, refits_per_round: usize) -> Vec<usize> {
+        assert!(refits_per_round >= 1, "refits_per_round must be at least 1");
+        let triples_per_round = calculate_triples_for_round(self.id_map.len());
+        if refits_per_round > 1
+            && self.effective_distribution() == ComparisonDistribution::TopHeavy
+        {
+            split_round_into_chunks(triples_per_round, refits_per_round)
+        } else {
+            vec![triples_per_round]
+        }
+    }
+
     /// Generate a batch of `pairs_count` pairs using the current effective
     /// distribution. A full round is `calculate_pairs_for_round(num_items)`
     /// pairs; passing a smaller count yields a sub-round batch (used to refit
@@ -182,6 +204,52 @@ impl RankingEngine {
         // Convert index pairs to ID pairs
         index_pairs.into_iter().map(|(a, b)| {
             (self.id_map.to_id(a), self.id_map.to_id(b))
+        }).collect()
+    }
+
+    /// Generate a batch of `triples_count` triples (3-way comparisons) using the
+    /// current effective distribution. The 3-way analogue of `generate_pairs`: a
+    /// full round is `calculate_triples_for_round(num_items)` triples. Each triple
+    /// is meant to be judged in one 3-way comparison, then folded into pairwise
+    /// edges by the caller via `three_way::winner_dist_to_edges` before being fed
+    /// back through `record_results`.
+    ///
+    /// # Panics
+    ///
+    /// Panics under the same conditions as `generate_pairs`: a top-heavy round
+    /// with `selection_weights` unset or malformed.
+    pub fn generate_triples(&mut self, triples_count: usize) -> Vec<Triple> {
+        let num_items = self.id_map.len();
+
+        let effective_comparison_distribution = self.effective_distribution();
+
+        let index_triples = match effective_comparison_distribution {
+            ComparisonDistribution::Uniform => generate_uniform_triples_indexed(
+                num_items,
+                triples_count,
+                &self.current_ratings,
+                self.config.matchmaking_sharpness,
+                &self.games_played,
+                &mut self.rng,
+            ),
+            ComparisonDistribution::TopHeavy => {
+                let selection_weights = self.selection_weights.as_ref()
+                    .expect("TopHeavy distribution requires selection_weights to be set before generating triples");
+
+                generate_top_heavy_triples_indexed(
+                    num_items,
+                    triples_count,
+                    selection_weights,
+                    &self.current_ratings,
+                    self.config.matchmaking_sharpness,
+                    &mut self.rng,
+                )
+            }
+        };
+
+        // Convert index triples to ID triples.
+        index_triples.into_iter().map(|(a, b, c)| {
+            (self.id_map.to_id(a), self.id_map.to_id(b), self.id_map.to_id(c))
         }).collect()
     }
 
@@ -366,7 +434,7 @@ mod tests {
             else if prob > 0.5 { [0.0, 1.0, 0.0, 0.0] }
             else if prob > 0.25 { [0.0, 0.0, 1.0, 0.0] }
             else { [0.0, 0.0, 0.0, 1.0] };
-        ComparisonInput { item1: id1, item2: id2, category_probs, judge_id: 0 }
+        ComparisonInput { slot1: 0, slot2: 1, item1: id1, item2: id2, category_probs, judge_id: 0 }
     }
 
     #[test]

@@ -29,8 +29,25 @@ pub struct ComparisonInput {
     /// Sums to ~1. In text mode this is a one-hot vector; in logprobs mode it is the
     /// judge's full per-bucket distribution. Caller filters out failed comparisons first.
     pub category_probs: [f64; 4],
+    /// Presentation slot item1 occupied in the prompt, and item2's slot. For a
+    /// plain pairwise comparison this is `(0, 1)` — item1 shown first, item2
+    /// second. For a 3-way comparison folded into pairwise edges, these are the
+    /// A/B/C slots (0/1/2) the two items occupied. The scoring engine estimates a
+    /// per-judge advantage for each slot and corrects for it, generalizing the
+    /// pairwise first-position bias to any number of slots. The highest slot index
+    /// present across all comparisons is the reference (advantage pinned to 0).
+    pub slot1: u8,
+    pub slot2: u8,
     /// Hash of endpoint+model identifying which judge produced this comparison.
     pub judge_id: u64,
+}
+
+impl ComparisonInput {
+    /// Build a plain pairwise comparison: item1 in slot 0 (shown first), item2 in
+    /// slot 1 (shown second).
+    pub fn pairwise(item1: i64, item2: i64, category_probs: [f64; 4], judge_id: u64) -> Self {
+        ComparisonInput { item1, item2, category_probs, slot1: 0, slot2: 1, judge_id }
+    }
 }
 
 /// Information about the judge panel passed to the scoring engine.
@@ -63,9 +80,12 @@ pub struct JudgeAnalytics {
 pub struct WarmStartState {
     /// Item log-strengths (θ, the engines' native state), same order as item_ids.
     pub item_log_strengths: Vec<f64>,
-    /// Per-judge positional bias in logit space, keyed by judge_id hash.
-    /// Positive values mean the judge favors the first-listed item.
-    pub judge_biases: Vec<(u64, f64)>,
+    /// Per-judge positional bias in logit space, keyed by judge_id hash. Each
+    /// judge carries a vector of free per-slot advantages (length `num_slots − 1`;
+    /// the highest slot is the pinned zero reference). For plain pairwise scoring
+    /// this is a single value — the first-position advantage. Positive slot-0
+    /// values mean the judge favors the first-listed item.
+    pub judge_biases: Vec<(u64, Vec<f64>)>,
 }
 
 /// A ranked item with point estimate and confidence interval bounds.
@@ -201,15 +221,24 @@ pub struct ScoringResult {
 /// A pairing: two item IDs to be compared.
 pub type Pair = (i64, i64);
 
+/// A triple: three item IDs to be compared together in one 3-way judgment.
+/// The judge ranks all three; the winner-distribution over them is folded into
+/// pairwise edges by [`crate::three_way::winner_dist_to_edges`].
+pub type Triple = (i64, i64, i64);
+
 /// Internal indexed comparison (usize indices, not caller IDs).
-/// (item1_idx, item2_idx, win_prob, judge_internal_idx)
+/// (item1_idx, item2_idx, win_prob, judge_internal_idx, slot1, slot2)
 ///
 /// `win_prob` is P(item1 wins), collapsed from the 4-category distribution:
-/// `probs[0] + probs[1]` (clear win + narrow win).
-pub(crate) type IndexedComparison = (usize, usize, f64, usize);
+/// `probs[0] + probs[1]` (clear win + narrow win). `slot1`/`slot2` are the
+/// presentation slots the two items occupied (for per-slot bias correction).
+pub(crate) type IndexedComparison = (usize, usize, f64, usize, u8, u8);
 
 /// Internal indexed pair (usize indices, not caller IDs).
 pub(crate) type IndexedPair = (usize, usize);
+
+/// Internal indexed triple (usize indices, not caller IDs).
+pub(crate) type IndexedTriple = (usize, usize, usize);
 
 /// Maps between caller-provided i64 IDs and internal 0..N indices.
 pub(crate) struct IdMap {
@@ -249,7 +278,7 @@ impl IdMap {
                 .unwrap_or_else(|| panic!("Unknown judge_id: {}", c.judge_id));
             let p = c.category_probs;
             let win_prob = p[0] + p[1];
-            (self.to_idx(c.item1), self.to_idx(c.item2), win_prob, judge_idx)
+            (self.to_idx(c.item1), self.to_idx(c.item2), win_prob, judge_idx, c.slot1, c.slot2)
         }).collect()
     }
 }

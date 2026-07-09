@@ -42,6 +42,9 @@ struct Comparison {
     win_prob: f64,
     /// Internal judge index (into the per-judge parameter vecs).
     judge_idx: usize,
+    /// Presentation slots the two items occupied (for per-slot bias correction).
+    slot1: usize,
+    slot2: usize,
 }
 
 /// Result from `calculate_with_samples` and `calculate_incremental_with_samples`.
@@ -79,8 +82,14 @@ pub struct GaussianBT {
 
     /// Number of judges.
     num_judges: usize,
-    /// Per-judge positional bias (logit space, positive = favors item1).
-    bias: Vec<f64>,
+    /// Number of presentation slots (2 for pairwise, 3 for three-way). The last
+    /// slot is the pinned zero reference; slots `0..num_slots-1` are free.
+    num_slots: usize,
+    /// Per-judge per-slot positional advantage (logit space). Indexed
+    /// `bias[judge][slot]`. The reference slot (`num_slots-1`) stays 0 and is
+    /// never updated, so `bias[k][slot1] − bias[k][slot2]` is the comparison's
+    /// bias term directly. Slot 0 is the first-position advantage (the pairwise β).
+    bias: Vec<Vec<f64>>,
     /// Number of comparisons per judge.
     comparisons_per_judge: Vec<usize>,
 
@@ -113,7 +122,14 @@ impl GaussianBT {
         let mut item_comparisons: Vec<Vec<usize>> = (0..num_items).map(|_| Vec::new()).collect();
         let mut comparisons_per_judge = vec![0usize; num_judges];
 
-        for &(idx1, idx2, win_prob, judge_idx) in results {
+        // Number of presentation slots: one past the highest slot index seen, at
+        // least 2 (plain pairwise uses slots 0 and 1).
+        let mut num_slots = 2usize;
+        for &(_, _, _, _, s1, s2) in results {
+            num_slots = num_slots.max(s1 as usize + 1).max(s2 as usize + 1);
+        }
+
+        for &(idx1, idx2, win_prob, judge_idx, slot1, slot2) in results {
             assert!(idx1 < num_items, "item1 index {} out of range (num_items = {})", idx1, num_items);
             assert!(idx2 < num_items, "item2 index {} out of range (num_items = {})", idx2, num_items);
 
@@ -123,10 +139,21 @@ impl GaussianBT {
                 idx2,
                 win_prob,
                 judge_idx,
+                slot1: slot1 as usize,
+                slot2: slot2 as usize,
             });
             item_comparisons[idx1].push(comp_idx);
             item_comparisons[idx2].push(comp_idx);
             comparisons_per_judge[judge_idx] += 1;
+        }
+
+        // Per-judge slot advantages: free slots (0..num_slots-1) start at the bias
+        // prior mean; the reference slot (last) stays 0 forever.
+        let mut bias = vec![vec![0.0; num_slots]; num_judges];
+        for judge_bias in &mut bias {
+            for b in judge_bias.iter_mut().take(num_slots - 1) {
+                *b = options.bias_prior_logit;
+            }
         }
 
         GaussianBT {
@@ -136,7 +163,8 @@ impl GaussianBT {
             log_strengths: vec![prior_mu; num_items],
             regularization_strength: options.regularization_strength,
             num_judges,
-            bias: vec![options.bias_prior_logit; num_judges],
+            num_slots,
+            bias,
             comparisons_per_judge,
             prior_mu,
             prior_tau2: options.prior_tau2,
@@ -156,7 +184,8 @@ impl GaussianBT {
             let comp = &self.comparisons[comp_idx];
             let s1 = if comp.idx1 == item_idx { log_strength } else { self.log_strengths[comp.idx1] };
             let s2 = if comp.idx2 == item_idx { log_strength } else { self.log_strengths[comp.idx2] };
-            let d = s1 - s2 + self.bias[comp.judge_idx];
+            let jb = &self.bias[comp.judge_idx];
+            let d = s1 - s2 + jb[comp.slot1] - jb[comp.slot2];
             log_prob += comparison_loglik(comp.win_prob, d);
         }
 
@@ -175,14 +204,18 @@ impl GaussianBT {
         }
     }
 
-    /// Judge log-likelihood for a given bias value.
-    fn judge_loglik(&self, judge_idx: usize, bias: f64) -> f64 {
+    /// Judge log-likelihood with a candidate value substituted for the advantage
+    /// of one slot (all other slots at their current values).
+    fn judge_slot_loglik(&self, judge_idx: usize, slot: usize, candidate: f64) -> f64 {
+        let jb = &self.bias[judge_idx];
         let mut ll = 0.0;
         for comp in &self.comparisons {
             if comp.judge_idx != judge_idx {
                 continue;
             }
-            let d = self.log_strengths[comp.idx1] - self.log_strengths[comp.idx2] + bias;
+            let b1 = if comp.slot1 == slot { candidate } else { jb[comp.slot1] };
+            let b2 = if comp.slot2 == slot { candidate } else { jb[comp.slot2] };
+            let d = self.log_strengths[comp.idx1] - self.log_strengths[comp.idx2] + b1 - b2;
             ll += comparison_loglik(comp.win_prob, d);
         }
         ll
@@ -193,15 +226,19 @@ impl GaussianBT {
         -0.5 * diff * diff / self.bias_prior_tau2
     }
 
+    /// MH-update each free slot advantage for a judge (the reference slot, last,
+    /// stays pinned at 0).
     fn update_bias(&mut self, judge_idx: usize, rng: &mut impl Rng) {
-        let current = self.bias[judge_idx];
-        let proposed = current + (rng.random::<f64>() - 0.5) * 2.0 * self.bias_proposal_std;
+        for slot in 0..self.num_slots - 1 {
+            let current = self.bias[judge_idx][slot];
+            let proposed = current + (rng.random::<f64>() - 0.5) * 2.0 * self.bias_proposal_std;
 
-        let lp_current = self.bias_log_prior(current) + self.judge_loglik(judge_idx, current);
-        let lp_proposed = self.bias_log_prior(proposed) + self.judge_loglik(judge_idx, proposed);
+            let lp_current = self.bias_log_prior(current) + self.judge_slot_loglik(judge_idx, slot, current);
+            let lp_proposed = self.bias_log_prior(proposed) + self.judge_slot_loglik(judge_idx, slot, proposed);
 
-        if rng.random::<f64>().ln() < (lp_proposed - lp_current) {
-            self.bias[judge_idx] = proposed;
+            if rng.random::<f64>().ln() < (lp_proposed - lp_current) {
+                self.bias[judge_idx][slot] = proposed;
+            }
         }
     }
 
@@ -252,7 +289,10 @@ impl GaussianBT {
 
             let mut panel_prob = 0.0;
             for j in 0..k {
-                let bias_logit = self.bias[j];
+                // Report the first-position advantage (slot 0) as the judge's
+                // positional bias — the pairwise β, and the natural summary for
+                // multi-slot too.
+                let bias_logit = self.bias[j][0];
                 bias_samples[j].push(bias_logit);
                 panel_prob += panel_weights[j] / (1.0 + (-bias_logit).exp());
             }
@@ -313,10 +353,11 @@ impl GaussianBT {
         self.log_strengths[..self.num_items].to_vec()
     }
 
-    /// Get current per-judge biases (keyed by judge_id from the info).
-    pub fn get_current_biases(&self, judge_info: &JudgeInfo) -> Vec<(u64, f64)> {
+    /// Get current per-judge biases (keyed by judge_id), as the vector of free
+    /// slot advantages (length `num_slots − 1`; the reference slot is omitted).
+    pub fn get_current_biases(&self, judge_info: &JudgeInfo) -> Vec<(u64, Vec<f64>)> {
         judge_info.judge_ids.iter().enumerate()
-            .map(|(idx, &id)| (id, self.bias[idx]))
+            .map(|(idx, &id)| (id, self.bias[idx][..self.num_slots - 1].to_vec()))
             .collect()
     }
 
@@ -329,7 +370,7 @@ impl GaussianBT {
     pub fn calculate_incremental_with_samples(
         &mut self,
         previous_log_strengths: &[f64],
-        previous_biases: &[(u64, f64)],
+        previous_biases: &[(u64, Vec<f64>)],
         judge_id_to_idx: &HashMap<u64, usize>,
         new_iterations: usize,
         burn_in: usize,
@@ -340,9 +381,13 @@ impl GaussianBT {
 
         self.log_strengths[..n].copy_from_slice(&previous_log_strengths[..n]);
 
-        for &(judge_id, bias) in previous_biases {
-            if let Some(&idx) = judge_id_to_idx.get(&judge_id) {
-                self.bias[idx] = bias;
+        for (judge_id, biases) in previous_biases {
+            if let Some(&idx) = judge_id_to_idx.get(judge_id) {
+                for (slot, &b) in biases.iter().enumerate() {
+                    if slot < self.num_slots - 1 {
+                        self.bias[idx][slot] = b;
+                    }
+                }
             }
         }
 
@@ -416,7 +461,7 @@ mod tests {
     /// Returns both position orders for a matchup. In production, the pairing
     /// code's 50/50 coin flip achieves this naturally.
     fn make_pair(i1: usize, i2: usize, prob: f64) -> [IndexedComparison; 2] {
-        [(i1, i2, prob, 0), (i2, i1, 1.0 - prob, 0)]
+        [(i1, i2, prob, 0, 0, 1), (i2, i1, 1.0 - prob, 0, 0, 1)]
     }
 
     fn default_options() -> ScoringOptions {
@@ -532,14 +577,14 @@ mod tests {
     #[test]
     fn test_multi_judge() {
         let results: Vec<IndexedComparison> = vec![
-            (0, 1, 0.80, 0),
-            (1, 0, 0.20, 0),
-            (0, 1, 0.75, 1),
-            (1, 0, 0.25, 1),
-            (1, 2, 0.70, 0),
-            (2, 1, 0.30, 0),
-            (1, 2, 0.65, 1),
-            (2, 1, 0.35, 1),
+            (0, 1, 0.80, 0, 0, 1),
+            (1, 0, 0.20, 0, 0, 1),
+            (0, 1, 0.75, 1, 0, 1),
+            (1, 0, 0.25, 1, 0, 1),
+            (1, 2, 0.70, 0, 0, 1),
+            (2, 1, 0.30, 0, 0, 1),
+            (1, 2, 0.65, 1, 0, 1),
+            (2, 1, 0.35, 1, 0, 1),
         ];
 
         let opts = default_options();
