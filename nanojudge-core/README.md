@@ -14,9 +14,11 @@ use nanojudge_core::{run_scoring, ComparisonInput, ScoringOptions, JudgeInfo, st
 let item_ids = vec![100, 200, 300];
 let judge_id = stable_hash("my-endpoint/my-model");
 
+// pairwise() records that item1 was shown first and item2 second, so
+// scoring can correct for positional bias.
 let comparisons = vec![
-    ComparisonInput { item1: 100, item2: 200, category_probs: [0.8, 0.0, 0.0, 0.2], judge_id },
-    ComparisonInput { item1: 200, item2: 300, category_probs: [0.7, 0.0, 0.0, 0.3], judge_id },
+    ComparisonInput::pairwise(100, 200, [0.8, 0.0, 0.0, 0.2], judge_id),
+    ComparisonInput::pairwise(200, 300, [0.7, 0.0, 0.0, 0.3], judge_id),
 ];
 
 let judge_info = JudgeInfo { judge_ids: vec![judge_id], logprobs_mode: false };
@@ -64,6 +66,7 @@ let config = EngineConfig {
     comparison_distribution: ComparisonDistribution::TopHeavy,
     matchmaking_sharpness: 1.0,
     min_uniform_games: 2,
+    seed: None, // Some(n) for reproducible pairing
 };
 
 let mut engine = RankingEngine::new(&item_ids, config);
@@ -102,10 +105,11 @@ for round in 0..20 {
     // 2. Engine decides which pairs to compare
     let pairs = engine.generate_pairs_for_round(round);
 
-    // 3. You perform the comparisons (call your LLM, ask humans, etc.)
+    // 3. You perform the comparisons (call your LLM, ask humans, etc.).
+    //    The placeholder below stands in for your source of P(a beats b).
     let results: Vec<ComparisonInput> = pairs.iter().map(|&(a, b)| {
-        let prob = your_llm_compare(a, b); // you implement this
-        ComparisonInput { item1: a, item2: b, category_probs: [prob, 0.0, 0.0, 1.0 - prob], judge_id }
+        let prob = if a < b { 0.7 } else { 0.3 }; // your LLM call goes here
+        ComparisonInput::pairwise(a, b, [prob, 0.0, 0.0, 1.0 - prob], judge_id)
     }).collect();
 
     // 4. Feed results back

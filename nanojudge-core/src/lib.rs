@@ -59,6 +59,12 @@
 //! }
 //! ```
 
+// Compile and run the README's code examples as doctests so they cannot
+// drift from the real API.
+#[cfg(doctest)]
+#[doc = include_str!("../README.md")]
+struct ReadmeDoctests;
+
 pub mod bradley_terry;
 pub mod constants;
 pub mod engine;
