@@ -360,7 +360,8 @@ pub fn resolve_config(shared: &ConfigArgs, cfg: &config::NanojudgeConfig) -> Res
     if !regularization_strength.is_finite() || regularization_strength <= 0.0 {
         bail(format!("regularization-strength={regularization_strength}, must be finite and > 0"));
     }
-    let inference = match shared.inference.as_deref() {
+    let inference = merge_opt(shared.inference.clone(), cfg.inference.clone(), "inference");
+    let inference = match inference.as_deref() {
         None | Some("laplace-linear") => InferenceMode::LaplaceLinear,
         Some("mcmc") => InferenceMode::Mcmc,
         Some(other) => bail(format!(
@@ -698,5 +699,30 @@ mod tests {
         let cfg = NanojudgeConfig { reasoning_enabled: Some(false), ..Default::default() };
         let resolved = resolve_config(&cli, &cfg);
         assert!(!resolved.reasoning_enabled);
+    }
+
+    #[test]
+    fn test_inference_default() {
+        let cli = default_cli();
+        let cfg = NanojudgeConfig::default();
+        let resolved = resolve_config(&cli, &cfg);
+        assert_eq!(resolved.inference, InferenceMode::LaplaceLinear);
+    }
+
+    #[test]
+    fn test_inference_from_config() {
+        let cli = default_cli();
+        let cfg = NanojudgeConfig { inference: Some("mcmc".into()), ..Default::default() };
+        let resolved = resolve_config(&cli, &cfg);
+        assert_eq!(resolved.inference, InferenceMode::Mcmc);
+    }
+
+    #[test]
+    fn test_inference_cli_overrides_config() {
+        let mut cli = default_cli();
+        cli.inference = Some("laplace-linear".into());
+        let cfg = NanojudgeConfig { inference: Some("mcmc".into()), ..Default::default() };
+        let resolved = resolve_config(&cli, &cfg);
+        assert_eq!(resolved.inference, InferenceMode::LaplaceLinear);
     }
 }

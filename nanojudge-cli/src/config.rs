@@ -51,6 +51,7 @@ pub struct NanojudgeConfig {
     pub retries: Option<usize>,
     pub confidence_level: Option<f64>,
     pub regularization_strength: Option<f64>,
+    pub inference: Option<String>,
     pub mcmc_iterations: Option<usize>,
     pub mcmc_burn_in: Option<usize>,
     pub bias_prior: Option<f64>,
@@ -220,6 +221,10 @@ temperature = 0.7
 
 # Ghost player regularization strength. Default: 0.01.
 # regularization_strength = 0.01
+
+# Inference engine: \"laplace-linear\" (deterministic MAP via Newton-CG +
+# diagonal-Fisher std, O(#comparisons), default) or \"mcmc\" (Gaussian-BT sampler).
+# inference = \"laplace-linear\"
 
 # Number of post-burn-in MCMC iterations for final scoring. Default: 5000.
 # mcmc_iterations = 5000
