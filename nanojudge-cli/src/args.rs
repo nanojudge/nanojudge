@@ -172,7 +172,8 @@ pub struct ConfigArgs {
     #[arg(long)]
     pub matchmaking_sharpness: Option<f64>,
 
-    /// Minimum games per item before the top-heavy distribution kicks in. Default: 2.
+    /// Minimum games per item before the top-heavy distribution kicks in.
+    /// Must be >= 1. Default: 2.
     #[arg(long)]
     pub min_uniform_games: Option<usize>,
 

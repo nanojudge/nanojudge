@@ -234,7 +234,8 @@ temperature = 0.7
 # Info-gain exponent for matchmaking. Higher = more exploitation. Default: 1.0.
 # matchmaking_sharpness = 1.0
 
-# Minimum games per item before the top-heavy distribution kicks in. Default: 2.
+# Minimum games per item before the top-heavy distribution kicks in.
+# Must be at least 1. Default: 2.
 # min_uniform_games = 2
 
 # Prior variance on log-strengths. Default: 10.0.

@@ -381,6 +381,11 @@ pub fn resolve_config(shared: &ConfigArgs, cfg: &config::NanojudgeConfig) -> Res
     }
     let min_uniform_games = merge_opt(shared.min_uniform_games, cfg.min_uniform_games, "min-uniform-games")
         .unwrap_or(2);
+    if min_uniform_games == 0 {
+        // 0 would let top-heavy pairing start before any results exist —
+        // selection weights are only derived after a completed round.
+        bail("min-uniform-games must be at least 1");
+    }
     let refits_per_round = merge_opt(shared.refits_per_round, cfg.refits_per_round, "refits-per-round")
         .unwrap_or(1);
     if refits_per_round == 0 {
