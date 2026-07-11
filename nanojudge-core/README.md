@@ -78,8 +78,9 @@ for round in 0..20 {
             // Top-heavy selection: weight each item by its sharpened
             // uncertainty ratio around the anchor (anchor_index 0.0 = the
             // current leader) — items straddling the anchor get the focus.
-            // Both compared items are drawn from these weights. `None` would
-            // disable top-heavy weighting.
+            // The first item of each pair is drawn from these weights; its
+            // opponent comes from info-gain matchmaking in a rating window
+            // around it. `None` would disable top-heavy weighting.
             selection_sharpness: Some(0.5),
             anchor_index: 0.0,
             selection_cutoff: 0.0005,

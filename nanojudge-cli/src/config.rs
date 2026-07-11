@@ -120,9 +120,10 @@ const DEFAULT_CONFIG_TEMPLATE: &str = "\
 # Tuning for the top-heavy distribution. Each item's pairing weight is its
 # uncertainty ratio around the anchor: min/max of the posterior area above vs
 # below the anchor's mean — 1 when the item straddles the anchor, near 0 once
-# it is confidently above or below — raised to `selection_sharpness`. Both
-# items in each comparison are drawn from these weights, so the contested
-# boundary gets the comparisons.
+# it is confidently above or below — raised to `selection_sharpness`. The
+# first item of each comparison is drawn from these weights; its opponent is
+# picked by info-gain matchmaking from a rating window around it, so the
+# contested boundary gets the comparisons.
 #   selection_sharpness: lower = flatter = more exploration; 1.0 = raw ratios (> 0).
 #   anchor_index: which rank is the anchor, 0-based into the ranking sorted
 #             best-first. 0.0 = the current leader; 9.0 = the 10th-best (right
