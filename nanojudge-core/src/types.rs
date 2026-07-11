@@ -198,8 +198,9 @@ pub struct ScoringResult {
     pub rankings: Vec<RankedItem>,
     /// Top-heavy item-selection weights per item, in the same order as input
     /// `item_ids`: each item's sharpened uncertainty ratio around the anchor's
-    /// mean, with sub-cutoff items zeroed. Drives both-items-from-the-weights
-    /// pairing. `None` when `selection_sharpness` was `None`.
+    /// mean, with sub-cutoff items zeroed. Drives top-heavy pairing: the first
+    /// item of each pair is drawn from these weights. `None` when
+    /// `selection_sharpness` was `None`.
     pub selection_weights: Option<Vec<f64>>,
     /// Warm start state for next round.
     pub warm_start_state: WarmStartState,
