@@ -350,7 +350,7 @@ pub fn resolve_config(shared: &ConfigArgs, cfg: &config::NanojudgeConfig) -> Res
 
     let confidence_level = merge_opt(shared.confidence_level, cfg.confidence_level, "confidence-level")
         .unwrap_or(0.95);
-    if confidence_level <= 0.0 || confidence_level >= 1.0 {
+    if !confidence_level.is_finite() || confidence_level <= 0.0 || confidence_level >= 1.0 {
         bail(format!(
             "confidence-level={confidence_level}, must be between 0.0 and 1.0 (exclusive)"
         ));
@@ -450,7 +450,7 @@ pub fn resolve_config(shared: &ConfigArgs, cfg: &config::NanojudgeConfig) -> Res
     // bias_prior: user specifies in probability space, we convert to logit
     let bias_prior = merge_opt(shared.bias_prior, cfg.bias_prior, "bias-prior")
         .unwrap_or(0.5);
-    if bias_prior <= 0.0 || bias_prior >= 1.0 {
+    if !bias_prior.is_finite() || bias_prior <= 0.0 || bias_prior >= 1.0 {
         bail("--bias-prior must be greater than 0.0 and less than 1.0");
     }
     let bias_prior_logit = (bias_prior / (1.0 - bias_prior)).ln();
