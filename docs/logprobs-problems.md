@@ -18,9 +18,11 @@ The goal is to keep the rich pre-commitment distribution in the verdict tokens �
 
 One lever is the prompt: instructing the model to keep the verdict hidden until the very end (e.g. "Keep the verdict hidden from the reader until the very end.") discourages it from declaring a winner mid-response and then continuing to "reason" after the fact. How effective this is depends on the particular LLM and how well it obeys such instructions. As LLMs improve at instruction-following, this kind of prompt-level mitigation should become more reliable.
 
+The default reasoning templates apply this lever with the instruction "Analyse all options before forming a preference.". Without it, models can open with a conclusion — "Option 1 is the best because..." — and everything after that opening is rationalization: the verdict-token logprobs then just echo the already-declared winner. Framing the analysis as preference-formation pushes the commitment point toward the end of the response. The logprobs still tend to be quite concentrated but there is a measurable improvement by using this prompting technique.
+
 ## The "While" death knell
 
-A related, sharper form of premature commitment shows up in sentence structure. Whenever a model begins a sentence "While x is good/great/etc, y...", the item `y` is picked as the winner essentially every time in testing. The phrase "While x" functions as a commitment to `y` before any reasoning is offered.
+A related, sharper form of premature commitment shows up in sentence structure. In pairwise mode, whenever a model begins a sentence "While x is good/great/etc, y...", the item `y` is picked as the winner essentially every time in testing. The phrase "While x" functions as a commitment to `y` before any reasoning is offered.
 
 For example in a comparison between banana and blueberries for healthiness it says the following: "While banana is a healthy choice for cardio based exercises, blueberries..." — there is no need to read further than "While banana" to know with near certainty that blueberries will be the verdict. The contrastive concession has already settled the outcome.
 

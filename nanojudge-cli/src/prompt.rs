@@ -18,7 +18,7 @@ Option 2:
 $option2
 
 Instructions:
-Write a $length analysis. You MUST end your response with one of these lines verbatim:
+Write a $length analysis. Analyse both options before forming a preference. You MUST end your response with one of these lines verbatim:
 
 Verdict A: Option 1, clearly
 Verdict B: Option 1, marginally
@@ -66,7 +66,7 @@ Option C:
 $optionC
 
 Instructions:
-Write a $length analysis. You MUST end your response with these three lines, replacing X, Y, and Z with the letter of the option (A, B, or C):
+Write a $length analysis. Analyse all three options before forming a preference. You MUST end your response with these three lines, replacing X, Y, and Z with the letter of the option (A, B, or C):
 
 First place is Option X
 Second place is Option Y
