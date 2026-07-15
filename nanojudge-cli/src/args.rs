@@ -64,8 +64,9 @@ pub struct ConfigArgs {
     #[arg(long)]
     pub concurrency: Option<usize>,
 
-    /// Minimum fraction of A-D probability mass the top-logprobs must cover for a
-    /// logprob-based verdict to be trusted. Must be > 0.0 and <= 1.0. Default: 0.95.
+    /// Minimum fraction of verdict-token probability mass the top-logprobs must
+    /// cover for a logprob-based verdict to be trusted. Must be > 0.0 and <= 1.0.
+    /// Default: 0.95.
     #[arg(long)]
     pub min_logprob_coverage: Option<f64>,
 

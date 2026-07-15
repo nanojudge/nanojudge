@@ -16,10 +16,10 @@ use crate::seed::make_rng;
 use crate::types::{ComparisonInput, IdMap, Pair, Triple};
 use rand::rngs::StdRng;
 
-/// Collapse a categorical verdict distribution into a scalar P(item1 wins) for the
-/// Bradley-Terry matchmaking fit. A and B count as a win, C and D as a loss.
-fn matchmaking_win_prob(probs: &[f64; 4]) -> f64 {
-    probs[0] + probs[1]
+/// P(item1 wins) from a verdict distribution, for the Bradley-Terry
+/// matchmaking fit.
+fn matchmaking_win_prob(probs: &[f64; 2]) -> f64 {
+    probs[0]
 }
 
 /// Configuration for the ranking engine.
@@ -430,10 +430,7 @@ mod tests {
     }
 
     fn make_input(id1: i64, id2: i64, prob: f64) -> ComparisonInput {
-        let category_probs = if prob > 0.75 { [1.0, 0.0, 0.0, 0.0] }
-            else if prob > 0.5 { [0.0, 1.0, 0.0, 0.0] }
-            else if prob > 0.25 { [0.0, 0.0, 1.0, 0.0] }
-            else { [0.0, 0.0, 0.0, 1.0] };
+        let category_probs = if prob > 0.5 { [1.0, 0.0] } else { [0.0, 1.0] };
         ComparisonInput { slot1: 0, slot2: 1, item1: id1, item2: id2, category_probs, judge_id: 0 }
     }
 

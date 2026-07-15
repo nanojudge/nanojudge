@@ -4,7 +4,7 @@
 //! Required variables: $criterion, $option1, $option2
 //!
 //! If no template is provided, a sensible default is used that produces
-//! a "Verdict:" marker followed by a verdict letter (A-D).
+//! a "Verdict: Option <n>" line naming the winning option.
 
 use crate::bail;
 
@@ -20,10 +20,8 @@ $option2
 Instructions:
 Write a $length analysis. Analyse both options before forming a preference. You MUST end your response with one of these lines verbatim:
 
-Verdict A: Option 1, clearly
-Verdict B: Option 1, marginally
-Verdict C: Option 2, marginally
-Verdict D: Option 2, clearly
+Verdict: Option 1
+Verdict: Option 2
 ";
 
 pub const DEFAULT_TEMPLATE_NO_REASONING: &str = "\
@@ -38,10 +36,8 @@ $option2
 Instructions:
 Respond only with one of these lines verbatim:
 
-Verdict A: Option 1, clearly
-Verdict B: Option 1, marginally
-Verdict C: Option 2, marginally
-Verdict D: Option 2, clearly
+Verdict: Option 1
+Verdict: Option 2
 ";
 
 const REQUIRED_VARIABLES: &[&str] = &["$criterion", "$option1", "$option2"];
@@ -246,9 +242,8 @@ mod tests {
         assert!(prompt.contains("Option 1:\nPizza"));
         assert!(prompt.contains("Option 2:\nSushi"));
         assert!(prompt.contains("2 paragraph"));
-        assert!(prompt.contains("Verdict A:"));
-        assert!(prompt.contains("Verdict A: Option 1, clearly"));
-        assert!(prompt.contains("D: Option 2, clearly"));
+        assert!(prompt.contains("Verdict: Option 1"));
+        assert!(prompt.contains("Verdict: Option 2"));
     }
 
     #[test]
@@ -305,8 +300,8 @@ mod tests {
 
     #[test]
     fn test_no_reasoning_template_has_verdicts() {
-        assert!(DEFAULT_TEMPLATE_NO_REASONING.contains("Verdict A: Option 1, clearly"));
-        assert!(DEFAULT_TEMPLATE_NO_REASONING.contains("Verdict D: Option 2, clearly"));
+        assert!(DEFAULT_TEMPLATE_NO_REASONING.contains("Verdict: Option 1"));
+        assert!(DEFAULT_TEMPLATE_NO_REASONING.contains("Verdict: Option 2"));
     }
 
     // --- Three-way template tests ---

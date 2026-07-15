@@ -14,11 +14,12 @@ use nanojudge_core::{run_scoring, ComparisonInput, ScoringOptions, JudgeInfo, st
 let item_ids = vec![100, 200, 300];
 let judge_id = stable_hash("my-endpoint/my-model");
 
-// pairwise() records that item1 was shown first and item2 second, so
-// scoring can correct for positional bias.
+// category_probs = [P(item1 wins), P(item2 wins)]. pairwise() records that
+// item1 was shown first and item2 second, so scoring can correct for
+// positional bias.
 let comparisons = vec![
-    ComparisonInput::pairwise(100, 200, [0.8, 0.0, 0.0, 0.2], judge_id),
-    ComparisonInput::pairwise(200, 300, [0.7, 0.0, 0.0, 0.3], judge_id),
+    ComparisonInput::pairwise(100, 200, [0.8, 0.2], judge_id),
+    ComparisonInput::pairwise(200, 300, [0.7, 0.3], judge_id),
 ];
 
 let judge_info = JudgeInfo { judge_ids: vec![judge_id], logprobs_mode: false };
@@ -109,7 +110,7 @@ for round in 0..20 {
     //    The placeholder below stands in for your source of P(a beats b).
     let results: Vec<ComparisonInput> = pairs.iter().map(|&(a, b)| {
         let prob = if a < b { 0.7 } else { 0.3 }; // your LLM call goes here
-        ComparisonInput::pairwise(a, b, [prob, 0.0, 0.0, 1.0 - prob], judge_id)
+        ComparisonInput::pairwise(a, b, [prob, 1.0 - prob], judge_id)
     }).collect();
 
     // 4. Feed results back

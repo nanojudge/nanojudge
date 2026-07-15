@@ -524,11 +524,8 @@ mod tests {
         }
     }
 
-    fn dist(p: f64) -> [f64; 4] {
-        if p > 0.75 { [1.0, 0.0, 0.0, 0.0] }
-        else if p > 0.5 { [0.0, 1.0, 0.0, 0.0] }
-        else if p > 0.25 { [0.0, 0.0, 1.0, 0.0] }
-        else { [0.0, 0.0, 0.0, 1.0] }
+    fn dist(p: f64) -> [f64; 2] {
+        if p > 0.5 { [1.0, 0.0] } else { [0.0, 1.0] }
     }
 
     /// Returns both position orders for a matchup. In production, the pairing

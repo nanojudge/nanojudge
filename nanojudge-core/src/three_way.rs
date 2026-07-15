@@ -70,8 +70,7 @@ pub fn winner_dist_to_edges(
         edges.push(ComparisonInput {
             item1: item_ids[a],
             item2: item_ids[b],
-            // Only p[0]+p[1] is read downstream, so a two-bucket split suffices.
-            category_probs: [win_prob, 0.0, 0.0, 1.0 - win_prob],
+            category_probs: [win_prob, 1.0 - win_prob],
             // The PAIRS indices are the presentation slots (0=A, 1=B, 2=C), so the
             // scoring engine can estimate and correct each slot's positional bias.
             slot1: a as u8,
@@ -87,7 +86,7 @@ mod tests {
     use super::*;
 
     fn win_prob(edge: &ComparisonInput) -> f64 {
-        edge.category_probs[0] + edge.category_probs[1]
+        edge.category_probs[0]
     }
 
     #[test]

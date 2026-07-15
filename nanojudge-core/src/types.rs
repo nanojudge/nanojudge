@@ -24,11 +24,11 @@ pub struct ComparisonInput {
     pub item1: i64,
     /// ID of second item.
     pub item2: i64,
-    /// Categorical verdict distribution from item1's perspective:
-    /// `[P(A clear win), P(B narrow win), P(C narrow loss), P(D clear loss)]`.
+    /// Verdict distribution from item1's perspective:
+    /// `[P(item1 wins), P(item2 wins)]`.
     /// Sums to ~1. In text mode this is a one-hot vector; in logprobs mode it is the
-    /// judge's full per-bucket distribution. Caller filters out failed comparisons first.
-    pub category_probs: [f64; 4],
+    /// judge's full verdict distribution. Caller filters out failed comparisons first.
+    pub category_probs: [f64; 2],
     /// Presentation slot item1 occupied in the prompt, and item2's slot. For a
     /// plain pairwise comparison this is `(0, 1)` — item1 shown first, item2
     /// second. For a 3-way comparison folded into pairwise edges, these are the
@@ -45,7 +45,7 @@ pub struct ComparisonInput {
 impl ComparisonInput {
     /// Build a plain pairwise comparison: item1 in slot 0 (shown first), item2 in
     /// slot 1 (shown second).
-    pub fn pairwise(item1: i64, item2: i64, category_probs: [f64; 4], judge_id: u64) -> Self {
+    pub fn pairwise(item1: i64, item2: i64, category_probs: [f64; 2], judge_id: u64) -> Self {
         ComparisonInput { item1, item2, category_probs, slot1: 0, slot2: 1, judge_id }
     }
 }
@@ -277,8 +277,7 @@ impl IdMap {
         comparisons.iter().map(|c| {
             let judge_idx = *judge_id_to_idx.get(&c.judge_id)
                 .unwrap_or_else(|| panic!("Unknown judge_id: {}", c.judge_id));
-            let p = c.category_probs;
-            let win_prob = p[0] + p[1];
+            let win_prob = c.category_probs[0];
             (self.to_idx(c.item1), self.to_idx(c.item2), win_prob, judge_idx, c.slot1, c.slot2)
         }).collect()
     }

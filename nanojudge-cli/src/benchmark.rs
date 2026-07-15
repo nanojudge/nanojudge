@@ -31,7 +31,7 @@ struct SingleResult {
     prompt_tokens: u64,
     completion_tokens: u64,
     response_len_chars: usize,
-    verdict_letter: Option<usize>, // 0=A, 1=B, 2=C, 3=D
+    verdict_option: Option<usize>, // 0 = Option 1 wins, 1 = Option 2 wins
     parseable: bool,
     http_error: bool,
     prompt_text: String,
@@ -137,12 +137,9 @@ pub async fn run_benchmark(
                         prompt_tokens,
                         completion_tokens,
                         response_len_chars: content.len(),
-                        verdict_letter: parse_result.category_probs.map(|probs| {
-                            // The judge's verdict is the highest-weight category (A=0 … D=3).
-                            probs.iter().enumerate()
-                                .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
-                                .map(|(i, _)| i)
-                                .unwrap()
+                        verdict_option: parse_result.category_probs.map(|probs| {
+                            // The judge's verdict is the higher-weight option.
+                            if probs[0] >= probs[1] { 0 } else { 1 }
                         }),
                         parseable: parse_result.category_probs.is_some(),
                         http_error: false,
@@ -157,7 +154,7 @@ pub async fn run_benchmark(
                     prompt_tokens: 0,
                     completion_tokens: 0,
                     response_len_chars: 0,
-                    verdict_letter: None,
+                    verdict_option: None,
                     parseable: false,
                     http_error: true,
                     prompt_text: prompt,
@@ -222,22 +219,16 @@ pub async fn run_benchmark(
     let parseable_count = all_results.iter().filter(|r| r.parseable).count();
     let non_http_count = all_results.len() - http_errors;
 
-    // Verdict distribution (A-D)
-    let verdict_labels = ["A (Option 1, clearly)", "B (Option 1, marginally)", "C (Option 2, marginally)", "D (Option 2, clearly)"];
-    let mut verdict_counts = [0usize; 4];
-    let mut option1_wins = 0usize;
-    let mut option2_wins = 0usize;
+    // Verdict distribution (Option 1 / Option 2)
+    let verdict_labels = ["Option 1", "Option 2"];
+    let mut verdict_counts = [0usize; 2];
     for r in &all_results {
-        if let Some(letter) = r.verdict_letter {
-            if letter < 4 { verdict_counts[letter] += 1; }
-            match letter {
-                0 | 1 => option1_wins += 1,
-                2 | 3 => option2_wins += 1,
-                _ => {}
-            }
+        if let Some(option) = r.verdict_option {
+            verdict_counts[option] += 1;
         }
     }
-    let verdicts_with_winner = option1_wins + option2_wins;
+    let option1_wins = verdict_counts[0];
+    let verdicts_with_winner = verdict_counts[0] + verdict_counts[1];
 
     // Average response length
     let avg_response_chars: f64 = if !successful.is_empty() {
@@ -339,7 +330,7 @@ pub async fn run_benchmark(
     };
 
     let log_filename = format!("benchmark_{}.log", timestamp);
-    let verdict_names = ["A", "B", "C", "D"];
+    let verdict_names = ["Option 1", "Option 2"];
 
     let mut file = std::fs::File::create(&log_filename)
         .unwrap_or_else(|e| bail(format!("Failed to create log file {log_filename}: {e}")));
@@ -359,8 +350,8 @@ pub async fn run_benchmark(
                 let status = if result.http_error {
                     "HTTP ERROR".to_string()
                 } else if result.parseable {
-                    match result.verdict_letter {
-                        Some(v) if v < 4 => format!("PARSED (Verdict: {})", verdict_names[v]),
+                    match result.verdict_option {
+                        Some(v) if v < 2 => format!("PARSED (Verdict: {})", verdict_names[v]),
                         _ => "PARSED (logprob-derived)".to_string(),
                     }
                 } else {

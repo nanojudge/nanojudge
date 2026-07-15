@@ -144,8 +144,9 @@ const DEFAULT_CONFIG_TEMPLATE: &str = "\
 # cutoff = 0.0
 # coverage = 1.0
 
-# Minimum fraction of A-D probability mass the top-logprobs must cover for a
-# logprob-based verdict to be trusted (logprobs mode only). Below this, the
+# Minimum fraction of verdict-token probability mass the top-logprobs must
+# cover for a logprob-based verdict to be trusted (logprobs mode only) — the
+# option digits for pairwise, the option letters for 3-way. Below this, the
 # comparison is treated as unparseable. Must be > 0.0 and <= 1.0.
 # Can be overridden per-judge.
 # min_logprob_coverage = 0.95
@@ -191,7 +192,7 @@ const DEFAULT_CONFIG_TEMPLATE: &str = "\
 #   temperature_jitter     - Std dev of N(1.0, jitter) temperature multiplier (default: 0)
 #   presence_penalty       - Penalizes repeated tokens, range -2.0 to 2.0
 #   top_p                  - Nucleus sampling threshold, range 0.0 to 1.0
-#   min_logprob_coverage   - Min A-D logprob mass to trust a verdict, > 0.0 and <= 1.0 (default: 0.95)
+#   min_logprob_coverage   - Min verdict-token logprob mass to trust a verdict, > 0.0 and <= 1.0 (default: 0.95)
 #   max_tokens             - Maximum tokens in LLM response (default: 2048, or average of specified judges)
 #   api_key_env            - Environment variable name containing the API key
 #   reasoning_effort       - OpenRouter: controls reasoning/thinking mode (e.g. \\\"none\\\" to disable Qwen thinking)

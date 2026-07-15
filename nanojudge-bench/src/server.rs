@@ -158,14 +158,10 @@ fn extract_three_items(prompt: &str) -> (String, String, String) {
 // Verdict generation
 // ---------------------------------------------------------------------------
 
-/// Bradley-Terry coin flip: returns 'A' (item1 wins) or 'D' (item2 wins).
-fn verdict_letter(s1: f64, s2: f64, rng: &mut impl Rng) -> char {
+/// Bradley-Terry coin flip: returns 0 (item1/Option 1 wins) or 1 (item2/Option 2 wins).
+fn verdict_winner(s1: f64, s2: f64, rng: &mut impl Rng) -> usize {
     let p = 1.0 / (1.0 + (-(s1 - s2)).exp());
-    if rng.random::<f64>() < p {
-        'A'
-    } else {
-        'D'
-    }
+    if rng.random::<f64>() < p { 0 } else { 1 }
 }
 
 /// Derive a deterministic seed from (base_seed, item1, item2, encounter).
@@ -182,31 +178,26 @@ fn deterministic_pair_seed(base: u64, item1: &str, item2: &str, seq: u64) -> u64
     hasher.finish()
 }
 
-fn verdict_text(letter: char) -> &'static str {
-    match letter {
-        'A' => "Verdict A: Option 1, clearly",
-        'D' => "Verdict D: Option 2, clearly",
+fn verdict_text(winner: usize) -> &'static str {
+    match winner {
+        0 => "Verdict: Option 1",
+        1 => "Verdict: Option 2",
         _ => unreachable!(),
     }
 }
 
-/// Build a one-hot logprobs payload for the given verdict letter.
+/// Build a one-hot logprobs payload for the given verdict winner.
 ///
-/// The winning letter gets logprob 0.0 (probability 1.0), all others get -100.0
+/// The winning digit gets logprob 0.0 (probability 1.0), the other gets -100.0
 /// (probability ~0). This is a valid logprobs response — real LLMs produce similar
 /// one-hot distributions when they are highly confident.
-fn build_logprobs_payload(letter: char) -> ChoiceLogprobs {
-    let verdict_suffix = match letter {
-        'A' => ": Option 1, clearly",
-        'D' => ": Option 2, clearly",
-        _ => unreachable!(),
-    };
-
-    let top_logprobs: Vec<TopLogprobEntry> = ['A', 'B', 'C', 'D']
+fn build_logprobs_payload(winner: usize) -> ChoiceLogprobs {
+    let top_logprobs: Vec<TopLogprobEntry> = ["1", "2"]
         .iter()
-        .map(|&l| TopLogprobEntry {
-            token: l.to_string(),
-            logprob: if l == letter { 0.0 } else { -100.0 },
+        .enumerate()
+        .map(|(i, d)| TopLogprobEntry {
+            token: d.to_string(),
+            logprob: if i == winner { 0.0 } else { -100.0 },
         })
         .collect();
 
@@ -217,12 +208,16 @@ fn build_logprobs_payload(letter: char) -> ChoiceLogprobs {
                 top_logprobs: None,
             },
             LogprobToken {
-                token: format!(" {letter}"),
-                top_logprobs: Some(top_logprobs),
+                token: ":".to_string(),
+                top_logprobs: None,
             },
             LogprobToken {
-                token: verdict_suffix.to_string(),
+                token: " Option".to_string(),
                 top_logprobs: None,
+            },
+            LogprobToken {
+                token: format!(" {}", winner + 1),
+                top_logprobs: Some(top_logprobs),
             },
         ],
     }
@@ -347,7 +342,7 @@ async fn handle_chat(
         .get(&item2)
         .unwrap_or_else(|| panic!("unknown item: {item2:?}"));
 
-    let letter = {
+    let winner = {
         let key = (item1.clone(), item2.clone());
         let encounter = {
             let mut counts = state.pair_counts.lock().unwrap();
@@ -358,17 +353,17 @@ async fn handle_chat(
         };
         let pair_seed = deterministic_pair_seed(state.seed, &item1, &item2, encounter);
         let mut rng = StdRng::seed_from_u64(pair_seed);
-        verdict_letter(s1, s2, &mut rng)
+        verdict_winner(s1, s2, &mut rng)
     };
 
     Json(ChatResponse {
         choices: vec![Choice {
             message: ResponseMessage {
                 role: "assistant".to_string(),
-                content: verdict_text(letter).to_string(),
+                content: verdict_text(winner).to_string(),
             },
             logprobs: if want_logprobs {
-                Some(build_logprobs_payload(letter))
+                Some(build_logprobs_payload(winner))
             } else {
                 None
             },

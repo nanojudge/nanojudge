@@ -2,11 +2,11 @@
 
 ## Current assumption
 
-Logprob-based verdict extraction assumes the judge's tokenizer behaves reasonably: the tokens spelling out each verdict (e.g. `"Verdict: A"` and `"Verdict: B"`) tokenize in a consistent, comparable way across outcomes. Under that assumption, parsing a verdict's probability mass is uniform — read the relevant tokens, sum their logprobs, check coverage against `min_logprob_coverage`. Same code path for every outcome.
+Logprob-based verdict extraction assumes the judge's tokenizer behaves reasonably: the tokens spelling out each verdict (e.g. `"Verdict: Option 1"` and `"Verdict: Option 2"`) tokenize in a consistent, comparable way across outcomes. Under that assumption, parsing a verdict's probability mass is uniform — read the relevant tokens, sum their logprobs, check coverage against `min_logprob_coverage`. Same code path for every outcome.
 
 ## The failure mode
 
-A pathological or adversarial tokenizer can tokenize semantically symmetric outcomes asymmetrically. For example `"Verdict: A"` could be a single token while `"Verdict: B"` splits into two. Parsing then stops being uniform:
+A pathological or adversarial tokenizer can tokenize semantically symmetric outcomes asymmetrically. For example `"Verdict: Option 1"` could end in a single digit token while `"Verdict: Option 2"` splits the digit off differently. Parsing then stops being uniform:
 
 - Outcome A's probability mass is read in one token; outcome B's requires accumulating across a branching continuation.
 - The API's `top_logprobs` only returns a fixed number of candidate tokens per position, so the full continuation tree for the multi-token outcome may not be present at all.
