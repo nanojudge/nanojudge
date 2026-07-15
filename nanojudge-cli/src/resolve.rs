@@ -13,6 +13,12 @@ const DEFAULT_CONCURRENCY: usize = 16;
 const DEFAULT_TEMPERATURE_JITTER: f64 = 0.0;
 const DEFAULT_MAX_RETRIES: usize = 3;
 const DEFAULT_ANALYSIS_LENGTH: &str = "2 paragraphs";
+// A verdict token written after a reasoning analysis is near-deterministic, so
+// its logprobs read overconfident and get decompressed by default. Without
+// reasoning, the verdict token is the model's first expression of preference
+// and its logprobs are left untouched.
+const DEFAULT_VERDICT_TEMPERATURE_REASONING: f64 = 3.0;
+const DEFAULT_VERDICT_TEMPERATURE_NO_REASONING: f64 = 1.0;
 
 /// Merge a CLI value with a config file value. CLI wins.
 /// Warns to stderr if both are set and differ.
@@ -95,6 +101,9 @@ pub struct ResolvedJudge {
     pub concurrency: usize,
     pub weight: f64,
     pub min_logprob_coverage: f64,
+    /// Temperature applied to this judge's parsed verdict distributions
+    /// (q^(1/T)) before edges are built. Finite and > 0; 1.0 = identity.
+    pub verdict_temperature: f64,
     pub max_tokens: u32,
     pub reasoning_effort: Option<String>,
     pub chat_template_kwargs: Option<HashMap<String, serde_json::Value>>,
@@ -160,6 +169,18 @@ pub fn resolve_judges(
     if !global_min_logprob_coverage.is_finite() || global_min_logprob_coverage <= 0.0 || global_min_logprob_coverage > 1.0 {
         bail(format!(
             "min_logprob_coverage={global_min_logprob_coverage}, must be finite, > 0.0 and <= 1.0"
+        ));
+    }
+
+    let global_verdict_temperature = merge_opt(shared.verdict_temperature, cfg.verdict_temperature, "verdict-temperature")
+        .unwrap_or(if reasoning_enabled {
+            DEFAULT_VERDICT_TEMPERATURE_REASONING
+        } else {
+            DEFAULT_VERDICT_TEMPERATURE_NO_REASONING
+        });
+    if !global_verdict_temperature.is_finite() || global_verdict_temperature <= 0.0 {
+        bail(format!(
+            "verdict_temperature={global_verdict_temperature}, must be finite and > 0"
         ));
     }
 
@@ -247,6 +268,14 @@ pub fn resolve_judges(
             ));
         }
 
+        let verdict_temperature = jc.verdict_temperature.unwrap_or(global_verdict_temperature);
+        if !verdict_temperature.is_finite() || verdict_temperature <= 0.0 {
+            bail(format!(
+                "Judge {} has verdict_temperature={}, must be finite and > 0",
+                jc.model, verdict_temperature
+            ));
+        }
+
         judges.push(ResolvedJudge {
             endpoint: jc.endpoint.clone(),
             model: jc.model.clone(),
@@ -265,6 +294,7 @@ pub fn resolve_judges(
             },
             weight,
             min_logprob_coverage,
+            verdict_temperature,
             max_tokens: jc.max_tokens.unwrap_or(default_max_tokens),
             reasoning_effort: jc.reasoning_effort.clone(),
             chat_template_kwargs: jc.chat_template_kwargs.as_ref().map(|m| {
@@ -536,6 +566,7 @@ mod tests {
             comparisons: None,
             concurrency: None,
             min_logprob_coverage: None,
+            verdict_temperature: None,
             comparison_distribution: None,
             items_per_comparison: None,
             selection_sharpness: None,
@@ -582,6 +613,7 @@ mod tests {
                 presence_penalty: None,
                 top_p: None,
                 min_logprob_coverage: None,
+                verdict_temperature: None,
                 api_key_env: None,
                 max_tokens: None,
                 reasoning_effort: None,
@@ -635,6 +667,71 @@ mod tests {
         cfg.judge.as_mut().unwrap()[0].min_logprob_coverage = Some(0.7);
         let judges = resolve_judges(&cli, &cfg, Path::new("test.toml"), true);
         assert_eq!(judges[0].min_logprob_coverage, 0.7);
+    }
+
+    #[test]
+    fn test_verdict_temperature_default_reasoning() {
+        let cli = default_cli();
+        let cfg = one_judge_config();
+        let judges = resolve_judges(&cli, &cfg, Path::new("test.toml"), true);
+        assert_eq!(judges[0].verdict_temperature, DEFAULT_VERDICT_TEMPERATURE_REASONING);
+    }
+
+    #[test]
+    fn test_verdict_temperature_default_no_reasoning() {
+        let cli = default_cli();
+        let cfg = one_judge_config();
+        let judges = resolve_judges(&cli, &cfg, Path::new("test.toml"), false);
+        assert_eq!(judges[0].verdict_temperature, DEFAULT_VERDICT_TEMPERATURE_NO_REASONING);
+    }
+
+    #[test]
+    fn test_verdict_temperature_from_cli() {
+        let mut cli = default_cli();
+        cli.verdict_temperature = Some(6.0);
+        let cfg = one_judge_config();
+        let judges = resolve_judges(&cli, &cfg, Path::new("test.toml"), true);
+        assert_eq!(judges[0].verdict_temperature, 6.0);
+    }
+
+    #[test]
+    fn test_verdict_temperature_from_config() {
+        let cli = default_cli();
+        let mut cfg = one_judge_config();
+        cfg.verdict_temperature = Some(2.0);
+        let judges = resolve_judges(&cli, &cfg, Path::new("test.toml"), true);
+        assert_eq!(judges[0].verdict_temperature, 2.0);
+    }
+
+    #[test]
+    fn test_verdict_temperature_cli_overrides_config() {
+        let mut cli = default_cli();
+        cli.verdict_temperature = Some(6.0);
+        let mut cfg = one_judge_config();
+        cfg.verdict_temperature = Some(2.0);
+        let judges = resolve_judges(&cli, &cfg, Path::new("test.toml"), true);
+        assert_eq!(judges[0].verdict_temperature, 6.0);
+    }
+
+    #[test]
+    fn test_verdict_temperature_per_judge_overrides_global() {
+        let mut cli = default_cli();
+        cli.verdict_temperature = Some(6.0);
+        let mut cfg = one_judge_config();
+        cfg.judge.as_mut().unwrap()[0].verdict_temperature = Some(2.5);
+        let judges = resolve_judges(&cli, &cfg, Path::new("test.toml"), true);
+        assert_eq!(judges[0].verdict_temperature, 2.5);
+    }
+
+    #[test]
+    fn test_verdict_temperature_explicit_wins_in_no_reasoning_mode() {
+        // An explicit global value applies as-is even when reasoning is off —
+        // the mode-dependent default only kicks in when nothing is set.
+        let cli = default_cli();
+        let mut cfg = one_judge_config();
+        cfg.verdict_temperature = Some(4.0);
+        let judges = resolve_judges(&cli, &cfg, Path::new("test.toml"), false);
+        assert_eq!(judges[0].verdict_temperature, 4.0);
     }
 
     #[test]

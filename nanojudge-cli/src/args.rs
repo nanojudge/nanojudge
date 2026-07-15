@@ -70,6 +70,14 @@ pub struct ConfigArgs {
     #[arg(long)]
     pub min_logprob_coverage: Option<f64>,
 
+    /// Temperature applied to each parsed verdict distribution before scoring:
+    /// q^(1/T), which divides every edge's log-odds by T. 1.0 = off; > 1 pulls
+    /// overconfident verdicts toward 50/50; < 1 sharpens. Distinct from the
+    /// sampling temperature. Must be finite and > 0. Can be overridden per-judge.
+    /// Default: 3.0 with reasoning enabled, 1.0 without.
+    #[arg(long)]
+    pub verdict_temperature: Option<f64>,
+
     /// Comparison distribution: "uniform" or "top-heavy"
     #[arg(long)]
     pub comparison_distribution: Option<String>,

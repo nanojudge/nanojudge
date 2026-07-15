@@ -142,6 +142,7 @@ Per-judge settings (in `[[judge]]` blocks):
 | `api_key_env` | No | Environment variable containing the API key |
 | `reasoning_effort` | No | Controls model reasoning mode (e.g. `"none"` to disable Qwen 3.5 thinking) |
 | `min_logprob_coverage` | No | Min fraction of verdict-token logprob mass required to trust a verdict, > 0.0 and ≤ 1.0 (default: 0.95) |
+| `verdict_temperature` | No | Tempers this judge's parsed verdict distribution before scoring: `q^(1/T)`, dividing each edge's log-odds by T. > 1 softens overconfident verdicts toward 50/50; distinct from the sampling `temperature`. Must be finite and > 0. Also settable top-level (default: 3.0 with reasoning enabled, 1.0 without) |
 
 ## How it works
 

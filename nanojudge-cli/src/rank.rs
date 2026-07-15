@@ -45,6 +45,27 @@ fn resolve_save_path(path: &Path, prefix: &str) -> PathBuf {
     }
 }
 
+/// Temper a parsed verdict distribution before it becomes edges:
+/// q_i ← q_i^(1/temperature), renormalized — equivalent to dividing each
+/// derived edge's log-odds by `temperature`. Values > 1 pull overconfident
+/// verdicts toward uniform; 1.0 is the identity. One-hot (text-mode) verdicts
+/// are fixed points, so only logprob-derived verdicts are affected.
+fn temper_verdict<const N: usize>(mut dist: [f64; N], temperature: f64) -> [f64; N] {
+    if temperature == 1.0 {
+        return dist;
+    }
+    let inv = 1.0 / temperature;
+    let mut sum = 0.0;
+    for q in dist.iter_mut() {
+        *q = q.powf(inv);
+        sum += *q;
+    }
+    for q in dist.iter_mut() {
+        *q /= sum;
+    }
+    dist
+}
+
 /// Parse a criterion file into a list of criteria, splitting on ---CRITERION---.
 fn parse_criteria(content: &str) -> Vec<String> {
     content
@@ -193,6 +214,7 @@ pub async fn run(args: RankArgs) {
     let normalized_weights: Vec<f64> = judges.iter().map(|j| j.weight / total_weight).collect();
     // Per-judge min_logprob_coverage values
     let judge_min_logprob_coverages: Vec<f64> = judges.iter().map(|j| j.min_logprob_coverage).collect();
+    let judge_verdict_temperatures: Vec<f64> = judges.iter().map(|j| j.verdict_temperature).collect();
 
     let criteria: Vec<String> = if let Some(ref path) = args.criterion_file {
         let content = std::fs::read_to_string(path)
@@ -244,16 +266,20 @@ pub async fn run(args: RankArgs) {
         }
 
         if judges.len() == 1 {
-            eprintln!("Endpoint: {} | Model: {}", judges[0].endpoint, judges[0].model);
+            eprintln!(
+                "Endpoint: {} | Model: {} | Verdict temperature: {}",
+                judges[0].endpoint, judges[0].model, judges[0].verdict_temperature,
+            );
         } else {
             eprintln!("Judge panel ({} judges):", judges.len());
             for j in &judges {
                 eprintln!(
-                    "  {} — {} (concurrency: {}, weight: {:.0}%)",
+                    "  {} — {} (concurrency: {}, weight: {:.0}%, verdict temp: {})",
                     j.display_name,
                     j.endpoint,
                     j.concurrency,
                     j.weight / total_weight * 100.0,
+                    j.verdict_temperature,
                 );
             }
         }
@@ -510,10 +536,12 @@ pub async fn run(args: RankArgs) {
                             let _ = f.flush();
                         }
 
+                        // The raw distribution is what went to the JSONL above;
+                        // the tempered one is what the scoring engine sees.
                         round_results.push(ComparisonInput::pairwise(
                             result.item1_id,
                             result.item2_id,
-                            category_probs,
+                            temper_verdict(category_probs, judge_verdict_temperatures[judge_idx]),
                             assigned_judge_id,
                         ));
                     } else {
@@ -882,6 +910,7 @@ async fn run_three_way(
     let total_weight: f64 = judges.iter().map(|j| j.weight).sum();
     let normalized_weights: Vec<f64> = judges.iter().map(|j| j.weight / total_weight).collect();
     let judge_min_logprob_coverages: Vec<f64> = judges.iter().map(|j| j.min_logprob_coverage).collect();
+    let judge_verdict_temperatures: Vec<f64> = judges.iter().map(|j| j.verdict_temperature).collect();
 
     let criteria: Vec<String> = if let Some(ref path) = args.criterion_file {
         let content = std::fs::read_to_string(path)
@@ -911,7 +940,10 @@ async fn run_three_way(
             eprintln!("Criterion: \"{}\"", criteria[0]);
         }
         if judges.len() == 1 {
-            eprintln!("Endpoint: {} | Model: {}", judges[0].endpoint, judges[0].model);
+            eprintln!(
+                "Endpoint: {} | Model: {} | Verdict temperature: {}",
+                judges[0].endpoint, judges[0].model, judges[0].verdict_temperature,
+            );
         }
     }
 
@@ -1132,7 +1164,9 @@ async fn run_three_way(
                         // orientation coin needed. Feed the edges as-is.
                         let edges = winner_dist_to_edges(
                             [tw.item_a_id, tw.item_b_id, tw.item_c_id],
-                            winner_dist,
+                            // Raw distribution went to the JSONL above; the
+                            // scoring engine sees the tempered one.
+                            temper_verdict(winner_dist, judge_verdict_temperatures[judge_idx]),
                             assigned_judge_id,
                         );
                         round_results.extend(edges);
@@ -1350,6 +1384,52 @@ async fn run_three_way(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_temper_verdict_identity_at_one() {
+        assert_eq!(temper_verdict([0.9, 0.1], 1.0), [0.9, 0.1]);
+        assert_eq!(temper_verdict([0.7, 0.2, 0.1], 1.0), [0.7, 0.2, 0.1]);
+    }
+
+    #[test]
+    fn test_temper_verdict_one_hot_fixed_point() {
+        // Text-mode verdicts are one-hot: 1^(1/T)=1 and 0^(1/T)=0, so
+        // tempering must leave them exactly alone.
+        assert_eq!(temper_verdict([1.0, 0.0], 4.0), [1.0, 0.0]);
+        assert_eq!(temper_verdict([0.0, 1.0], 4.0), [0.0, 1.0]);
+        assert_eq!(temper_verdict([0.0, 1.0, 0.0], 4.0), [0.0, 1.0, 0.0]);
+    }
+
+    #[test]
+    fn test_temper_verdict_divides_log_odds() {
+        let t = temper_verdict([0.999, 0.001], 4.0);
+        assert!((t[0] + t[1] - 1.0).abs() < 1e-12);
+        let expected_log_odds = (0.999f64 / 0.001).ln() / 4.0;
+        assert!(((t[0] / t[1]).ln() - expected_log_odds).abs() < 1e-9);
+        // Overconfident 0.999 gets pulled well toward 0.5
+        assert!(t[0] < 0.9 && t[0] > 0.5);
+    }
+
+    #[test]
+    fn test_temper_verdict_sharpens_below_one() {
+        let t = temper_verdict([0.7, 0.3], 0.5);
+        let expected_log_odds = (0.7f64 / 0.3).ln() / 0.5;
+        assert!(((t[0] / t[1]).ln() - expected_log_odds).abs() < 1e-9);
+        assert!(t[0] > 0.7);
+    }
+
+    #[test]
+    fn test_temper_verdict_three_way_pairwise_ratios() {
+        // Tempering the 3-vector before the Luce ratio must divide every
+        // pairwise edge's log-odds by T.
+        let q = [0.9, 0.08, 0.02];
+        let t = temper_verdict(q, 4.0);
+        assert!((t.iter().sum::<f64>() - 1.0).abs() < 1e-12);
+        for (i, j) in [(0, 1), (0, 2), (1, 2)] {
+            let expected = (q[i] / q[j]).ln() / 4.0;
+            assert!(((t[i] / t[j]).ln() - expected).abs() < 1e-9);
+        }
+    }
 
     #[test]
     fn test_parse_criteria_single() {

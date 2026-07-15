@@ -22,6 +22,9 @@ pub struct JudgeConfig {
     pub presence_penalty: Option<f64>,
     pub top_p: Option<f64>,
     pub min_logprob_coverage: Option<f64>,
+    /// Temperature applied to this judge's parsed verdict distribution
+    /// (q^(1/T)) before scoring. Distinct from the sampling `temperature`.
+    pub verdict_temperature: Option<f64>,
     pub api_key_env: Option<String>,
     pub max_tokens: Option<u32>,
     /// OpenRouter extension: controls model reasoning/thinking mode.
@@ -64,6 +67,7 @@ pub struct NanojudgeConfig {
     pub bias_proposal_std: Option<f64>,
     pub reasoning_enabled: Option<bool>,
     pub min_logprob_coverage: Option<f64>,
+    pub verdict_temperature: Option<f64>,
     pub live_top: Option<usize>,
     pub save_comparisons: Option<PathBuf>,
     pub output_format: Option<OutputFormat>,
@@ -151,6 +155,17 @@ const DEFAULT_CONFIG_TEMPLATE: &str = "\
 # Can be overridden per-judge.
 # min_logprob_coverage = 0.95
 
+# Temperature applied to each parsed verdict distribution before scoring:
+# q^(1/T), which divides every edge's log-odds by T. 1.0 = off. > 1 pulls
+# overconfident verdicts toward 50/50; < 1 sharpens. Distinct from the
+# sampling `temperature` — this tempers the parsed verdict, not the LLM call.
+# Text-mode (non-logprob) verdicts are one-hot and unaffected.
+# Must be finite and > 0. Can be overridden per-judge.
+# Default: 3.0 when reasoning is enabled (a verdict token written after an
+# analysis is near-deterministic, so its logprobs read overconfident);
+# 1.0 when reasoning is disabled.
+# verdict_temperature = 3.0
+
 # Print a live ranking table after each round. 0 = all items, N = top N.
 # Omit or comment out to disable.
 # live_top = 10
@@ -193,6 +208,7 @@ const DEFAULT_CONFIG_TEMPLATE: &str = "\
 #   presence_penalty       - Penalizes repeated tokens, range -2.0 to 2.0
 #   top_p                  - Nucleus sampling threshold, range 0.0 to 1.0
 #   min_logprob_coverage   - Min verdict-token logprob mass to trust a verdict, > 0.0 and <= 1.0 (default: 0.95)
+#   verdict_temperature    - Temper this judge's parsed verdicts, q^(1/T); > 1 softens overconfidence, must be > 0 (default: global value, else 3.0 reasoning / 1.0 no-reasoning)
 #   max_tokens             - Maximum tokens in LLM response (default: 2048, or average of specified judges)
 #   api_key_env            - Environment variable name containing the API key
 #   reasoning_effort       - OpenRouter: controls reasoning/thinking mode (e.g. \\\"none\\\" to disable Qwen thinking)
@@ -439,6 +455,24 @@ reasoning_enabled = false
 
         let config = load_config(tmpfile.path());
         assert_eq!(config.reasoning_enabled, Some(false));
+    }
+
+    #[test]
+    fn test_verdict_temperature_parses() {
+        let mut tmpfile = tempfile::NamedTempFile::new().unwrap();
+        write!(tmpfile, r#"
+verdict_temperature = 6.0
+
+[[judge]]
+endpoint = "http://localhost:8000"
+model = "qwen-32b"
+temperature = 0.6
+verdict_temperature = 2.5
+"#).unwrap();
+
+        let config = load_config(tmpfile.path());
+        assert_eq!(config.verdict_temperature, Some(6.0));
+        assert_eq!(config.judge.unwrap()[0].verdict_temperature, Some(2.5));
     }
 
     #[test]
