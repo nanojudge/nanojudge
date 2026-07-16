@@ -83,8 +83,9 @@ pub use engine::{
     RankingEngine,
 };
 pub use pairing::{
-    calculate_info_gain, calculate_triples_for_round, generate_uniform_pairings,
-    generate_top_heavy_pairings, get_effective_comparison_distribution, ComparisonDistribution,
+    calculate_info_gain, calculate_integrated_info_gain, calculate_triples_for_round,
+    generate_uniform_pairings, generate_top_heavy_pairings,
+    get_effective_comparison_distribution, ComparisonDistribution,
 };
 pub use scoring::run_scoring;
 pub use three_way::winner_dist_to_edges;

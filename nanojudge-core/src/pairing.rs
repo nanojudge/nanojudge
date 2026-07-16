@@ -25,6 +25,46 @@ pub fn calculate_info_gain(rating_a: f64, rating_b: f64, sharpness: f64) -> f64 
     info_gain.powf(sharpness)
 }
 
+/// Information gain for a matchup, integrating the win probability over
+/// Gaussian rating uncertainty: with independent ratings ~ N(rating, std²),
+/// the expected win probability is `sigmoid(gap / kappa)` where
+/// `kappa = sqrt(1 + pi * (std_a² + std_b²) / 8)` (the logistic-probit
+/// bridge). Shrinking the gap this way can only pull p toward 0.5, so
+/// uncertain matchups — pairs that *might* be close — gain weight over their
+/// point estimates. With both stds 0, `kappa` is exactly 1 and this reduces
+/// bit-for-bit to `calculate_info_gain`.
+pub fn calculate_integrated_info_gain(
+    rating_a: f64,
+    std_a: f64,
+    rating_b: f64,
+    std_b: f64,
+    sharpness: f64,
+) -> f64 {
+    let kappa = (1.0 + std::f64::consts::PI * (std_a * std_a + std_b * std_b) / 8.0).sqrt();
+    let p = 1.0 / (1.0 + ((rating_b - rating_a) / kappa).exp());
+    (p * (1.0 - p)).powf(sharpness)
+}
+
+/// Opponent-window gain used by every window loop below: integrated info gain
+/// when per-item posterior stds are available (top-heavy runs push them in
+/// from each interim fit), plain plug-in info gain otherwise (uniform runs,
+/// where only the MLE point estimate exists).
+fn window_info_gain(
+    rating_a: f64,
+    rating_b: f64,
+    item_a: usize,
+    item_b: usize,
+    current_stds: Option<&[f64]>,
+    sharpness: f64,
+) -> f64 {
+    match current_stds {
+        Some(stds) => {
+            calculate_integrated_info_gain(rating_a, stds[item_a], rating_b, stds[item_b], sharpness)
+        }
+        None => calculate_info_gain(rating_a, rating_b, sharpness),
+    }
+}
+
 /// Probability that item A goes in position 1 against item B.
 ///
 /// Uses Laplace-smoothed first-position ratios so that an item which has
@@ -88,20 +128,29 @@ pub fn get_effective_comparison_distribution(
 /// listed first. Callers must pass their real cumulative counts — zeros mean
 /// "round 1" and produce purely random pairs.
 ///
+/// `current_stds[i]` (optional) is the posterior std of `current_ratings[i]`;
+/// when supplied, opponent gain integrates over that uncertainty
+/// (`calculate_integrated_info_gain`) instead of using the point estimates.
+///
 /// # Panics
 ///
-/// Panics if `current_ratings`, `first_position_counts` or `games_played`
-/// length does not equal `item_ids` length.
+/// Panics if `current_ratings`, `current_stds` (when supplied),
+/// `first_position_counts` or `games_played` length does not equal `item_ids`
+/// length.
 pub fn generate_uniform_pairings(
     item_ids: &[i64],
     pairs_count: usize,
     current_ratings: &[f64],
+    current_stds: Option<&[f64]>,
     sharpness: f64,
     first_position_counts: &[usize],
     games_played: &[usize],
 ) -> Vec<Pair> {
     let n = item_ids.len();
     assert_eq!(current_ratings.len(), n, "current_ratings length mismatch");
+    if let Some(stds) = current_stds {
+        assert_eq!(stds.len(), n, "current_stds length mismatch");
+    }
     assert_eq!(first_position_counts.len(), n, "first_position_counts length mismatch");
     assert_eq!(games_played.len(), n, "games_played length mismatch");
     let mut rng = make_rng(None, crate::seed::SUBSYSTEM_PAIRING);
@@ -109,6 +158,7 @@ pub fn generate_uniform_pairings(
         n,
         pairs_count,
         current_ratings,
+        current_stds,
         sharpness,
         first_position_counts,
         games_played,
@@ -128,16 +178,22 @@ pub fn generate_uniform_pairings(
 /// (cumulative counts for `item_ids[i]`) balance which item of each pair is
 /// listed first. Returns pairs of item IDs.
 ///
+/// `current_stds[i]` (optional) is the posterior std of `current_ratings[i]`;
+/// when supplied, opponent gain integrates over that uncertainty
+/// (`calculate_integrated_info_gain`) instead of using the point estimates.
+///
 /// # Panics
 ///
-/// Panics if `selection_weights`, `current_ratings`, `first_position_counts`
-/// or `games_played` length does not equal `item_ids` length, or if the total
-/// selection weight is not positive.
+/// Panics if `selection_weights`, `current_ratings`, `current_stds` (when
+/// supplied), `first_position_counts` or `games_played` length does not equal
+/// `item_ids` length, or if the total selection weight is not positive.
+#[allow(clippy::too_many_arguments)]
 pub fn generate_top_heavy_pairings(
     item_ids: &[i64],
     pairs_count: usize,
     selection_weights: &[f64],
     current_ratings: &[f64],
+    current_stds: Option<&[f64]>,
     matchmaking_sharpness: f64,
     first_position_counts: &[usize],
     games_played: &[usize],
@@ -151,6 +207,7 @@ pub fn generate_top_heavy_pairings(
         pairs_count,
         selection_weights,
         current_ratings,
+        current_stds,
         matchmaking_sharpness,
         first_position_counts,
         games_played,
@@ -163,10 +220,12 @@ pub fn generate_top_heavy_pairings(
 // Internal indexed pairing functions (work with usize indices)
 // ---------------------------------------------------------------------------
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn generate_uniform_pairings_indexed(
     num_items: usize,
     pairs_count: usize,
     current_ratings: &[f64],
+    current_stds: Option<&[f64]>,
     sharpness: f64,
     first_position_counts: &[usize],
     games_played: &[usize],
@@ -185,7 +244,7 @@ pub(crate) fn generate_uniform_pairings_indexed(
     let mut local_games: Vec<usize> = games_played.to_vec();
 
     generate_uniform_iteration(
-        num_items, current_ratings, sharpness, pairs_count,
+        num_items, current_ratings, current_stds, sharpness, pairs_count,
         &mut pairings, rng,
         &mut local_first_counts, &mut local_games,
     );
@@ -197,6 +256,7 @@ pub(crate) fn generate_uniform_pairings_indexed(
 fn generate_uniform_iteration(
     num_items: usize,
     current_ratings: &[f64],
+    current_stds: Option<&[f64]>,
     sharpness: f64,
     max_pairs: usize,
     pairings: &mut Vec<IndexedPair>,
@@ -222,7 +282,7 @@ fn generate_uniform_iteration(
     } else if rounds_completed == 1 {
         nearest_neighbour_pairs(num_items, current_ratings, max_pairs, rng)
     } else {
-        info_gain_pairs(num_items, current_ratings, sharpness, max_pairs, rng)
+        info_gain_pairs(num_items, current_ratings, current_stds, sharpness, max_pairs, rng)
     };
 
     // Assign each pair an orientation (which item goes in position 1), balancing
@@ -280,6 +340,7 @@ fn nearest_neighbour_pairs(
 fn info_gain_pairs(
     num_items: usize,
     current_ratings: &[f64],
+    current_stds: Option<&[f64]>,
     sharpness: f64,
     max_pairs: usize,
     rng: &mut impl Rng,
@@ -329,7 +390,9 @@ fn info_gain_pairs(
         for p in window_start..window_end {
             if alive[p] {
                 candidates.push(p);
-                weights.push(calculate_info_gain(item1_rating, sorted_pool[p].1, sharpness));
+                weights.push(window_info_gain(
+                    item1_rating, sorted_pool[p].1, item1, sorted_pool[p].0, current_stds, sharpness,
+                ));
             }
         }
         if candidates.is_empty() {
@@ -380,6 +443,7 @@ pub(crate) fn generate_top_heavy_pairings_indexed(
     pairs_count: usize,
     selection_weights: &[f64],
     current_ratings: &[f64],
+    current_stds: Option<&[f64]>,
     matchmaking_sharpness: f64,
     first_position_counts: &[usize],
     games_played: &[usize],
@@ -390,6 +454,9 @@ pub(crate) fn generate_top_heavy_pairings_indexed(
     }
     assert_eq!(selection_weights.len(), num_items, "selection_weights length mismatch");
     assert_eq!(current_ratings.len(), num_items, "current_ratings length mismatch");
+    if let Some(stds) = current_stds {
+        assert_eq!(stds.len(), num_items, "current_stds length mismatch");
+    }
     let pairs_target = pairs_count;
 
     let total_weight: f64 = selection_weights.iter().sum();
@@ -444,7 +511,9 @@ pub(crate) fn generate_top_heavy_pairings_indexed(
                 continue;
             }
             candidates.push(cand_item);
-            weights.push(calculate_info_gain(item1_rating, cand_rating, matchmaking_sharpness));
+            weights.push(window_info_gain(
+                item1_rating, cand_rating, item1, cand_item, current_stds, matchmaking_sharpness,
+            ));
         }
         // For num_items >= 2 the window around item1 always holds at least one
         // other item, so a distinct opponent always exists.
@@ -500,6 +569,7 @@ pub(crate) fn generate_uniform_triples_indexed(
     num_items: usize,
     triples_count: usize,
     current_ratings: &[f64],
+    current_stds: Option<&[f64]>,
     sharpness: f64,
     games_played: &[usize],
     rng: &mut StdRng,
@@ -513,7 +583,7 @@ pub(crate) fn generate_uniform_triples_indexed(
     } else if rounds_completed == 1 {
         nearest_neighbour_triples(num_items, current_ratings, triples_count, rng)
     } else {
-        info_gain_triples(num_items, current_ratings, sharpness, triples_count, rng)
+        info_gain_triples(num_items, current_ratings, current_stds, sharpness, triples_count, rng)
     }
 }
 
@@ -552,6 +622,7 @@ fn nearest_neighbour_triples(
 fn info_gain_triples(
     num_items: usize,
     current_ratings: &[f64],
+    current_stds: Option<&[f64]>,
     sharpness: f64,
     max_triples: usize,
     rng: &mut impl Rng,
@@ -584,7 +655,7 @@ fn info_gain_triples(
         let mut picked: Vec<usize> = Vec::with_capacity(2);
         for _ in 0..2 {
             if let Some(pos) = pick_window_opponent(
-                &sorted_pool, &alive, pos1, item1_rating, sharpness, half_w, n, rng,
+                &sorted_pool, &alive, pos1, item1_rating, current_stds, sharpness, half_w, n, rng,
             ) {
                 let live_idx = live_idx_of[pos].expect("candidate must be alive");
                 swap_remove_live(&mut live_positions, &mut live_idx_of, live_idx);
@@ -612,11 +683,13 @@ fn pick_window_opponent(
     alive: &[bool],
     pos1: usize,
     item1_rating: f64,
+    current_stds: Option<&[f64]>,
     sharpness: f64,
     half_w: usize,
     n: usize,
     rng: &mut impl Rng,
 ) -> Option<usize> {
+    let item1 = sorted_pool[pos1].0;
     let window_start = pos1.saturating_sub(half_w);
     let window_end = (pos1 + half_w + 1).min(n);
     let mut candidates: Vec<usize> = Vec::new();
@@ -624,7 +697,9 @@ fn pick_window_opponent(
     for p in window_start..window_end {
         if alive[p] {
             candidates.push(p);
-            weights.push(calculate_info_gain(item1_rating, sorted_pool[p].1, sharpness));
+            weights.push(window_info_gain(
+                item1_rating, sorted_pool[p].1, item1, sorted_pool[p].0, current_stds, sharpness,
+            ));
         }
     }
     if candidates.is_empty() {
@@ -648,6 +723,7 @@ pub(crate) fn generate_top_heavy_triples_indexed(
     triples_count: usize,
     selection_weights: &[f64],
     current_ratings: &[f64],
+    current_stds: Option<&[f64]>,
     matchmaking_sharpness: f64,
     rng: &mut StdRng,
 ) -> Vec<IndexedTriple> {
@@ -656,6 +732,9 @@ pub(crate) fn generate_top_heavy_triples_indexed(
     }
     assert_eq!(selection_weights.len(), num_items, "selection_weights length mismatch");
     assert_eq!(current_ratings.len(), num_items, "current_ratings length mismatch");
+    if let Some(stds) = current_stds {
+        assert_eq!(stds.len(), num_items, "current_stds length mismatch");
+    }
 
     let total_weight: f64 = selection_weights.iter().sum();
     assert!(
@@ -697,7 +776,9 @@ pub(crate) fn generate_top_heavy_triples_indexed(
             for p in window_start..window_end {
                 if !chosen[p] {
                     candidates.push(p);
-                    weights.push(calculate_info_gain(item1_rating, sorted_pool[p].1, matchmaking_sharpness));
+                    weights.push(window_info_gain(
+                        item1_rating, sorted_pool[p].1, item1, sorted_pool[p].0, current_stds, matchmaking_sharpness,
+                    ));
                 }
             }
             // For num_items >= 3 the window always holds two other items.
@@ -765,6 +846,49 @@ mod tests {
     }
 
     #[test]
+    fn test_integrated_info_gain_zero_std_matches_plugin_exactly() {
+        // kappa is exactly 1.0 when both stds are 0, so the two functions must
+        // agree bit-for-bit — this is what makes the integrated gain a strict
+        // generalization of the plug-in gain.
+        for &(a, b, s) in &[(1.0, 1.0, 1.0), (0.3, -1.2, 1.0), (2.0, 0.5, 2.0), (5.0, -5.0, 0.5)] {
+            assert_eq!(
+                calculate_info_gain(a, b, s),
+                calculate_integrated_info_gain(a, 0.0, b, 0.0, s),
+            );
+        }
+    }
+
+    #[test]
+    fn test_integrated_info_gain_uncertainty_raises_gain() {
+        // For a fixed rating gap, integration can only pull p toward 0.5, so
+        // gain rises monotonically with uncertainty and stays below the 0.25 cap.
+        let g0 = calculate_integrated_info_gain(2.0, 0.0, 0.0, 0.0, 1.0);
+        let g1 = calculate_integrated_info_gain(2.0, 1.0, 0.0, 0.5, 1.0);
+        let g2 = calculate_integrated_info_gain(2.0, 3.0, 0.0, 3.0, 1.0);
+        assert!(g0 < g1 && g1 < g2, "gain must rise with uncertainty: {g0} {g1} {g2}");
+        assert!(g2 <= 0.25);
+    }
+
+    #[test]
+    fn test_integrated_info_gain_symmetric() {
+        let g_ab = calculate_integrated_info_gain(1.7, 0.4, -0.3, 1.1, 1.3);
+        let g_ba = calculate_integrated_info_gain(-0.3, 1.1, 1.7, 0.4, 1.3);
+        assert!((g_ab - g_ba).abs() < 1e-15);
+    }
+
+    #[test]
+    fn test_integrated_info_gain_large_uncertainty_flattens() {
+        // With stds much larger than the gaps, near and far matchups score
+        // almost the same, while the plug-in gains differ by an order of
+        // magnitude — the exploration regime the integration is meant to add.
+        let close = calculate_integrated_info_gain(0.0, 5.0, 0.0, 5.0, 1.0);
+        let far = calculate_integrated_info_gain(4.0, 5.0, 0.0, 5.0, 1.0);
+        assert!(close / far < 1.5, "integrated gains should be near-flat: {close} vs {far}");
+        let plug_far = calculate_info_gain(4.0, 0.0, 1.0);
+        assert!(0.25 / plug_far > 10.0, "plug-in should still be strongly peaked");
+    }
+
+    #[test]
     fn test_effective_comparison_distribution_uniform_user_choice() {
         let games = vec![10, 10];
         let result = get_effective_comparison_distribution(ComparisonDistribution::Uniform, 2, &games, 3);
@@ -790,7 +914,7 @@ mod tests {
         let item_ids: Vec<i64> = (100..110).collect(); // IDs 100-109
         let ratings = vec![1.0; 10];
         let zeros = vec![0usize; 10];
-        let pairs = generate_uniform_pairings(&item_ids, 5, &ratings, 1.0, &zeros, &zeros);
+        let pairs = generate_uniform_pairings(&item_ids, 5, &ratings, None, 1.0, &zeros, &zeros);
 
         assert_eq!(pairs.len(), 5);
 
@@ -817,7 +941,7 @@ mod tests {
         let partnerships = |s: u64| -> Vec<(usize, usize)> {
             let mut rng = make_rng(Some(s), crate::seed::SUBSYSTEM_PAIRING);
             let pairs = generate_uniform_pairings_indexed(
-                num_items, num_items / 2, &ratings, 1.0, &first_counts, &games, &mut rng,
+                num_items, num_items / 2, &ratings, None, 1.0, &first_counts, &games, &mut rng,
             );
             let mut ps: Vec<(usize, usize)> = pairs
                 .into_iter()
@@ -859,7 +983,7 @@ mod tests {
         let mut total_gap = 0.0;
         let mut count = 0usize;
         for _ in 0..200 {
-            let pairs = generate_uniform_pairings(&item_ids, 5, &ratings, 1.0, &first, &games);
+            let pairs = generate_uniform_pairings(&item_ids, 5, &ratings, None, 1.0, &first, &games);
             for (a, b) in pairs {
                 total_gap += (ratings[a as usize] - ratings[b as usize]).abs();
                 count += 1;
@@ -957,7 +1081,7 @@ mod tests {
         let ratings: Vec<f64> = (0..10).map(|i| i as f64).collect();
         let zeros = vec![0usize; 10];
 
-        let pairs = generate_top_heavy_pairings(&item_ids, 5, &selection_weights, &ratings, 1.0, &zeros, &zeros);
+        let pairs = generate_top_heavy_pairings(&item_ids, 5, &selection_weights, &ratings, None, 1.0, &zeros, &zeros);
         assert_eq!(pairs.len(), 5);
         for (a, b) in &pairs {
             assert_ne!(a, b);
@@ -976,7 +1100,7 @@ mod tests {
         let ratings: Vec<f64> = (0..10).map(|i| if i < 3 { 5.0 } else { 0.0 }).collect();
         let zeros = vec![0usize; 10];
 
-        let pairs = generate_top_heavy_pairings(&item_ids, 200, &selection_weights, &ratings, 1.0, &zeros, &zeros);
+        let pairs = generate_top_heavy_pairings(&item_ids, 200, &selection_weights, &ratings, None, 1.0, &zeros, &zeros);
         let mut appearances = [0usize; 10];
         for (a, b) in &pairs {
             appearances[*a as usize] += 1;
@@ -997,7 +1121,7 @@ mod tests {
         let ratings: Vec<f64> = (0..10).map(|i| i as f64).collect();
         let zeros = vec![0usize; 10];
 
-        let pairs = generate_top_heavy_pairings(&item_ids, 2000, &selection_weights, &ratings, 1.0, &zeros, &zeros);
+        let pairs = generate_top_heavy_pairings(&item_ids, 2000, &selection_weights, &ratings, None, 1.0, &zeros, &zeros);
         let mut total_gap = 0.0;
         for (a, b) in &pairs {
             total_gap += (ratings[*a as usize] - ratings[*b as usize]).abs();
@@ -1006,6 +1130,36 @@ mod tests {
         // A uniformly-random opponent over ratings 0..9 averages a gap of ~3.3;
         // info-gain matchmaking pulls this well below that.
         assert!(mean_gap < 2.5, "info-gain opponents should be rating-local; mean gap was {mean_gap}");
+    }
+
+    #[test]
+    fn test_top_heavy_opponent_window_flattens_with_uncertainty() {
+        // Same setup as test_top_heavy_opponent_is_rating_local, but with
+        // posterior stds much larger than the rating gaps the integrated gain
+        // flattens the window, so the mean rating gap grows toward the
+        // random-opponent value instead of staying tight.
+        let item_ids: Vec<i64> = (0..10).collect();
+        let selection_weights = vec![1.0; 10];
+        let ratings: Vec<f64> = (0..10).map(|i| i as f64).collect();
+        let stds = vec![10.0; 10];
+        let zeros = vec![0usize; 10];
+
+        let mean_gap = |stds: Option<&[f64]>| -> f64 {
+            let pairs = generate_top_heavy_pairings(
+                &item_ids, 2000, &selection_weights, &ratings, stds, 1.0, &zeros, &zeros,
+            );
+            let total: f64 = pairs.iter()
+                .map(|(a, b)| (ratings[*a as usize] - ratings[*b as usize]).abs())
+                .sum();
+            total / pairs.len() as f64
+        };
+
+        let gap_plugin = mean_gap(None);
+        let gap_integrated = mean_gap(Some(&stds));
+        assert!(
+            gap_integrated > gap_plugin + 0.3,
+            "huge stds should flatten opponent selection: plug-in gap {gap_plugin}, integrated gap {gap_integrated}"
+        );
     }
 
     // --- Triple generation tests ---
@@ -1030,7 +1184,7 @@ mod tests {
         let ratings = vec![1.0; 12];
         let games = vec![0usize; 12]; // round 1
         let mut rng = make_rng(Some(1), crate::seed::SUBSYSTEM_PAIRING);
-        let triples = generate_uniform_triples_indexed(12, 4, &ratings, 1.0, &games, &mut rng);
+        let triples = generate_uniform_triples_indexed(12, 4, &ratings, None, 1.0, &games, &mut rng);
         assert_eq!(triples.len(), 4);
         assert_triples_distinct(&triples);
     }
@@ -1040,7 +1194,7 @@ mod tests {
         let ratings: Vec<f64> = (0..12).map(|i| i as f64).collect();
         let games = vec![2usize; 12]; // round 3+ info-gain stage
         let mut rng = make_rng(Some(2), crate::seed::SUBSYSTEM_PAIRING);
-        let triples = generate_uniform_triples_indexed(12, 4, &ratings, 1.0, &games, &mut rng);
+        let triples = generate_uniform_triples_indexed(12, 4, &ratings, None, 1.0, &games, &mut rng);
         assert_eq!(triples.len(), 4);
         assert_triples_distinct(&triples);
     }
@@ -1050,7 +1204,7 @@ mod tests {
         let selection_weights: Vec<f64> = (0..10).map(|i| if i < 3 { 0.8 } else { 0.05 }).collect();
         let ratings: Vec<f64> = (0..10).map(|i| i as f64).collect();
         let mut rng = make_rng(Some(3), crate::seed::SUBSYSTEM_PAIRING);
-        let triples = generate_top_heavy_triples_indexed(10, 5, &selection_weights, &ratings, 1.0, &mut rng);
+        let triples = generate_top_heavy_triples_indexed(10, 5, &selection_weights, &ratings, None, 1.0, &mut rng);
         assert_eq!(triples.len(), 5);
         assert_triples_distinct(&triples);
     }
@@ -1064,7 +1218,7 @@ mod tests {
         let selection_weights: Vec<f64> = (0..12).map(|i| if i < 3 { 1.0 } else { 0.0001 }).collect();
         let ratings: Vec<f64> = (0..12).map(|i| if i < 3 { 5.0 } else { 0.0 }).collect();
         let mut rng = make_rng(Some(4), crate::seed::SUBSYSTEM_PAIRING);
-        let triples = generate_top_heavy_triples_indexed(12, 200, &selection_weights, &ratings, 1.0, &mut rng);
+        let triples = generate_top_heavy_triples_indexed(12, 200, &selection_weights, &ratings, None, 1.0, &mut rng);
         let mut appearances = [0usize; 12];
         for &(a, b, c) in &triples {
             appearances[a] += 1;
@@ -1081,9 +1235,9 @@ mod tests {
         let ratings = vec![1.0; 2];
         let games = vec![0usize; 2];
         let mut rng = make_rng(Some(5), crate::seed::SUBSYSTEM_PAIRING);
-        assert!(generate_uniform_triples_indexed(2, 4, &ratings, 1.0, &games, &mut rng).is_empty());
+        assert!(generate_uniform_triples_indexed(2, 4, &ratings, None, 1.0, &games, &mut rng).is_empty());
         let weights = vec![1.0; 2];
-        assert!(generate_top_heavy_triples_indexed(2, 4, &weights, &ratings, 1.0, &mut rng).is_empty());
+        assert!(generate_top_heavy_triples_indexed(2, 4, &weights, &ratings, None, 1.0, &mut rng).is_empty());
     }
 
     #[test]
@@ -1097,7 +1251,7 @@ mod tests {
         let ratings = vec![0.0, 1.0, 2.0];
         let zeros = vec![0usize; 3];
 
-        let pairs = generate_top_heavy_pairings(&item_ids, 5, &selection_weights, &ratings, 1.0, &zeros, &zeros);
+        let pairs = generate_top_heavy_pairings(&item_ids, 5, &selection_weights, &ratings, None, 1.0, &zeros, &zeros);
         assert_eq!(pairs.len(), 5);
         for (a, b) in &pairs {
             assert_ne!(a, b);

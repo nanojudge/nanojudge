@@ -640,7 +640,6 @@ pub async fn run(args: RankArgs) {
         }
 
         engine.record_results(&round_results);
-        engine.update_current_ratings();
 
         let need_interim = matches!(comparison_distribution, ComparisonDistribution::TopHeavy)
             || resolved.live_top.is_some()
@@ -679,7 +678,16 @@ pub async fn run(args: RankArgs) {
                 round_rankings.push((total_comparisons, order));
             }
             if matches!(comparison_distribution, ComparisonDistribution::TopHeavy) {
+                // The interim posterior replaces the per-chunk MLE refit as the
+                // matchmaking rating source; its stds let opponent selection
+                // integrate over rating uncertainty.
+                engine.set_current_posterior(&interim.item_means, &interim.item_stds);
                 engine.selection_weights = interim.selection_weights;
+            } else {
+                // Interim fit ran only for display (--live-top or round
+                // rankings on a uniform run): keep MLE ratings so a display
+                // flag never changes pairing.
+                engine.update_current_ratings();
             }
             if let Some(limit) = resolved.live_top {
                 output::print_live_table(
@@ -691,6 +699,8 @@ pub async fn run(args: RankArgs) {
                 );
             }
             interim_warm_start = Some(interim.warm_start_state);
+        } else {
+            engine.update_current_ratings();
         }
         }
     }
@@ -1252,7 +1262,6 @@ async fn run_three_way(
         }
 
         engine.record_results(&round_results);
-        engine.update_current_ratings();
 
         let need_interim = matches!(comparison_distribution, ComparisonDistribution::TopHeavy)
             || resolved.live_top.is_some()
@@ -1289,12 +1298,23 @@ async fn run_three_way(
                 round_rankings.push((total_comparisons, order));
             }
             if matches!(comparison_distribution, ComparisonDistribution::TopHeavy) {
+                // The interim posterior replaces the per-chunk MLE refit as the
+                // matchmaking rating source; its stds let opponent selection
+                // integrate over rating uncertainty.
+                engine.set_current_posterior(&interim.item_means, &interim.item_stds);
                 engine.selection_weights = interim.selection_weights;
+            } else {
+                // Interim fit ran only for display (--live-top or round
+                // rankings on a uniform run): keep MLE ratings so a display
+                // flag never changes pairing.
+                engine.update_current_ratings();
             }
             if let Some(limit) = resolved.live_top {
                 output::print_live_table(&interim.rankings, &titles, round + 1, total_comparisons, limit);
             }
             interim_warm_start = Some(interim.warm_start_state);
+        } else {
+            engine.update_current_ratings();
         }
         }
     }

@@ -48,6 +48,13 @@ pub struct RankingEngine {
     /// Current BT ratings (indexed internally 0..num_items).
     current_ratings: Vec<f64>,
 
+    /// Posterior stds of `current_ratings`, present only when the ratings came
+    /// from an interim posterior fit via `set_current_posterior()`. When set,
+    /// opponent matchmaking integrates the win probability over this
+    /// uncertainty (`calculate_integrated_info_gain`); when `None` (MLE
+    /// ratings) the plug-in info gain is used.
+    current_stds: Option<Vec<f64>>,
+
     /// Per-item selection weights for top-heavy pairing (indexed 0..num_items,
     /// same order as item_ids). Caller MUST set this before calling
     /// `generate_pairs_for_round()` when using the TopHeavy distribution past
@@ -78,6 +85,7 @@ impl RankingEngine {
             games_played: vec![0; num_items],
             first_position_count: vec![0; num_items],
             current_ratings: vec![INITIAL_BRADLEY_TERRY_RATING; num_items],
+            current_stds: None,
             selection_weights: None,
             config,
             rng,
@@ -179,6 +187,7 @@ impl RankingEngine {
                 num_items,
                 pairs_count,
                 &self.current_ratings,
+                self.current_stds.as_deref(),
                 self.config.matchmaking_sharpness,
                 &self.first_position_count,
                 &self.games_played,
@@ -193,6 +202,7 @@ impl RankingEngine {
                     pairs_count,
                     selection_weights,
                     &self.current_ratings,
+                    self.current_stds.as_deref(),
                     self.config.matchmaking_sharpness,
                     &self.first_position_count,
                     &self.games_played,
@@ -228,6 +238,7 @@ impl RankingEngine {
                 num_items,
                 triples_count,
                 &self.current_ratings,
+                self.current_stds.as_deref(),
                 self.config.matchmaking_sharpness,
                 &self.games_played,
                 &mut self.rng,
@@ -241,6 +252,7 @@ impl RankingEngine {
                     triples_count,
                     selection_weights,
                     &self.current_ratings,
+                    self.current_stds.as_deref(),
                     self.config.matchmaking_sharpness,
                     &mut self.rng,
                 )
@@ -287,10 +299,35 @@ impl RankingEngine {
         for i in 0..num_items {
             self.current_ratings[i] = bt.get_score(i).ln();
         }
+        // MLE point estimates carry no posterior uncertainty; any stds from an
+        // earlier posterior fit would be stale against these fresh ratings.
+        self.current_stds = None;
+    }
+
+    /// Replace the rating state with an interim posterior summary: per-item
+    /// posterior mean log-strengths and stds, both indexed like the `item_ids`
+    /// the engine was built with (`ScoringResult::item_means` /
+    /// `ScoringResult::item_stds` are already in that order). While set, the
+    /// stds make opponent matchmaking integrate win probabilities over the
+    /// rating uncertainty instead of using point estimates.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `means` or `stds` length does not equal the item count.
+    pub fn set_current_posterior(&mut self, means: &[f64], stds: &[f64]) {
+        let num_items = self.id_map.len();
+        assert_eq!(means.len(), num_items, "means length mismatch");
+        assert_eq!(stds.len(), num_items, "stds length mismatch");
+        self.current_ratings.copy_from_slice(means);
+        self.current_stds = Some(stds.to_vec());
     }
 
     pub fn current_ratings(&self) -> &[f64] {
         &self.current_ratings
+    }
+
+    pub fn current_stds(&self) -> Option<&[f64]> {
+        self.current_stds.as_deref()
     }
 
     pub fn completed_comparison_count(&self) -> usize {
@@ -463,6 +500,43 @@ mod tests {
         engine.update_current_ratings();
 
         assert_eq!(engine.completed_comparison_count(), pairs.len());
+    }
+
+    #[test]
+    fn test_set_current_posterior_and_mle_refit_clears_stds() {
+        let item_ids: Vec<i64> = vec![10, 20, 30];
+        let config = EngineConfig {
+            comparison_distribution: ComparisonDistribution::Uniform,
+            matchmaking_sharpness: 1.0,
+            min_uniform_games: 3,
+            seed: None,
+        };
+        let mut engine = RankingEngine::new(&item_ids, config);
+
+        let means = vec![0.4, -0.1, 0.9];
+        let stds = vec![0.5, 1.2, 0.3];
+        engine.set_current_posterior(&means, &stds);
+        assert_eq!(engine.current_ratings(), means.as_slice());
+        assert_eq!(engine.current_stds(), Some(stds.as_slice()));
+
+        // An MLE refit replaces the ratings, so the posterior stds must not
+        // survive it — stale stds against fresh point estimates would be wrong.
+        engine.record_results(&[make_input(10, 20, 0.7)]);
+        engine.update_current_ratings();
+        assert!(engine.current_stds().is_none());
+    }
+
+    #[test]
+    #[should_panic(expected = "stds length mismatch")]
+    fn test_set_current_posterior_length_mismatch_panics() {
+        let config = EngineConfig {
+            comparison_distribution: ComparisonDistribution::Uniform,
+            matchmaking_sharpness: 1.0,
+            min_uniform_games: 3,
+            seed: None,
+        };
+        let mut engine = RankingEngine::new(&[1, 2, 3], config);
+        engine.set_current_posterior(&[0.0, 0.0, 0.0], &[1.0, 1.0]);
     }
 
     #[test]

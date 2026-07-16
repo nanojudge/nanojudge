@@ -315,6 +315,8 @@ pub fn run_scoring(
     ScoringResult {
         rankings,
         selection_weights,
+        item_means: samples_result.means.clone(),
+        item_stds: samples_result.stds.clone(),
         warm_start_state,
         sample_size: options.iterations,
         judge_analytics,
@@ -505,6 +507,8 @@ fn run_scoring_laplace(
     ScoringResult {
         rankings,
         selection_weights,
+        item_means: fit.means.clone(),
+        item_stds: fit.stds.clone(),
         warm_start_state,
         sample_size: 0,
         judge_analytics,
@@ -591,6 +595,40 @@ mod tests {
         for r in &laplace.rankings {
             assert!(r.lower_bound <= r.score && r.score <= r.upper_bound);
             assert!(r.lower_bound.is_finite() && r.upper_bound.is_finite());
+        }
+    }
+
+    #[test]
+    fn test_item_means_and_stds_are_input_order_posteriors() {
+        // item_means/item_stds are the flat per-item posterior summary in
+        // item_ids order — rankings is the same data sorted by score. On both
+        // engines each ranked score must equal the item_means entry for that
+        // item, and every std must be a usable (finite, positive) value.
+        let item_ids = vec![10, 20, 30];
+        let mut comparisons: Vec<ComparisonInput> = Vec::new();
+        for _ in 0..10 {
+            comparisons.extend(make_pair(10, 20, 0.9));
+            comparisons.extend(make_pair(20, 30, 0.9));
+            comparisons.extend(make_pair(10, 30, 0.95));
+        }
+        let ji = single_judge_info();
+
+        let mut mcmc_opts = default_scoring_options();
+        mcmc_opts.seed = Some(7);
+        let mut laplace_opts = mcmc_opts.clone();
+        laplace_opts.inference = InferenceMode::LaplaceLinear;
+
+        for opts in [mcmc_opts, laplace_opts] {
+            let result = run_scoring(&item_ids, &comparisons, &opts, &ji);
+            assert_eq!(result.item_means.len(), item_ids.len());
+            assert_eq!(result.item_stds.len(), item_ids.len());
+            for r in &result.rankings {
+                let idx = item_ids.iter().position(|&id| id == r.item).unwrap();
+                assert_eq!(r.score, result.item_means[idx]);
+            }
+            for &s in &result.item_stds {
+                assert!(s.is_finite() && s > 0.0, "posterior std must be finite and positive, got {s}");
+            }
         }
     }
 

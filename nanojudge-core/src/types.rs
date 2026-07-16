@@ -202,6 +202,14 @@ pub struct ScoringResult {
     /// item of each pair is drawn from these weights. `None` when
     /// `selection_sharpness` was `None`.
     pub selection_weights: Option<Vec<f64>>,
+    /// Per-item posterior mean log-strength, in the same order as the input
+    /// `item_ids` (`rankings` is the score-sorted view of the same values).
+    pub item_means: Vec<f64>,
+    /// Per-item posterior std of log-strength, same order as input `item_ids`.
+    /// Sample stds on the MCMC path, diagonal-Fisher stds on the Laplace path.
+    /// Together with `item_means` this feeds uncertainty-integrated
+    /// matchmaking via `RankingEngine::set_current_posterior`.
+    pub item_stds: Vec<f64>,
     /// Warm start state for next round.
     pub warm_start_state: WarmStartState,
     /// Number of post-burn-in samples (for DB storage).

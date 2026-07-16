@@ -100,6 +100,10 @@ for round in 0..20 {
             seed: None,
             inference: nanojudge_core::InferenceMode::Mcmc,
         }, &judge_info);
+        // The posterior (means + stds) drives matchmaking: opponent selection
+        // integrates its win probabilities over the rating uncertainty, so
+        // matchups that *might* be close also score well.
+        engine.set_current_posterior(&scoring.item_means, &scoring.item_stds);
         engine.selection_weights = scoring.selection_weights;
     }
 
@@ -113,9 +117,10 @@ for round in 0..20 {
         ComparisonInput::pairwise(a, b, [prob, 1.0 - prob], judge_id)
     }).collect();
 
-    // 4. Feed results back
+    // 4. Feed results back. No rating refit here: step 1 installs the
+    //    posterior before the next pairing. (Standalone `update_current_ratings()`
+    //    only matters for flows that pair without an interim scoring pass.)
     engine.record_results(&results);
-    engine.update_current_ratings();
 }
 ```
 
