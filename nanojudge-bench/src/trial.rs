@@ -23,6 +23,7 @@ pub struct TrialConfig<'a> {
     pub cutoff: Option<f64>,
     pub coverage: Option<f64>,
     pub target_prior_games: Option<f64>,
+    pub stop_confidence: Option<f64>,
     pub mcmc_iterations: Option<usize>,
     pub min_uniform_games: Option<usize>,
     pub refits_per_round: Option<usize>,
@@ -161,6 +162,9 @@ pub async fn run(
     }
     if let Some(target_prior_games) = config.target_prior_games {
         cmd.arg("--target-prior-games").arg(target_prior_games.to_string());
+    }
+    if let Some(stop_confidence) = config.stop_confidence {
+        cmd.arg("--stop-confidence").arg(stop_confidence.to_string());
     }
     if let Some(prior_tau2) = config.prior_tau2 {
         cmd.arg("--prior-tau2").arg(prior_tau2.to_string());

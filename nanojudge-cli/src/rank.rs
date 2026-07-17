@@ -376,10 +376,18 @@ pub async fn run(args: RankArgs) {
     // names) after each round so the benchmark can plot per-round convergence.
     let mut round_rankings: Vec<(usize, Vec<String>)> = Vec::new();
     let pairs_per_round = calculate_pairs_for_round(texts.len());
+    // Set when --stop-confidence is active and an interim fit shows every
+    // non-anchor item confidently on its side of the anchor; ends the round
+    // loop early and proceeds straight to final scoring.
+    let mut early_stop = false;
+    // Rounds actually executed (early stop or cancellation can end the run
+    // before the configured budget); this is what the output reports.
+    let mut rounds_run = 0usize;
     for round in 0..rounds {
         if cancelled.load(Ordering::Relaxed) {
             break;
         }
+        rounds_run = round + 1;
 
         // Decide how many refit chunks this round splits into. The engine
         // applies the policy: only top-heavy batches may be subdivided (the
@@ -682,6 +690,20 @@ pub async fn run(args: RankArgs) {
                 // matchmaking rating source; its stds let opponent selection
                 // integrate over rating uncertainty.
                 engine.set_current_posterior(&interim.item_means, &interim.item_stds);
+                if let Some(c) = resolved.stop_confidence {
+                    // Every non-anchor item sits on its side of the anchor
+                    // with probability >= c exactly when the largest raw
+                    // uncertainty ratio is <= (1-c)/c.
+                    let max_ratio = interim.max_non_anchor_ratio
+                        .expect("top-heavy interim scoring always computes selection ratios");
+                    if max_ratio <= (1.0 - c) / c {
+                        eprintln!(
+                            "Early stop: every item is on its side of the anchor with >= {:.1}% confidence after {} comparisons.",
+                            c * 100.0, total_comparisons
+                        );
+                        early_stop = true;
+                    }
+                }
                 engine.selection_weights = interim.selection_weights;
             } else {
                 // Interim fit ran only for display (--live-top or round
@@ -702,6 +724,12 @@ pub async fn run(args: RankArgs) {
         } else {
             engine.update_current_ratings();
         }
+        if early_stop {
+            break;
+        }
+        }
+        if early_stop {
+            break;
         }
     }
 
@@ -796,7 +824,7 @@ pub async fn run(args: RankArgs) {
             &scoring_result.rankings,
             &titles,
             &engine.games_played,
-            rounds,
+            rounds_run,
             total_comparisons,
             &scoring_result.judge_analytics,
             scoring_result.panel_positional_bias,
@@ -811,7 +839,7 @@ pub async fn run(args: RankArgs) {
             &scoring_result.rankings,
             &titles,
             &engine.games_played,
-            rounds,
+            rounds_run,
             total_comparisons,
             resolved.confidence_level,
             &scoring_result.judge_analytics,
@@ -1028,10 +1056,18 @@ async fn run_three_way(
     let mut interim_warm_start: Option<nanojudge_core::WarmStartState> = None;
     let mut round_rankings: Vec<(usize, Vec<String>)> = Vec::new();
 
+    // Set when --stop-confidence is active and an interim fit shows every
+    // non-anchor item confidently on its side of the anchor; ends the round
+    // loop early and proceeds straight to final scoring.
+    let mut early_stop = false;
+    // Rounds actually executed (early stop or cancellation can end the run
+    // before the configured budget); this is what the output reports.
+    let mut rounds_run = 0usize;
     for round in 0..rounds {
         if cancelled.load(Ordering::Relaxed) {
             break;
         }
+        rounds_run = round + 1;
 
         // Split the round into refit chunks (only top-heavy subdivides); each
         // chunk runs its own scoring refit and re-derives selection weights.
@@ -1302,6 +1338,20 @@ async fn run_three_way(
                 // matchmaking rating source; its stds let opponent selection
                 // integrate over rating uncertainty.
                 engine.set_current_posterior(&interim.item_means, &interim.item_stds);
+                if let Some(c) = resolved.stop_confidence {
+                    // Every non-anchor item sits on its side of the anchor
+                    // with probability >= c exactly when the largest raw
+                    // uncertainty ratio is <= (1-c)/c.
+                    let max_ratio = interim.max_non_anchor_ratio
+                        .expect("top-heavy interim scoring always computes selection ratios");
+                    if max_ratio <= (1.0 - c) / c {
+                        eprintln!(
+                            "Early stop: every item is on its side of the anchor with >= {:.1}% confidence after {} comparisons.",
+                            c * 100.0, total_comparisons
+                        );
+                        early_stop = true;
+                    }
+                }
                 engine.selection_weights = interim.selection_weights;
             } else {
                 // Interim fit ran only for display (--live-top or round
@@ -1316,6 +1366,12 @@ async fn run_three_way(
         } else {
             engine.update_current_ratings();
         }
+        if early_stop {
+            break;
+        }
+        }
+        if early_stop {
+            break;
         }
     }
 
@@ -1388,13 +1444,13 @@ async fn run_three_way(
 
     match resolved.output_format {
         OutputFormat::Json => output::print_json(
-            &scoring_result.rankings, &titles, &engine.games_played, rounds, total_comparisons,
+            &scoring_result.rankings, &titles, &engine.games_played, rounds_run, total_comparisons,
             &scoring_result.judge_analytics,
             scoring_result.panel_positional_bias, scoring_result.panel_positional_bias_ci,
             if resolved.emit_round_rankings { Some(round_rankings.as_slice()) } else { None },
         ),
         OutputFormat::Table => output::print_table(
-            &scoring_result.rankings, &titles, &engine.games_played, rounds, total_comparisons,
+            &scoring_result.rankings, &titles, &engine.games_played, rounds_run, total_comparisons,
             resolved.confidence_level, &scoring_result.judge_analytics,
             &judge_names, &judge_tokens, &judge_avg_wall_time,
         ),

@@ -91,8 +91,9 @@ pub struct ConfigArgs {
     pub items_per_comparison: Option<usize>,
 
     /// Top-heavy selection sharpness: each item's uncertainty ratio around the
-    /// anchor — min/max of the posterior area above vs below the anchor's mean,
-    /// 1 = straddles the anchor, near 0 = confidently on one side — is raised
+    /// anchor — min/max of the probability of sitting above vs below the
+    /// anchor, integrated over both posteriors' uncertainty; 1 = straddles the
+    /// anchor, near 0 = confidently on one side — is raised
     /// to this power before being used as its pairing weight. Lower = flatter =
     /// more exploration; 1.0 = raw ratios. Must be finite and > 0.
     /// Default: 0.7. Only used with top-heavy.
@@ -130,6 +131,14 @@ pub struct ConfigArgs {
     /// top-heavy.
     #[arg(long)]
     pub target_prior_games: Option<f64>,
+
+    /// Early stop for top-heavy runs: after each interim fit, end the run once
+    /// every non-anchor item sits on its side of the anchor with at least this
+    /// probability; final scoring then runs on the comparisons collected so
+    /// far. In (0.5, 1.0), e.g. 0.95. No default: when absent, the run always
+    /// uses its full round budget. Rejected with the uniform distribution.
+    #[arg(long)]
+    pub stop_confidence: Option<f64>,
 
     /// Max retries per comparison on HTTP errors. Default: 3. Set to 0 to disable.
     #[arg(long)]

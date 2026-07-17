@@ -52,6 +52,23 @@ fn normal_cdf(x: f64) -> f64 {
     0.5 * (1.0 + sign * erf)
 }
 
+/// Output of `compute_selection_weights`: the pairing weights plus the raw
+/// side-of-anchor statistic that early stopping reads.
+struct SelectionWeightsOutput {
+    /// Sharpened, cutoff-filtered, coverage-pulled pairing weights.
+    weights: Vec<f64>,
+    /// Largest raw uncertainty ratio (pre-sharpening, pre-cutoff, pre-coverage)
+    /// among non-exempt items, measured against the observed anchor rather
+    /// than the exploration-blended target (see the comment at the
+    /// computation). An integer anchor exempts the anchor item itself (its
+    /// ratio is pinned near 1 by construction); a fractional anchor exempts
+    /// nobody, since the boundary sits between two items that both must
+    /// resolve. Every checked item sits on its side of the anchor with
+    /// probability >= c exactly when this value is <= (1−c)/c. 0.0 only for a
+    /// single item.
+    max_non_anchor_ratio: f64,
+}
+
 /// Build top-heavy item-selection weights from each item's posterior summary.
 ///
 /// For each item, estimate which side of the anchor it lands on: with
@@ -92,10 +109,10 @@ fn compute_selection_weights(
     selection_coverage: f64,
     prior_tau2: f64,
     target_prior_games: f64,
-) -> Vec<f64> {
+) -> SelectionWeightsOutput {
     let n = means.len();
     if n == 0 {
-        return Vec::new();
+        return SelectionWeightsOutput { weights: Vec::new(), max_non_anchor_ratio: 0.0 };
     }
     assert!(
         anchor_index.is_finite() && anchor_index >= 0.0 && anchor_index <= (n - 1) as f64,
@@ -173,7 +190,7 @@ fn compute_selection_weights(
         kept[idx] = true;
     }
 
-    (0..n)
+    let weights = (0..n)
         .map(|i| {
             let base = if ratios[i] >= selection_cutoff || kept[i] {
                 ratios[i].powf(selection_sharpness)
@@ -187,7 +204,43 @@ fn compute_selection_weights(
             let served = (games_played[i] as f64).max(1.0);
             base / served.powf(selection_coverage)
         })
-        .collect()
+        .collect();
+
+    // Raw stopping statistic: the largest ratio among non-exempt items,
+    // measured against the OBSERVED anchor, not the blended target: the blend
+    // deliberately inflates the early target toward the prior-predicted anchor
+    // for exploration, and items "confidently below" that inflated boundary
+    // are not resolved against the actual anchor — measuring against the blend
+    // fires spurious stops in the first rounds.
+    //
+    // An integer anchor exempts the anchor item itself (some item must hold
+    // the boundary; its ratio is ~1 by construction). A fractional anchor
+    // exempts NOBODY: the boundary sits between two items, and both
+    // neighbours must resolve confidently onto their sides of the virtual
+    // target — exempting them would leave the boundary pair unchecked, and
+    // with two items would make the stop fire vacuously on the first fit.
+    // Folding from 0.0 covers the only remaining empty set (a single item).
+    let max_non_anchor_ratio = (0..n)
+        .filter(|&i| frac > 0.0 || i != lo_idx)
+        .map(|i| {
+            let spread = (stds[i] * stds[i] + anchor_var).sqrt();
+            let above = if spread <= 1e-12 {
+                if means[i] > observed_anchor {
+                    1.0
+                } else if means[i] >= observed_anchor {
+                    0.5
+                } else {
+                    0.0
+                }
+            } else {
+                normal_cdf((means[i] - observed_anchor) / spread)
+            };
+            let below = 1.0 - above;
+            above.min(below) / above.max(below)
+        })
+        .fold(0.0_f64, f64::max);
+
+    SelectionWeightsOutput { weights, max_non_anchor_ratio }
 }
 
 /// Run MCMC scoring on pairwise comparison data.
@@ -306,7 +359,7 @@ pub fn run_scoring(
     // Top-heavy selection weights: each item's sharpened uncertainty ratio
     // around the anchor's mean, built from the posterior (mean, std) summary,
     // with a proportional-fair coverage pull. `None` for uniform.
-    let selection_weights = options.selection_sharpness.map(|selection_sharpness| {
+    let selection = options.selection_sharpness.map(|selection_sharpness| {
         // Comparisons played per item so far (each comparison touches two items).
         let mut games_per_item = vec![0usize; num_items];
         for &(idx1, idx2, _, _, _, _) in &indexed {
@@ -325,10 +378,15 @@ pub fn run_scoring(
             options.target_prior_games,
         )
     });
+    let (selection_weights, max_non_anchor_ratio) = match selection {
+        Some(s) => (Some(s.weights), Some(s.max_non_anchor_ratio)),
+        None => (None, None),
+    };
 
     ScoringResult {
         rankings,
         selection_weights,
+        max_non_anchor_ratio,
         item_means: samples_result.means.clone(),
         item_stds: samples_result.stds.clone(),
         warm_start_state,
@@ -452,7 +510,7 @@ fn run_scoring_laplace(
     }
 
     // Selection weights reuse the shared Gaussian-area helper on (mean, std).
-    let selection_weights = options.selection_sharpness.map(|sharpness| {
+    let selection = options.selection_sharpness.map(|sharpness| {
         compute_selection_weights(
             &fit.means,
             &fit.stds,
@@ -465,6 +523,10 @@ fn run_scoring_laplace(
             options.target_prior_games,
         )
     });
+    let (selection_weights, max_non_anchor_ratio) = match selection {
+        Some(s) => (Some(s.weights), Some(s.max_non_anchor_ratio)),
+        None => (None, None),
+    };
 
     // The Laplace fit refits from scratch each call, so warm start is unused;
     // we still return a valid state for API symmetry with the MCMC path.
@@ -521,6 +583,7 @@ fn run_scoring_laplace(
     ScoringResult {
         rankings,
         selection_weights,
+        max_non_anchor_ratio,
         item_means: fit.means.clone(),
         item_stds: fit.stds.clone(),
         warm_start_state,
@@ -692,6 +755,7 @@ mod tests {
         assert_eq!(result.rankings.len(), 3);
         assert_eq!(result.rankings[0].item, 100);
         assert!(result.selection_weights.is_none());
+        assert!(result.max_non_anchor_ratio.is_none());
         assert_eq!(result.warm_start_state.item_log_strengths.len(), 3);
         assert_eq!(result.sample_size, 2000);
         assert_eq!(result.judge_analytics.len(), 1);
@@ -798,6 +862,9 @@ mod tests {
         );
         // Every weight is finite and non-negative.
         assert!(weights.iter().all(|&w| w.is_finite() && w >= 0.0));
+        // The stopping statistic ships alongside the weights, in (0, 1].
+        let max_ratio = result.max_non_anchor_ratio.expect("computed with selection weights");
+        assert!(max_ratio > 0.0 && max_ratio <= 1.0, "got {max_ratio}");
     }
 
     #[test]
@@ -977,7 +1044,7 @@ mod tests {
         let stds = vec![0.5, 0.5, 0.5, 0.5];
         let games = vec![10, 10, 10, 10];
         // sharpness 1, no cutoff, no coverage pull → pure ratio.
-        let w = compute_selection_weights(&means, &stds, &games, 1.0, 0.0, 0.0, 0.0, 10.0, 0.0);
+        let w = compute_selection_weights(&means, &stds, &games, 1.0, 0.0, 0.0, 0.0, 10.0, 0.0).weights;
         assert!((w[0] - 1.0).abs() < 1e-6, "leader ratio should be 1, got {}", w[0]);
         assert!(w[0] > w[1] && w[1] > w[2] && w[2] > w[3]);
     }
@@ -999,18 +1066,18 @@ mod tests {
         // Few games on the leader → prediction-dominated target → ratio ≪ 1.
         let mut games_few = vec![10usize; n];
         games_few[0] = 2;
-        let w_early = compute_selection_weights(&means, &stds, &games_few, 1.0, 0.0, 0.0, 0.0, prior_tau2, 10.0);
+        let w_early = compute_selection_weights(&means, &stds, &games_few, 1.0, 0.0, 0.0, 0.0, prior_tau2, 10.0).weights;
         assert!(w_early[0] < 0.45, "early: leader ratio should be pulled well below 1, got {}", w_early[0]);
 
         // Many games on the leader → observed-dominated target → ratio near 1.
         let mut games_many = vec![10usize; n];
         games_many[0] = 1000;
-        let w_late = compute_selection_weights(&means, &stds, &games_many, 1.0, 0.0, 0.0, 0.0, prior_tau2, 10.0);
+        let w_late = compute_selection_weights(&means, &stds, &games_many, 1.0, 0.0, 0.0, 0.0, prior_tau2, 10.0).weights;
         assert!(w_late[0] > 0.8, "late: leader ratio should approach 1, got {}", w_late[0]);
         assert!(w_late[0] > w_early[0]);
 
         // Blend disabled (prior games = 0) → leader exactly at ratio 1 regardless of games.
-        let w_off = compute_selection_weights(&means, &stds, &games_few, 1.0, 0.0, 0.0, 0.0, prior_tau2, 0.0);
+        let w_off = compute_selection_weights(&means, &stds, &games_few, 1.0, 0.0, 0.0, 0.0, prior_tau2, 0.0).weights;
         assert!((w_off[0] - 1.0).abs() < 1e-8, "blend off: leader ratio should be 1, got {}", w_off[0]);
     }
 
@@ -1024,7 +1091,7 @@ mod tests {
         let means = vec![2.0, 1.5, 1.0, 0.0];
         let stds = vec![0.5, 0.5, 0.5, 0.5];
         let games = vec![10, 10, 10, 10];
-        let w = compute_selection_weights(&means, &stds, &games, 1.0, 1.0, 0.0, 0.0, 10.0, 0.0);
+        let w = compute_selection_weights(&means, &stds, &games, 1.0, 1.0, 0.0, 0.0, 10.0, 0.0).weights;
         assert!((w[1] - 1.0).abs() < 1e-6, "anchor (rank 1) ratio should be 1, got {}", w[1]);
         assert!(w[1] > w[0], "anchor should outweigh the confident leader");
         assert!(
@@ -1045,14 +1112,14 @@ mod tests {
         let means = vec![2.0, 1.0, 1.5, 0.0];
         let stds = vec![0.5, 0.5, 0.5, 0.5];
         let games = vec![10, 10, 10, 10];
-        let w_mid = compute_selection_weights(&means, &stds, &games, 1.0, 0.5, 0.0, 0.0, 10.0, 0.0);
+        let w_mid = compute_selection_weights(&means, &stds, &games, 1.0, 0.5, 0.0, 0.0, 10.0, 0.0).weights;
         let z = 0.25 / 0.5_f64.sqrt();
         let expected = normal_cdf(-z) / normal_cdf(z);
         assert!((w_mid[0] - expected).abs() < 1e-6, "leader ratio should be Φ(−z)/Φ(z), got {}", w_mid[0]);
         assert!((w_mid[2] - expected).abs() < 1e-6, "rank-1 ratio should be Φ(−z)/Φ(z), got {}", w_mid[2]);
 
-        let w0 = compute_selection_weights(&means, &stds, &games, 1.0, 0.0, 0.0, 0.0, 10.0, 0.0);
-        let w1 = compute_selection_weights(&means, &stds, &games, 1.0, 1.0, 0.0, 0.0, 10.0, 0.0);
+        let w0 = compute_selection_weights(&means, &stds, &games, 1.0, 0.0, 0.0, 0.0, 10.0, 0.0).weights;
+        let w1 = compute_selection_weights(&means, &stds, &games, 1.0, 1.0, 0.0, 0.0, 10.0, 0.0).weights;
         for i in 0..means.len() {
             assert!(
                 w_mid[i] > w0[i].min(w1[i]) && w_mid[i] < w0[i].max(w1[i]),
@@ -1069,7 +1136,7 @@ mod tests {
         let means = vec![2.0, 1.0, 0.0];
         let stds = vec![0.0, 0.8, 0.4]; // anchor (rank 0) is a point mass
         let games = vec![10, 10, 10];
-        let w = compute_selection_weights(&means, &stds, &games, 1.0, 0.0, 0.0, 0.0, 10.0, 0.0);
+        let w = compute_selection_weights(&means, &stds, &games, 1.0, 0.0, 0.0, 0.0, 10.0, 0.0).weights;
         assert!((w[0] - 1.0).abs() < 1e-12, "anchor ratio should be 1, got {}", w[0]);
         for i in 1..3 {
             let a = normal_cdf((means[i] - means[0]) / stds[i]);
@@ -1092,16 +1159,106 @@ mod tests {
         let games = vec![10, 10, 10];
         let tight = compute_selection_weights(
             &means, &[0.1, 0.5, 0.5], &games, 1.0, 0.0, 0.0, 0.0, 10.0, 0.0,
-        );
+        ).weights;
         let loose = compute_selection_weights(
             &means, &[1.5, 0.5, 0.5], &games, 1.0, 0.0, 0.0, 0.0, 10.0, 0.0,
-        );
+        ).weights;
         assert!((tight[0] - 1.0).abs() < 1e-6, "tight anchor ratio should be 1, got {}", tight[0]);
         assert!((loose[0] - 1.0).abs() < 1e-6, "loose anchor ratio should be 1, got {}", loose[0]);
         assert!(
             loose[1] > tight[1] && loose[2] > tight[2],
             "uncertain anchor should raise below-boundary ratios: {} vs {}, {} vs {}",
             loose[1], tight[1], loose[2], tight[2]
+        );
+    }
+
+    #[test]
+    fn test_max_non_anchor_ratio_excludes_anchor_and_takes_max() {
+        // Anchor rank 0 (item 0) is exempt even though its ratio is ~1; the
+        // statistic is the largest ratio among the others — item 1, the
+        // closest contender. Blend disabled so the target is the anchor mean.
+        let means = vec![2.0, 1.0, 0.0];
+        let stds = vec![0.5, 0.5, 0.5];
+        let games = vec![10, 10, 10];
+        let out = compute_selection_weights(&means, &stds, &games, 1.0, 0.0, 0.0, 0.0, 10.0, 0.0);
+        let spread = (0.25_f64 + 0.25).sqrt();
+        let a = normal_cdf((1.0 - 2.0) / spread);
+        let expected = a.min(1.0 - a) / a.max(1.0 - a);
+        assert!(
+            (out.max_non_anchor_ratio - expected).abs() < 1e-12,
+            "expected item 1's ratio {expected}, got {}",
+            out.max_non_anchor_ratio
+        );
+        assert!(out.max_non_anchor_ratio < 1.0, "anchor's own ~1 ratio must be excluded");
+    }
+
+    #[test]
+    fn test_max_non_anchor_ratio_fractional_anchor_checks_neighbours() {
+        // A fractional anchor sits BETWEEN two items, so neither neighbour is
+        // exempt: the boundary pair itself must resolve against the virtual
+        // target. Here the neighbours (2.0 and 1.5) straddle the 1.75 midpoint
+        // far more than the distant third item, so they dominate the
+        // statistic and keep the stop from firing.
+        let means = vec![2.0, 1.5, -3.0];
+        let stds = vec![0.5, 0.5, 0.5];
+        let games = vec![10, 10, 10];
+        let out = compute_selection_weights(&means, &stds, &games, 1.0, 0.5, 0.0, 0.0, 10.0, 0.0);
+        let target = 1.75; // midpoint of the two anchor-rank means
+        let spread = (0.25_f64 + 0.25).sqrt();
+        let a = normal_cdf((2.0 - target) / spread);
+        let expected = a.min(1.0 - a) / a.max(1.0 - a);
+        assert!(
+            (out.max_non_anchor_ratio - expected).abs() < 1e-12,
+            "expected the boundary neighbour's ratio {expected}, got {}",
+            out.max_non_anchor_ratio
+        );
+        assert!(out.max_non_anchor_ratio > 0.5, "unresolved boundary must block a stop");
+    }
+
+    #[test]
+    fn test_max_non_anchor_ratio_two_items_fractional_anchor_not_vacuous() {
+        // Regression: two items with anchor_index 0.5 used to exempt both,
+        // making the statistic an empty-set fold of 0.0 — an unconditional
+        // stop on the first fit. Both items must now resolve against the
+        // midpoint boundary.
+        let means = vec![1.0, 0.0];
+        let stds = vec![0.5, 0.5];
+        let games = vec![10, 10];
+        let out = compute_selection_weights(&means, &stds, &games, 1.0, 0.5, 0.0, 0.0, 10.0, 0.0);
+        let spread = (0.25_f64 + 0.25).sqrt();
+        let a = normal_cdf((1.0 - 0.5) / spread);
+        let expected = a.min(1.0 - a) / a.max(1.0 - a);
+        assert!(
+            (out.max_non_anchor_ratio - expected).abs() < 1e-12,
+            "expected the items' midpoint ratio {expected}, got {}",
+            out.max_non_anchor_ratio
+        );
+        assert!(out.max_non_anchor_ratio > 0.1, "must not read as vacuously resolved");
+    }
+
+    #[test]
+    fn test_max_non_anchor_ratio_ignores_target_blend() {
+        // Regression: early in a run the target blend inflates the selection
+        // target toward the prior-predicted anchor, so every item sits
+        // "confidently below" a boundary that is not the anchor and the
+        // selection ratios collapse. The stopping statistic must measure
+        // against the observed anchor instead and stay high — otherwise a
+        // confidence-based early stop fires after the first uniform round.
+        let n = 50;
+        let mut means = vec![0.0; n];
+        means[0] = 0.5; // modest observed leader, far below the predicted max
+        let stds = vec![1.0; n];
+        let mut games = vec![10usize; n];
+        games[0] = 2; // few anchor games → blend dominated by the prediction
+        let out = compute_selection_weights(&means, &stds, &games, 1.0, 0.0, 0.0, 0.0, 10.0, 10.0);
+        // Selection sees everyone (leader included) below the blended target.
+        assert!(out.weights[0] < 0.45, "sanity: blend should crush the leader's weight, got {}", out.weights[0]);
+        // The stopper sees items 1..n straddling the observed anchor (gap 0.5,
+        // spread sqrt(2)) — nowhere near resolved.
+        assert!(
+            out.max_non_anchor_ratio > 0.3,
+            "stopping statistic must stay high under a blend-dominated target, got {}",
+            out.max_non_anchor_ratio
         );
     }
 
@@ -1137,8 +1294,8 @@ mod tests {
         let means = vec![2.0, 1.0];
         let stds = vec![1.0, 1.0];
         let games = vec![10, 10];
-        let sharp = compute_selection_weights(&means, &stds, &games, 1.0, 0.0, 0.0, 0.0, 10.0, 0.0);
-        let soft = compute_selection_weights(&means, &stds, &games, 0.5, 0.0, 0.0, 0.0, 10.0, 0.0);
+        let sharp = compute_selection_weights(&means, &stds, &games, 1.0, 0.0, 0.0, 0.0, 10.0, 0.0).weights;
+        let soft = compute_selection_weights(&means, &stds, &games, 0.5, 0.0, 0.0, 0.0, 10.0, 0.0).weights;
         let ratio_sharp = sharp[0] / sharp[1];
         let ratio_soft = soft[0] / soft[1];
         assert!(ratio_soft < ratio_sharp, "lower sharpness should flatten the ratio");
@@ -1153,10 +1310,10 @@ mod tests {
         let stds = vec![1.0, 1.0];
         let games = vec![2, 50]; // item 0 under-served, item 1 over-served
 
-        let no_pull = compute_selection_weights(&means, &stds, &games, 1.0, 0.0, 0.0, 0.0, 10.0, 0.0);
+        let no_pull = compute_selection_weights(&means, &stds, &games, 1.0, 0.0, 0.0, 0.0, 10.0, 0.0).weights;
         assert!((no_pull[0] - no_pull[1]).abs() < 1e-12, "coverage 0 should ignore games");
 
-        let pull = compute_selection_weights(&means, &stds, &games, 1.0, 0.0, 0.0, 1.0, 10.0, 0.0);
+        let pull = compute_selection_weights(&means, &stds, &games, 1.0, 0.0, 0.0, 1.0, 10.0, 0.0).weights;
         assert!(
             pull[0] > pull[1],
             "under-served item should outweigh over-served one under coverage pull: {} vs {}",

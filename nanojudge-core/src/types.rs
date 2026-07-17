@@ -205,6 +205,19 @@ pub struct ScoringResult {
     /// item of each pair is drawn from these weights. `None` when
     /// `selection_sharpness` was `None`.
     pub selection_weights: Option<Vec<f64>>,
+    /// Largest raw side-of-anchor uncertainty ratio (`min(A,1−A)/max(A,1−A)`,
+    /// before sharpening/cutoff/coverage) among non-exempt items. An integer
+    /// `anchor_index` exempts the anchor item itself — its ratio is pinned
+    /// near 1 by construction; a fractional anchor exempts nobody, since the
+    /// boundary sits between two items that both must resolve against it.
+    /// Measured against the observed anchor, not the
+    /// `target_prior_games`-blended target that steers early exploration
+    /// (items resolved against that inflated early target are not resolved
+    /// against the actual anchor). Every checked item sits on its side of the
+    /// anchor with probability >= c exactly when this value is <= (1−c)/c,
+    /// which is what confidence-based early stopping checks. 0.0 only for a
+    /// single item. `None` when `selection_sharpness` was `None`.
+    pub max_non_anchor_ratio: Option<f64>,
     /// Per-item posterior mean log-strength, in the same order as the input
     /// `item_ids` (`rankings` is the score-sorted view of the same values).
     pub item_means: Vec<f64>,

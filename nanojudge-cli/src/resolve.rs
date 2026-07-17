@@ -62,6 +62,11 @@ pub struct ResolvedConfig {
     /// Top-heavy target-blend: prior-predicted anchor counts as this many pseudo-games.
     /// Finite and >= 0; 0 disables the blend.
     pub target_prior_games: f64,
+    /// Early-stop confidence for top-heavy runs: end the run once every
+    /// non-anchor item sits on its side of the anchor with at least this
+    /// probability. In (0.5, 1.0) when set. `None` = no early stop (the run
+    /// always uses its full round budget) — there is deliberately no default.
+    pub stop_confidence: Option<f64>,
     pub retries: usize,
     pub analysis_length: String,
     pub reasoning_enabled: bool,
@@ -373,6 +378,17 @@ pub fn resolve_config(shared: &ConfigArgs, cfg: &config::NanojudgeConfig) -> Res
     if !target_prior_games.is_finite() || target_prior_games < 0.0 {
         bail(format!("target-prior-games={target_prior_games}, must be finite and >= 0 (0 disables the blend)"));
     }
+    // Early stop has deliberately no default: absent means the run always uses
+    // its full round budget.
+    let stop_confidence = merge_opt(shared.stop_confidence, cfg.stop_confidence, "stop-confidence");
+    if let Some(c) = stop_confidence {
+        if !c.is_finite() || c <= 0.5 || c >= 1.0 {
+            bail(format!("stop-confidence={c}, must be in (0.5, 1.0), e.g. 0.95"));
+        }
+        if matches!(comparison_distribution, ComparisonDistribution::Uniform) {
+            bail("stop-confidence requires comparison-distribution = \"top-heavy\" (uniform runs have no anchor to measure against)");
+        }
+    }
     let retries = merge_opt(shared.retries, cfg.retries, "retries")
         .unwrap_or(DEFAULT_MAX_RETRIES);
     let analysis_length = merge_opt(shared.analysis_length.clone(), cfg.analysis_length.clone(), "analysis-length")
@@ -526,6 +542,7 @@ pub fn resolve_config(shared: &ConfigArgs, cfg: &config::NanojudgeConfig) -> Res
         selection_cutoff,
         selection_coverage,
         target_prior_games,
+        stop_confidence,
         retries,
         analysis_length,
         reasoning_enabled,
@@ -574,6 +591,7 @@ mod tests {
             cutoff: None,
             coverage: None,
             target_prior_games: None,
+            stop_confidence: None,
             retries: None,
             analysis_length: None,
             reasoning: None,
@@ -821,5 +839,34 @@ mod tests {
         let cfg = NanojudgeConfig { inference: Some("mcmc".into()), ..Default::default() };
         let resolved = resolve_config(&cli, &cfg);
         assert_eq!(resolved.inference, InferenceMode::LaplaceLinear);
+    }
+
+    #[test]
+    fn test_stop_confidence_absent_means_no_early_stop() {
+        // No default: absent everywhere resolves to None (full round budget).
+        let cli = default_cli();
+        let cfg = NanojudgeConfig::default();
+        let resolved = resolve_config(&cli, &cfg);
+        assert_eq!(resolved.stop_confidence, None);
+    }
+
+    #[test]
+    fn test_stop_confidence_from_cli_with_top_heavy() {
+        let mut cli = default_cli();
+        cli.comparison_distribution = Some("top-heavy".into());
+        cli.stop_confidence = Some(0.95);
+        let cfg = NanojudgeConfig::default();
+        let resolved = resolve_config(&cli, &cfg);
+        assert_eq!(resolved.stop_confidence, Some(0.95));
+    }
+
+    #[test]
+    fn test_stop_confidence_cli_overrides_config() {
+        let mut cli = default_cli();
+        cli.comparison_distribution = Some("top-heavy".into());
+        cli.stop_confidence = Some(0.99);
+        let cfg = NanojudgeConfig { stop_confidence: Some(0.9), ..Default::default() };
+        let resolved = resolve_config(&cli, &cfg);
+        assert_eq!(resolved.stop_confidence, Some(0.99));
     }
 }

@@ -51,6 +51,7 @@ pub struct NanojudgeConfig {
     pub cutoff: Option<f64>,
     pub coverage: Option<f64>,
     pub target_prior_games: Option<f64>,
+    pub stop_confidence: Option<f64>,
     pub retries: Option<usize>,
     pub confidence_level: Option<f64>,
     pub regularization_strength: Option<f64>,
@@ -123,8 +124,9 @@ const DEFAULT_CONFIG_TEMPLATE: &str = "\
 # items_per_comparison = 2
 
 # Tuning for the top-heavy distribution. Each item's pairing weight is its
-# uncertainty ratio around the anchor: min/max of the posterior area above vs
-# below the anchor's mean — 1 when the item straddles the anchor, near 0 once
+# uncertainty ratio around the anchor: min/max of the probability of sitting
+# above vs below the anchor, integrated over both the item's and the anchor's
+# posterior uncertainty — 1 when the item straddles the anchor, near 0 once
 # it is confidently above or below — raised to `selection_sharpness`. The
 # first item of each comparison is drawn from these weights; its opponent is
 # picked by info-gain matchmaking from a rating window around it, so the
@@ -147,6 +149,13 @@ const DEFAULT_CONFIG_TEMPLATE: &str = "\
 # anchor_index = 0.0
 # cutoff = 0.0
 # coverage = 1.0
+
+# Early stop for top-heavy runs. After each interim fit, the run ends early
+# once every non-anchor item sits on its side of the anchor with at least this
+# probability; final scoring then runs on the comparisons collected so far.
+# In (0.5, 1.0), e.g. 0.95. No default: when unset, the run always uses its
+# full round budget. Rejected with comparison_distribution = \"uniform\".
+# stop_confidence = 0.95
 
 # Minimum fraction of verdict-token probability mass the top-logprobs must
 # cover for a logprob-based verdict to be trusted (logprobs mode only) — the

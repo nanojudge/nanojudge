@@ -79,6 +79,13 @@ struct Args {
     #[arg(long)]
     target_prior_games: Option<f64>,
 
+    /// Early-stop confidence forwarded to the CLI: end a top-heavy run once
+    /// every non-anchor item sits on its side of the anchor with at least this
+    /// probability. In (0.5, 1.0). Omit for no early stop (the CLI has no
+    /// default — the run then always uses its full round budget).
+    #[arg(long)]
+    stop_confidence: Option<f64>,
+
     /// MCMC iterations forwarded to the CLI (governs both the per-round interim
     /// scoring and the final scoring). Omit to use the CLI's default (5000).
     #[arg(long)]
@@ -203,6 +210,7 @@ struct SharedTrialConfig {
     cutoff: Option<f64>,
     coverage: Option<f64>,
     target_prior_games: Option<f64>,
+    stop_confidence: Option<f64>,
     mcmc_iterations: Option<usize>,
     min_uniform_games: Option<usize>,
     refits_per_round: Option<usize>,
@@ -323,6 +331,7 @@ async fn main() {
         cutoff: args.cutoff,
         coverage: args.coverage,
         target_prior_games: args.target_prior_games,
+        stop_confidence: args.stop_confidence,
         mcmc_iterations: args.mcmc_iterations,
         min_uniform_games: args.min_uniform_games,
         refits_per_round: args.refits_per_round,
@@ -361,6 +370,7 @@ async fn main() {
                 cutoff: shared.cutoff,
                 coverage: shared.coverage,
                 target_prior_games: shared.target_prior_games,
+                stop_confidence: shared.stop_confidence,
                 mcmc_iterations: shared.mcmc_iterations,
                 min_uniform_games: shared.min_uniform_games,
                 refits_per_round: shared.refits_per_round,
