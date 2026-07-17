@@ -148,10 +148,9 @@ for round in 0..20 {
 
 **Top-heavy**: Focuses comparisons on items whose standing around the anchor rank is still uncertain. Confidently placed items (on either side) get the uniform-stage minimum while contested boundary items get many times more. Good for large lists where you mainly care about finding the best items.
 
-The engine handles three stages automatically:
+The engine handles two stages automatically:
 1. **Uniform stage** (first few rounds): uniform pairing until every item has minimum games
 2. **Main phase**: your chosen distribution
-3. **Smoothing** (last round): reverts to uniform so every item gets fresh data
 
 ## Key concepts
 
