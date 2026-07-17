@@ -128,9 +128,11 @@ pub struct ScoringOptions {
     /// Top-heavy item-selection weighting. `None` skips it entirely (uniform
     /// pairing needs no selection weights, and the result's `selection_weights`
     /// is then `None`). `Some(sharpness)` computes, per item, the uncertainty
-    /// ratio around the anchor's mean (see `anchor_index`): with
-    /// `A = P(item beats the anchor)` under a Gaussian summary `(mean, std)` of
-    /// its samples, the ratio is `min(A, 1−A) / max(A, 1−A)` — 1 when the item's
+    /// ratio around the anchor (see `anchor_index`): with
+    /// `A = P(item beats the anchor)` under independent Gaussian summaries of
+    /// both posteriors — `Φ((mean − anchor_mean) / sqrt(std² + anchor_std²))`,
+    /// so a still-uncertain anchor widens every split — the ratio is
+    /// `min(A, 1−A) / max(A, 1−A)` — 1 when the item's
     /// posterior straddles the anchor, decaying toward 0 as the item resolves
     /// confidently above or below it — then raises that ratio to `sharpness`.
     /// Lower sharpness flattens the distribution (more exploration); `1.0`
@@ -197,8 +199,9 @@ pub struct ScoringResult {
     /// Ranked items, sorted by score descending.
     pub rankings: Vec<RankedItem>,
     /// Top-heavy item-selection weights per item, in the same order as input
-    /// `item_ids`: each item's sharpened uncertainty ratio around the anchor's
-    /// mean, with sub-cutoff items zeroed. Drives top-heavy pairing: the first
+    /// `item_ids`: each item's sharpened uncertainty ratio around the anchor
+    /// (integrated over the anchor's own posterior uncertainty), with
+    /// sub-cutoff items zeroed. Drives top-heavy pairing: the first
     /// item of each pair is drawn from these weights. `None` when
     /// `selection_sharpness` was `None`.
     pub selection_weights: Option<Vec<f64>>,

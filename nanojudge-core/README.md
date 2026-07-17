@@ -127,7 +127,7 @@ for round in 0..20 {
 ## The math
 
 1. **Bradley-Terry MLE** — fast iterative algorithm for point-estimate scores from pairwise win rates
-2. **Gaussian BT MCMC** — Bayesian posterior sampling via Metropolis-Hastings within Gibbs, producing confidence intervals and per-item selection weights (each item's uncertainty ratio around the anchor — by default the current leader, configurable via `anchor_index` — so the contested boundary gets the comparisons)
+2. **Gaussian BT MCMC** — Bayesian posterior sampling via Metropolis-Hastings within Gibbs, producing confidence intervals and per-item selection weights (each item's uncertainty ratio around the anchor — by default the current leader, configurable via `anchor_index`, with the split integrated over the anchor's own posterior uncertainty — so the contested boundary gets the comparisons)
 3. **Positional bias estimation** — jointly estimated during MCMC sampling. LLMs tend to favor whichever option is shown first; the sampler detects and corrects for this automatically
 4. **Smart pairing** — decides which pairs to compare next to maximize information gain per comparison
 

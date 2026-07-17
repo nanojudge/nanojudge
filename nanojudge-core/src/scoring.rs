@@ -54,15 +54,20 @@ fn normal_cdf(x: f64) -> f64 {
 
 /// Build top-heavy item-selection weights from each item's posterior summary.
 ///
-/// For each item, split its posterior at the anchor's mean: with
-/// `A = P(strength_i ≥ anchor_mean)` under a `Gaussian(mean, std)` summary,
-/// the base weight is the uncertainty ratio `min(A, 1−A) / max(A, 1−A)` —
+/// For each item, estimate which side of the anchor it lands on: with
+/// `A = P(strength_i ≥ strength_anchor)` — treating both as independent
+/// Gaussian summaries, so `A = Φ((mean_i − target) / sqrt(std_i² + std_anchor²))`
+/// with the anchor's own uncertainty widening the split — the base weight is
+/// the uncertainty ratio `min(A, 1−A) / max(A, 1−A)`:
 /// 1 when the posterior sits astride the anchor (maximally unsure which side
 /// the item belongs on), decaying toward 0 as the item resolves confidently
 /// above or below it — raised to `selection_sharpness` (lower = flatter =
 /// more exploration). The anchor is the item at rank `anchor_index` (0-based,
 /// posterior means sorted descending; fractional values interpolate between
-/// the two adjacent ranks); the anchor itself sits at ratio 1. Items whose
+/// the two adjacent ranks); the anchor itself sits at ratio 1 once the target
+/// blend has converged to the observed anchor (early on, while
+/// `target_prior_games` still pulls the target toward the prior prediction,
+/// even the anchor can sit below 1). Items whose
 /// ratio is below `selection_cutoff` are dropped to 0, except the two
 /// highest-ratio items, which are always kept so the pairing layer can always
 /// draw two distinct contenders.
@@ -100,7 +105,7 @@ fn compute_selection_weights(
 
     // The anchor: the item at rank `anchor_index` when posterior means are
     // sorted descending. Fractional indices interpolate linearly between the
-    // two adjacent ranks — for both the anchor's mean and its game count.
+    // two adjacent ranks — for the anchor's mean, variance, and game count.
     let mut by_mean: Vec<usize> = (0..n).collect();
     by_mean.sort_by(|&a, &b| means[b].partial_cmp(&means[a]).unwrap_or(std::cmp::Ordering::Equal));
     let lo_rank = anchor_index.floor() as usize;
@@ -108,6 +113,11 @@ fn compute_selection_weights(
     let frac = anchor_index - lo_rank as f64;
     let (lo_idx, hi_idx) = (by_mean[lo_rank], by_mean[hi_rank]);
     let observed_anchor = means[lo_idx] + frac * (means[hi_idx] - means[lo_idx]);
+    let anchor_var = {
+        let var_lo = stds[lo_idx] * stds[lo_idx];
+        let var_hi = stds[hi_idx] * stds[hi_idx];
+        var_lo + frac * (var_hi - var_lo)
+    };
 
     // The selection target: the reference strength each item's uncertainty
     // ratio is measured against. The observed anchor is unreliable early — it has few games and,
@@ -126,14 +136,18 @@ fn compute_selection_weights(
         observed_anchor
     };
 
-    // Uncertainty ratio per item: split the posterior at the target into the
-    // area above (A) and below (1−A); the ratio min/max is 1 when the item
-    // straddles the target and decays toward 0 once it is confidently on
-    // either side. max(A, 1−A) >= 0.5, so the division is always safe.
+    // Uncertainty ratio per item: A = P(item above the anchor) under the
+    // difference of the two independent Gaussian summaries — the anchor's own
+    // variance widens the split, so a still-uncertain anchor keeps nearby items
+    // in play; the correction fades as the anchor plays games. The ratio
+    // min/max is 1 when the item straddles the anchor and decays toward 0 once
+    // it is confidently on either side. max(A, 1−A) >= 0.5, so the division is
+    // always safe.
     let ratios: Vec<f64> = (0..n)
         .map(|i| {
-            let above = if stds[i] <= 1e-12 {
-                // Degenerate point mass: strictly-above the target counts fully,
+            let spread = (stds[i] * stds[i] + anchor_var).sqrt();
+            let above = if spread <= 1e-12 {
+                // Degenerate point masses: strictly-above the target counts fully,
                 // exactly-at counts half, below counts nothing.
                 if means[i] > target {
                     1.0
@@ -143,7 +157,7 @@ fn compute_selection_weights(
                     0.0
                 }
             } else {
-                normal_cdf((means[i] - target) / stds[i])
+                normal_cdf((means[i] - target) / spread)
             };
             let below = 1.0 - above;
             above.min(below) / above.max(below)
@@ -1024,16 +1038,18 @@ mod tests {
     #[test]
     fn test_anchor_index_fractional_interpolates() {
         // anchor_index 0.5 targets the midpoint of the rank-0 and rank-1 means
-        // (2.0 and 1.5 → 1.75). The two items sit at ±0.5σ from that target,
-        // so both get the identical ratio Φ(−0.5)/Φ(0.5). Also continuous:
+        // (2.0 and 1.5 → 1.75). The two items sit at ±0.25 from that target,
+        // with combined spread √(σ² + σ_anchor²) = √0.5, so both get the
+        // identical ratio Φ(−0.25/√0.5)/Φ(0.25/√0.5). Also continuous:
         // every weight lies strictly between its anchor-0 and anchor-1 weights.
         let means = vec![2.0, 1.0, 1.5, 0.0];
         let stds = vec![0.5, 0.5, 0.5, 0.5];
         let games = vec![10, 10, 10, 10];
         let w_mid = compute_selection_weights(&means, &stds, &games, 1.0, 0.5, 0.0, 0.0, 10.0, 0.0);
-        let expected = normal_cdf(-0.5) / normal_cdf(0.5);
-        assert!((w_mid[0] - expected).abs() < 1e-6, "leader ratio should be Φ(−0.5)/Φ(0.5), got {}", w_mid[0]);
-        assert!((w_mid[2] - expected).abs() < 1e-6, "rank-1 ratio should be Φ(−0.5)/Φ(0.5), got {}", w_mid[2]);
+        let z = 0.25 / 0.5_f64.sqrt();
+        let expected = normal_cdf(-z) / normal_cdf(z);
+        assert!((w_mid[0] - expected).abs() < 1e-6, "leader ratio should be Φ(−z)/Φ(z), got {}", w_mid[0]);
+        assert!((w_mid[2] - expected).abs() < 1e-6, "rank-1 ratio should be Φ(−z)/Φ(z), got {}", w_mid[2]);
 
         let w0 = compute_selection_weights(&means, &stds, &games, 1.0, 0.0, 0.0, 0.0, 10.0, 0.0);
         let w1 = compute_selection_weights(&means, &stds, &games, 1.0, 1.0, 0.0, 0.0, 10.0, 0.0);
@@ -1043,6 +1059,50 @@ mod tests {
                 "fractional anchor weight should sit strictly between integer-anchor weights for item {i}"
             );
         }
+    }
+
+    #[test]
+    fn test_anchor_std_zero_reduces_to_point_target() {
+        // With the anchor's std at 0 the combined spread collapses to the
+        // item's own std, so every ratio must equal the plain point-target
+        // split Φ((mean − target)/std) — the pre-integration formula.
+        let means = vec![2.0, 1.0, 0.0];
+        let stds = vec![0.0, 0.8, 0.4]; // anchor (rank 0) is a point mass
+        let games = vec![10, 10, 10];
+        let w = compute_selection_weights(&means, &stds, &games, 1.0, 0.0, 0.0, 0.0, 10.0, 0.0);
+        assert!((w[0] - 1.0).abs() < 1e-12, "anchor ratio should be 1, got {}", w[0]);
+        for i in 1..3 {
+            let a = normal_cdf((means[i] - means[0]) / stds[i]);
+            let expected = a.min(1.0 - a) / a.max(1.0 - a);
+            assert!(
+                (w[i] - expected).abs() < 1e-12,
+                "item {i}: expected point-target ratio {expected}, got {}",
+                w[i]
+            );
+        }
+    }
+
+    #[test]
+    fn test_anchor_uncertainty_keeps_boundary_items_in_play() {
+        // Same means and item stds, but an uncertain anchor: an item
+        // confidently below a *tight* anchor may still straddle an *uncertain*
+        // one, so its ratio must rise with the anchor's std — and anneal back
+        // as the anchor tightens. The anchor itself stays at ratio 1.
+        let means = vec![2.0, 0.5, 0.0];
+        let games = vec![10, 10, 10];
+        let tight = compute_selection_weights(
+            &means, &[0.1, 0.5, 0.5], &games, 1.0, 0.0, 0.0, 0.0, 10.0, 0.0,
+        );
+        let loose = compute_selection_weights(
+            &means, &[1.5, 0.5, 0.5], &games, 1.0, 0.0, 0.0, 0.0, 10.0, 0.0,
+        );
+        assert!((tight[0] - 1.0).abs() < 1e-6, "tight anchor ratio should be 1, got {}", tight[0]);
+        assert!((loose[0] - 1.0).abs() < 1e-6, "loose anchor ratio should be 1, got {}", loose[0]);
+        assert!(
+            loose[1] > tight[1] && loose[2] > tight[2],
+            "uncertain anchor should raise below-boundary ratios: {} vs {}, {} vs {}",
+            loose[1], tight[1], loose[2], tight[2]
+        );
     }
 
     #[test]
