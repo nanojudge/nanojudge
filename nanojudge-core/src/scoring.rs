@@ -57,16 +57,15 @@ fn normal_cdf(x: f64) -> f64 {
 struct SelectionWeightsOutput {
     /// Sharpened, cutoff-filtered, coverage-pulled pairing weights.
     weights: Vec<f64>,
-    /// Largest raw uncertainty ratio (pre-sharpening, pre-cutoff, pre-coverage)
-    /// among non-exempt items, measured against the observed anchor rather
-    /// than the exploration-blended target (see the comment at the
-    /// computation). An integer anchor exempts the anchor item itself (its
-    /// ratio is pinned near 1 by construction); a fractional anchor exempts
-    /// nobody, since the boundary sits between two items that both must
-    /// resolve. Every checked item sits on its side of the anchor with
-    /// probability >= c exactly when this value is <= (1−c)/c. 0.0 only for a
-    /// single item.
-    max_non_anchor_ratio: f64,
+    /// ln P(every checked item sits on its posterior-favored side of the
+    /// observed anchor): the sum of per-item ln(max(A, 1−A)), treating the
+    /// side probabilities as independent (see the comment at the
+    /// computation). In (−∞, 0]; the early-stop criterion is
+    /// `partition_log_confidence >= ln(c)`. An integer anchor exempts the
+    /// anchor item itself (its side probability is ~0.5 by construction); a
+    /// fractional anchor exempts nobody, since the boundary sits between two
+    /// items that both must resolve. 0.0 only for a single item.
+    partition_log_confidence: f64,
 }
 
 /// Build top-heavy item-selection weights from each item's posterior summary.
@@ -112,7 +111,7 @@ fn compute_selection_weights(
 ) -> SelectionWeightsOutput {
     let n = means.len();
     if n == 0 {
-        return SelectionWeightsOutput { weights: Vec::new(), max_non_anchor_ratio: 0.0 };
+        return SelectionWeightsOutput { weights: Vec::new(), partition_log_confidence: 0.0 };
     }
     assert!(
         anchor_index.is_finite() && anchor_index >= 0.0 && anchor_index <= (n - 1) as f64,
@@ -206,25 +205,37 @@ fn compute_selection_weights(
         })
         .collect();
 
-    // Raw stopping statistic: the largest ratio among non-exempt items,
-    // measured against the OBSERVED anchor, not the blended target: the blend
+    // Stopping statistic: ln P(every checked item sits on its
+    // posterior-favored side of the anchor), taking the per-item side
+    // probabilities max(A, 1−A) as independent and summing their logs (the
+    // log domain keeps thousands of near-1 factors from underflowing). Items
+    // far from the anchor contribute ~ln(1) = 0, so the sum is dominated by
+    // the few straddling the boundary. Independence is optimistic in form but
+    // conservative in effect: the side events are positively correlated
+    // through the shared anchor, so the product underestimates the joint
+    // probability and a stop based on it fires late, not early.
+    //
+    // Measured against the OBSERVED anchor, not the blended target: the blend
     // deliberately inflates the early target toward the prior-predicted anchor
     // for exploration, and items "confidently below" that inflated boundary
     // are not resolved against the actual anchor — measuring against the blend
     // fires spurious stops in the first rounds.
     //
     // An integer anchor exempts the anchor item itself (some item must hold
-    // the boundary; its ratio is ~1 by construction). A fractional anchor
-    // exempts NOBODY: the boundary sits between two items, and both
-    // neighbours must resolve confidently onto their sides of the virtual
-    // target — exempting them would leave the boundary pair unchecked, and
-    // with two items would make the stop fire vacuously on the first fit.
-    // Folding from 0.0 covers the only remaining empty set (a single item).
-    let max_non_anchor_ratio = (0..n)
+    // the boundary; its own side probability is ~0.5 by construction and
+    // would floor the product). A fractional anchor exempts NOBODY: the
+    // boundary sits between two items, and both neighbours must resolve
+    // confidently onto their sides of the virtual target — exempting them
+    // would leave the boundary pair unchecked, and with two items would make
+    // the stop fire vacuously on the first fit. The only remaining empty sum
+    // (a single item) gives ln(1) = 0: vacuously certain.
+    let partition_log_confidence = (0..n)
         .filter(|&i| frac > 0.0 || i != lo_idx)
         .map(|i| {
             let spread = (stds[i] * stds[i] + anchor_var).sqrt();
             let above = if spread <= 1e-12 {
+                // Degenerate point masses: strictly-above counts fully,
+                // exactly-at counts half, below counts nothing.
                 if means[i] > observed_anchor {
                     1.0
                 } else if means[i] >= observed_anchor {
@@ -235,12 +246,13 @@ fn compute_selection_weights(
             } else {
                 normal_cdf((means[i] - observed_anchor) / spread)
             };
-            let below = 1.0 - above;
-            above.min(below) / above.max(below)
+            // Side probability: the favored side's mass, in [0.5, 1] — the
+            // log is finite.
+            above.max(1.0 - above).ln()
         })
-        .fold(0.0_f64, f64::max);
+        .sum::<f64>();
 
-    SelectionWeightsOutput { weights, max_non_anchor_ratio }
+    SelectionWeightsOutput { weights, partition_log_confidence }
 }
 
 /// Run MCMC scoring on pairwise comparison data.
@@ -378,15 +390,15 @@ pub fn run_scoring(
             options.target_prior_games,
         )
     });
-    let (selection_weights, max_non_anchor_ratio) = match selection {
-        Some(s) => (Some(s.weights), Some(s.max_non_anchor_ratio)),
+    let (selection_weights, partition_log_confidence) = match selection {
+        Some(s) => (Some(s.weights), Some(s.partition_log_confidence)),
         None => (None, None),
     };
 
     ScoringResult {
         rankings,
         selection_weights,
-        max_non_anchor_ratio,
+        partition_log_confidence,
         item_means: samples_result.means.clone(),
         item_stds: samples_result.stds.clone(),
         warm_start_state,
@@ -523,8 +535,8 @@ fn run_scoring_laplace(
             options.target_prior_games,
         )
     });
-    let (selection_weights, max_non_anchor_ratio) = match selection {
-        Some(s) => (Some(s.weights), Some(s.max_non_anchor_ratio)),
+    let (selection_weights, partition_log_confidence) = match selection {
+        Some(s) => (Some(s.weights), Some(s.partition_log_confidence)),
         None => (None, None),
     };
 
@@ -583,7 +595,7 @@ fn run_scoring_laplace(
     ScoringResult {
         rankings,
         selection_weights,
-        max_non_anchor_ratio,
+        partition_log_confidence,
         item_means: fit.means.clone(),
         item_stds: fit.stds.clone(),
         warm_start_state,
@@ -755,7 +767,7 @@ mod tests {
         assert_eq!(result.rankings.len(), 3);
         assert_eq!(result.rankings[0].item, 100);
         assert!(result.selection_weights.is_none());
-        assert!(result.max_non_anchor_ratio.is_none());
+        assert!(result.partition_log_confidence.is_none());
         assert_eq!(result.warm_start_state.item_log_strengths.len(), 3);
         assert_eq!(result.sample_size, 2000);
         assert_eq!(result.judge_analytics.len(), 1);
@@ -862,9 +874,10 @@ mod tests {
         );
         // Every weight is finite and non-negative.
         assert!(weights.iter().all(|&w| w.is_finite() && w >= 0.0));
-        // The stopping statistic ships alongside the weights, in (0, 1].
-        let max_ratio = result.max_non_anchor_ratio.expect("computed with selection weights");
-        assert!(max_ratio > 0.0 && max_ratio <= 1.0, "got {max_ratio}");
+        // The stopping statistic ships alongside the weights: a finite
+        // log-probability in (−∞, 0].
+        let log_conf = result.partition_log_confidence.expect("computed with selection weights");
+        assert!(log_conf.is_finite() && log_conf <= 0.0, "got {log_conf}");
     }
 
     #[test]
@@ -1173,27 +1186,32 @@ mod tests {
     }
 
     #[test]
-    fn test_max_non_anchor_ratio_excludes_anchor_and_takes_max() {
-        // Anchor rank 0 (item 0) is exempt even though its ratio is ~1; the
-        // statistic is the largest ratio among the others — item 1, the
-        // closest contender. Blend disabled so the target is the anchor mean.
+    fn test_partition_log_confidence_sums_non_anchor_side_probs() {
+        // Anchor rank 0 (item 0) is exempt — its ~0.5 side probability would
+        // floor the product. The statistic is the sum of ln(side prob) over
+        // the other items. Blend disabled so the target is the anchor mean.
         let means = vec![2.0, 1.0, 0.0];
         let stds = vec![0.5, 0.5, 0.5];
         let games = vec![10, 10, 10];
         let out = compute_selection_weights(&means, &stds, &games, 1.0, 0.0, 0.0, 0.0, 10.0, 0.0);
         let spread = (0.25_f64 + 0.25).sqrt();
-        let a = normal_cdf((1.0 - 2.0) / spread);
-        let expected = a.min(1.0 - a) / a.max(1.0 - a);
+        let p1 = normal_cdf((2.0 - 1.0) / spread); // item 1's favored-side mass
+        let p2 = normal_cdf((2.0 - 0.0) / spread); // item 2's favored-side mass
+        let expected = p1.ln() + p2.ln();
         assert!(
-            (out.max_non_anchor_ratio - expected).abs() < 1e-12,
-            "expected item 1's ratio {expected}, got {}",
-            out.max_non_anchor_ratio
+            (out.partition_log_confidence - expected).abs() < 1e-12,
+            "expected ln(p1)+ln(p2) = {expected}, got {}",
+            out.partition_log_confidence
         );
-        assert!(out.max_non_anchor_ratio < 1.0, "anchor's own ~1 ratio must be excluded");
+        assert!(out.partition_log_confidence < 0.0, "less than certain");
+        assert!(
+            out.partition_log_confidence > 0.5_f64.ln(),
+            "anchor's ~0.5 side probability must be excluded from the product"
+        );
     }
 
     #[test]
-    fn test_max_non_anchor_ratio_fractional_anchor_checks_neighbours() {
+    fn test_partition_log_confidence_fractional_anchor_checks_neighbours() {
         // A fractional anchor sits BETWEEN two items, so neither neighbour is
         // exempt: the boundary pair itself must resolve against the virtual
         // target. Here the neighbours (2.0 and 1.5) straddle the 1.75 midpoint
@@ -1205,20 +1223,24 @@ mod tests {
         let out = compute_selection_weights(&means, &stds, &games, 1.0, 0.5, 0.0, 0.0, 10.0, 0.0);
         let target = 1.75; // midpoint of the two anchor-rank means
         let spread = (0.25_f64 + 0.25).sqrt();
-        let a = normal_cdf((2.0 - target) / spread);
-        let expected = a.min(1.0 - a) / a.max(1.0 - a);
+        let p_neighbour = normal_cdf(0.25 / spread); // each neighbour, ±0.25 from the midpoint
+        let p_third = normal_cdf((target - -3.0) / spread);
+        let expected = 2.0 * p_neighbour.ln() + p_third.ln();
         assert!(
-            (out.max_non_anchor_ratio - expected).abs() < 1e-12,
-            "expected the boundary neighbour's ratio {expected}, got {}",
-            out.max_non_anchor_ratio
+            (out.partition_log_confidence - expected).abs() < 1e-12,
+            "expected 2·ln(p_neighbour)+ln(p_third) = {expected}, got {}",
+            out.partition_log_confidence
         );
-        assert!(out.max_non_anchor_ratio > 0.5, "unresolved boundary must block a stop");
+        assert!(
+            out.partition_log_confidence < 0.95_f64.ln(),
+            "unresolved boundary must block a 95% stop"
+        );
     }
 
     #[test]
-    fn test_max_non_anchor_ratio_two_items_fractional_anchor_not_vacuous() {
+    fn test_partition_log_confidence_two_items_fractional_anchor_not_vacuous() {
         // Regression: two items with anchor_index 0.5 used to exempt both,
-        // making the statistic an empty-set fold of 0.0 — an unconditional
+        // making the statistic an empty sum of 0.0 = ln(1) — an unconditional
         // stop on the first fit. Both items must now resolve against the
         // midpoint boundary.
         let means = vec![1.0, 0.0];
@@ -1226,18 +1248,21 @@ mod tests {
         let games = vec![10, 10];
         let out = compute_selection_weights(&means, &stds, &games, 1.0, 0.5, 0.0, 0.0, 10.0, 0.0);
         let spread = (0.25_f64 + 0.25).sqrt();
-        let a = normal_cdf((1.0 - 0.5) / spread);
-        let expected = a.min(1.0 - a) / a.max(1.0 - a);
+        let p = normal_cdf(0.5 / spread); // each item, ±0.5 from the midpoint
+        let expected = 2.0 * p.ln();
         assert!(
-            (out.max_non_anchor_ratio - expected).abs() < 1e-12,
-            "expected the items' midpoint ratio {expected}, got {}",
-            out.max_non_anchor_ratio
+            (out.partition_log_confidence - expected).abs() < 1e-12,
+            "expected 2·ln(p) = {expected}, got {}",
+            out.partition_log_confidence
         );
-        assert!(out.max_non_anchor_ratio > 0.1, "must not read as vacuously resolved");
+        assert!(
+            out.partition_log_confidence < 0.95_f64.ln(),
+            "must not read as vacuously resolved"
+        );
     }
 
     #[test]
-    fn test_max_non_anchor_ratio_ignores_target_blend() {
+    fn test_partition_log_confidence_ignores_target_blend() {
         // Regression: early in a run the target blend inflates the selection
         // target toward the prior-predicted anchor, so every item sits
         // "confidently below" a boundary that is not the anchor and the
@@ -1254,11 +1279,12 @@ mod tests {
         // Selection sees everyone (leader included) below the blended target.
         assert!(out.weights[0] < 0.45, "sanity: blend should crush the leader's weight, got {}", out.weights[0]);
         // The stopper sees items 1..n straddling the observed anchor (gap 0.5,
-        // spread sqrt(2)) — nowhere near resolved.
+        // spread sqrt(2)): 49 items at side probability ~0.64 multiply to a
+        // partition confidence near zero — nowhere near any stop threshold.
         assert!(
-            out.max_non_anchor_ratio > 0.3,
-            "stopping statistic must stay high under a blend-dominated target, got {}",
-            out.max_non_anchor_ratio
+            out.partition_log_confidence < -1.0,
+            "partition confidence must stay far below any stop threshold under a blend-dominated target, got {}",
+            out.partition_log_confidence
         );
     }
 

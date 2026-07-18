@@ -376,9 +376,10 @@ pub async fn run(args: RankArgs) {
     // names) after each round so the benchmark can plot per-round convergence.
     let mut round_rankings: Vec<(usize, Vec<String>)> = Vec::new();
     let pairs_per_round = calculate_pairs_for_round(texts.len());
-    // Set when --stop-confidence is active and an interim fit shows every
-    // non-anchor item confidently on its side of the anchor; ends the round
-    // loop early and proceeds straight to final scoring.
+    // Set when --stop-confidence is active and an interim fit shows the
+    // partition confidence — P(every item on its side of the anchor) — has
+    // reached the requested level; ends the round loop early and proceeds
+    // straight to final scoring.
     let mut early_stop = false;
     // Rounds actually executed (early stop or cancellation can end the run
     // before the configured budget); this is what the output reports.
@@ -691,15 +692,15 @@ pub async fn run(args: RankArgs) {
                 // integrate over rating uncertainty.
                 engine.set_current_posterior(&interim.item_means, &interim.item_stds);
                 if let Some(c) = resolved.stop_confidence {
-                    // Every non-anchor item sits on its side of the anchor
-                    // with probability >= c exactly when the largest raw
-                    // uncertainty ratio is <= (1-c)/c.
-                    let max_ratio = interim.max_non_anchor_ratio
+                    // Stop once P(every checked item is on its side of the
+                    // anchor) >= c — the log-domain partition confidence
+                    // clearing ln(c).
+                    let log_conf = interim.partition_log_confidence
                         .expect("top-heavy interim scoring always computes selection ratios");
-                    if max_ratio <= (1.0 - c) / c {
+                    if log_conf >= c.ln() {
                         eprintln!(
-                            "Early stop: every item is on its side of the anchor with >= {:.1}% confidence after {} comparisons.",
-                            c * 100.0, total_comparisons
+                            "Early stop: P(every item on its side of the anchor) = {:.1}% >= {:.1}% after {} comparisons.",
+                            log_conf.exp() * 100.0, c * 100.0, total_comparisons
                         );
                         early_stop = true;
                     }
@@ -1056,9 +1057,10 @@ async fn run_three_way(
     let mut interim_warm_start: Option<nanojudge_core::WarmStartState> = None;
     let mut round_rankings: Vec<(usize, Vec<String>)> = Vec::new();
 
-    // Set when --stop-confidence is active and an interim fit shows every
-    // non-anchor item confidently on its side of the anchor; ends the round
-    // loop early and proceeds straight to final scoring.
+    // Set when --stop-confidence is active and an interim fit shows the
+    // partition confidence — P(every item on its side of the anchor) — has
+    // reached the requested level; ends the round loop early and proceeds
+    // straight to final scoring.
     let mut early_stop = false;
     // Rounds actually executed (early stop or cancellation can end the run
     // before the configured budget); this is what the output reports.
@@ -1339,15 +1341,15 @@ async fn run_three_way(
                 // integrate over rating uncertainty.
                 engine.set_current_posterior(&interim.item_means, &interim.item_stds);
                 if let Some(c) = resolved.stop_confidence {
-                    // Every non-anchor item sits on its side of the anchor
-                    // with probability >= c exactly when the largest raw
-                    // uncertainty ratio is <= (1-c)/c.
-                    let max_ratio = interim.max_non_anchor_ratio
+                    // Stop once P(every checked item is on its side of the
+                    // anchor) >= c — the log-domain partition confidence
+                    // clearing ln(c).
+                    let log_conf = interim.partition_log_confidence
                         .expect("top-heavy interim scoring always computes selection ratios");
-                    if max_ratio <= (1.0 - c) / c {
+                    if log_conf >= c.ln() {
                         eprintln!(
-                            "Early stop: every item is on its side of the anchor with >= {:.1}% confidence after {} comparisons.",
-                            c * 100.0, total_comparisons
+                            "Early stop: P(every item on its side of the anchor) = {:.1}% >= {:.1}% after {} comparisons.",
+                            log_conf.exp() * 100.0, c * 100.0, total_comparisons
                         );
                         early_stop = true;
                     }

@@ -133,10 +133,11 @@ pub struct ConfigArgs {
     pub target_prior_games: Option<f64>,
 
     /// Early stop for top-heavy runs: after each interim fit, end the run once
-    /// every non-anchor item sits on its side of the anchor with at least this
-    /// probability; final scoring then runs on the comparisons collected so
-    /// far. In (0.5, 1.0), e.g. 0.95. No default: when absent, the run always
-    /// uses its full round budget. Rejected with the uniform distribution.
+    /// the probability that every item sits on its side of the anchor — the
+    /// product of the per-item side probabilities — reaches this value; final
+    /// scoring then runs on the comparisons collected so far. In (0.5, 1.0),
+    /// e.g. 0.95. No default: when absent, the run always uses its full round
+    /// budget. Rejected with the uniform distribution.
     #[arg(long)]
     pub stop_confidence: Option<f64>,
 

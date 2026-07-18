@@ -62,10 +62,11 @@ pub struct ResolvedConfig {
     /// Top-heavy target-blend: prior-predicted anchor counts as this many pseudo-games.
     /// Finite and >= 0; 0 disables the blend.
     pub target_prior_games: f64,
-    /// Early-stop confidence for top-heavy runs: end the run once every
-    /// non-anchor item sits on its side of the anchor with at least this
-    /// probability. In (0.5, 1.0) when set. `None` = no early stop (the run
-    /// always uses its full round budget) — there is deliberately no default.
+    /// Early-stop confidence for top-heavy runs: end the run once the
+    /// probability that every item sits on its side of the anchor (the
+    /// product of the per-item side probabilities) reaches this value. In
+    /// (0.5, 1.0) when set. `None` = no early stop (the run always uses its
+    /// full round budget) — there is deliberately no default.
     pub stop_confidence: Option<f64>,
     pub retries: usize,
     pub analysis_length: String,

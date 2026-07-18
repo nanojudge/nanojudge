@@ -80,9 +80,10 @@ struct Args {
     target_prior_games: Option<f64>,
 
     /// Early-stop confidence forwarded to the CLI: end a top-heavy run once
-    /// every non-anchor item sits on its side of the anchor with at least this
-    /// probability. In (0.5, 1.0). Omit for no early stop (the CLI has no
-    /// default — the run then always uses its full round budget).
+    /// the probability that every item sits on its side of the anchor (the
+    /// product of per-item side probabilities) reaches this value. In
+    /// (0.5, 1.0). Omit for no early stop (the CLI has no default — the run
+    /// then always uses its full round budget).
     #[arg(long)]
     stop_confidence: Option<f64>,
 

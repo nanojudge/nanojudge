@@ -151,10 +151,11 @@ const DEFAULT_CONFIG_TEMPLATE: &str = "\
 # coverage = 1.0
 
 # Early stop for top-heavy runs. After each interim fit, the run ends early
-# once every non-anchor item sits on its side of the anchor with at least this
-# probability; final scoring then runs on the comparisons collected so far.
-# In (0.5, 1.0), e.g. 0.95. No default: when unset, the run always uses its
-# full round budget. Rejected with comparison_distribution = \"uniform\".
+# once the probability that every item sits on its side of the anchor — the
+# product of the per-item side probabilities — reaches this value; final
+# scoring then runs on the comparisons collected so far. In (0.5, 1.0), e.g.
+# 0.95. No default: when unset, the run always uses its full round budget.
+# Rejected with comparison_distribution = \"uniform\".
 # stop_confidence = 0.95
 
 # Minimum fraction of verdict-token probability mass the top-logprobs must
