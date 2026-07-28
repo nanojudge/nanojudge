@@ -1,27 +1,26 @@
 /// Laplace-approximation Bradley-Terry estimator with per-judge positional bias.
 ///
-/// A deterministic alternative to the MCMC sampler (`gaussian_bt`). It fits the
-/// **same** posterior — the model is identical:
+/// It fits the posterior defined by:
 ///
 /// ```text
 /// LL = Σ_c [ p_c·log σ(d_c) + (1−p_c)·log σ(−d_c) ],   d_c = θ_i − θ_j + β_k
 /// ```
 ///
 /// with a Gaussian prior on the item log-strengths `θ` (precision
-/// `1/prior_tau2 + regularization_strength`, matching `gaussian_bt`'s prior plus
-/// quadratic shrinkage) and a Gaussian prior on the per-judge biases `β`
-/// (mean `bias_prior_mu`, precision `1/bias_prior_tau2`).
+/// `1/prior_tau2 + regularization_strength`) and a Gaussian prior on the
+/// per-judge biases `β` (mean `bias_prior_mu`, precision `1/bias_prior_tau2`).
 ///
 /// Instead of sampling, it finds the posterior mode (MAP) by Newton's method and
 /// reads the curvature there: the negative Hessian `A = −H` is the observed
-/// information, and `A⁻¹` is the Laplace covariance. So one fit yields both the
-/// means (the mode) and the standard deviations (`√diag(A⁻¹)`) — the same
-/// `(mean, std)` summary `gaussian_bt` produces from samples.
+/// information, and `A⁻¹` is the Laplace covariance. A small, fixed set of
+/// deterministic matrix-free probes estimates the marginal variances without
+/// forming `A` or `A⁻¹`. So one fit yields both the means (the mode) and the
+/// standard deviations used by uncertainty-aware pairing.
 ///
 /// The log-posterior is concave (logistic log-likelihood + Gaussian priors), so
 /// the mode is unique and Newton converges quickly. The prior makes `A`
-/// positive-definite even for items with no comparisons, so the Cholesky solve
-/// below never hits a singular matrix.
+/// positive-definite even for items with no comparisons, so the matrix-free
+/// linear solves never face a singular system.
 ///
 /// Internal module — operates on pre-mapped `usize` indices, not caller IDs.
 use crate::types::IndexedComparison;
@@ -29,7 +28,7 @@ use crate::types::IndexedComparison;
 /// Result of a Laplace fit. Vectors are indexed the same as the inputs:
 /// `means[i]`/`stds[i]` for item `i`, `bias_means[k]`/`bias_stds[k]` for judge `k`.
 pub struct LaplaceFit {
-    /// MAP log-strengths, mean-centered (matching `gaussian_bt`'s convention).
+    /// MAP log-strengths, mean-centered for identifiability.
     pub means: Vec<f64>,
     /// Posterior standard deviation per item, `√diag(A⁻¹)`.
     pub stds: Vec<f64>,
@@ -40,8 +39,7 @@ pub struct LaplaceFit {
     /// Posterior standard deviation per judge bias (slot-0).
     pub bias_stds: Vec<f64>,
     /// Full MAP free per-slot advantages per judge (length `num_slots − 1` each;
-    /// the reference slot is omitted). Slot 0 equals `bias_means`. Used to carry
-    /// the complete bias state into the next round's warm start.
+    /// the reference slot is omitted). Slot 0 equals `bias_means`.
     pub bias_free: Vec<Vec<f64>>,
 }
 
@@ -64,16 +62,27 @@ fn log_sigmoid(x: f64) -> f64 {
     }
 }
 
+// A fixed probe count keeps the covariance pass linear in the number of
+// comparisons. Eight probes plus short Jacobi-preconditioned CG solves capture
+// the large correlation correction without making Laplace disproportionately
+// expensive.
+const VARIANCE_PROBES: usize = 8;
+const VARIANCE_CG_MAX_ITERATIONS: usize = 24;
+const VARIANCE_CG_TOL: f64 = 1e-6;
+
 /// Linear-time Laplace fit of the model.
 ///
 /// Finds the posterior mode (MAP) by **Newton-CG** — conjugate gradient using
 /// Hessian-vector products, so the dense Hessian is never formed — and reads a
-/// **diagonal-Fisher** std (`1/√A_ii`) at the mode.
+/// correlation-aware marginal std from deterministic inverse-Hessian probes at
+/// the mode. The item covariance is transformed through the same mean-centering
+/// applied to the reported scores.
 ///
-/// Cost is O(#comparisons) per inner CG step and O(#comparisons) for the std, so
-/// it scales to large item counts. The std is approximate — it ignores
-/// between-item correlations and so tends to underestimate uncertainty — but the
-/// std only feeds selection weighting, not the ranking.
+/// Cost is O(#comparisons) per inner CG step and the covariance pass uses fixed
+/// probe/iteration counts, so it remains linear in problem size and uses linear
+/// memory. The covariance diagonal is approximate, but unlike diagonal Fisher it
+/// includes between-parameter correlations; the std only feeds selection
+/// weighting, not the ranking.
 #[allow(clippy::too_many_arguments)]
 #[allow(clippy::needless_range_loop)]
 pub fn fit_linear(
@@ -210,8 +219,9 @@ pub fn fit_linear(
         }
     }
 
-    // Diagonal-Fisher std: A_ii = prior precision + Σ_{c touching i} w_c at the
-    // mode. std = 1/√A_ii (ignores off-diagonal → underestimates uncertainty).
+    // Refresh the curvature at the final mode. Its diagonal is both the Jacobi
+    // preconditioner for the covariance solves and a control variate for the
+    // inverse-diagonal estimator.
     let mut info = vec![0.0; dim];
     for i in 0..num_items {
         info[i] = theta_precision;
@@ -219,7 +229,7 @@ pub fn fit_linear(
     for idx in num_items..dim {
         info[idx] = bias_precision;
     }
-    for &(i, j, _p, k, s1, s2) in comparisons {
+    for (c, &(i, j, _p, k, s1, s2)) in comparisons.iter().enumerate() {
         let b1 = bias_idx(k, s1 as usize);
         let b2 = bias_idx(k, s2 as usize);
         let g1 = b1.map(|b| phi[b]).unwrap_or(0.0);
@@ -227,28 +237,197 @@ pub fn fit_linear(
         let d = phi[i] - phi[j] + g1 - g2;
         let s = sigmoid(d);
         let wc = s * (1.0 - s);
+        w[c] = wc;
         info[i] += wc;
         info[j] += wc;
         if let Some(b) = b1 { info[b] += wc; }
         if let Some(b) = b2 { info[b] += wc; }
     }
 
+    let final_hessvec = |v: &[f64]| -> Vec<f64> {
+        let mut out: Vec<f64> = info.iter().zip(v).map(|(&diagonal, &value)| diagonal * value).collect();
+        for (c, &(i, j, _p, k, s1, s2)) in comparisons.iter().enumerate() {
+            let b1 = bias_idx(k, s1 as usize);
+            let b2 = bias_idx(k, s2 as usize);
+            let mut uv = v[i] - v[j];
+            if let Some(b) = b1 { uv += v[b]; }
+            if let Some(b) = b2 { uv -= v[b]; }
+            let scaled = w[c] * uv;
+
+            // `info * v` already contains the diagonal part of every rank-one
+            // comparison term. Add only the off-diagonal part here.
+            out[i] += scaled - w[c] * v[i];
+            out[j] -= scaled + w[c] * v[j];
+            if let Some(b) = b1 { out[b] += scaled - w[c] * v[b]; }
+            if let Some(b) = b2 { out[b] -= scaled + w[c] * v[b]; }
+        }
+        out
+    };
+
+    let variances = estimate_transformed_inverse_diagonal(
+        &final_hessvec,
+        &info,
+        num_items,
+        VARIANCE_PROBES,
+        VARIANCE_CG_MAX_ITERATIONS,
+        VARIANCE_CG_TOL,
+    );
+
     let theta_mean: f64 = (0..num_items).map(|i| phi[i]).sum::<f64>() / num_items.max(1) as f64;
     let means: Vec<f64> = (0..num_items).map(|i| phi[i] - theta_mean).collect();
-    let stds: Vec<f64> = (0..num_items).map(|i| (1.0 / info[i]).sqrt()).collect();
+    let stds: Vec<f64> = variances[..num_items].iter().map(|&variance| variance.sqrt()).collect();
     // Report slot 0 (first-position advantage) as the judge bias summary.
     let bias_means: Vec<f64> = (0..num_judges)
         .map(|k| phi[bias_idx(k, 0).expect("slot 0 is always free")])
         .collect();
     let bias_stds: Vec<f64> = (0..num_judges)
-        .map(|k| (1.0 / info[bias_idx(k, 0).expect("slot 0 is always free")]).sqrt())
+        .map(|k| variances[bias_idx(k, 0).expect("slot 0 is always free")].sqrt())
         .collect();
-    // Full free advantage vector per judge, for warm-starting the next round.
+    // Full free advantage vector per judge.
     let bias_free: Vec<Vec<f64>> = (0..num_judges)
         .map(|k| (0..free_per_judge).map(|s| phi[num_items + k * free_per_judge + s]).collect())
         .collect();
 
     LaplaceFit { means, stds, bias_means, bias_stds, bias_free }
+}
+
+/// Estimate `diag(T A⁻¹ Tᵀ)`, where `T` mean-centers the item parameters and
+/// leaves bias parameters unchanged.
+///
+/// Hutchinson probes make each diagonal estimate `z ⊙ (T A⁻¹ Tᵀ z)`. Using
+/// `T diag(A)⁻¹ Tᵀ` as an exactly-known control variate substantially reduces
+/// probe noise. Probe signs are deterministic, preserving the deterministic
+/// contract of Laplace inference.
+fn estimate_transformed_inverse_diagonal(
+    hessvec: &impl Fn(&[f64]) -> Vec<f64>,
+    diagonal: &[f64],
+    num_items: usize,
+    probes: usize,
+    max_cg_iterations: usize,
+    cg_tol: f64,
+) -> Vec<f64> {
+    let dim = diagonal.len();
+    let mut baseline_diagonal: Vec<f64> = diagonal.iter().map(|&value| 1.0 / value).collect();
+
+    if num_items > 0 {
+        let n = num_items as f64;
+        let inverse_sum: f64 = baseline_diagonal[..num_items].iter().sum();
+        for value in &mut baseline_diagonal[..num_items] {
+            *value = *value * (1.0 - 2.0 / n) + inverse_sum / (n * n);
+        }
+    }
+
+    if probes == 0 || dim == 0 {
+        return baseline_diagonal;
+    }
+
+    let mut correction = vec![0.0; dim];
+    for probe in 0..probes {
+        let z: Vec<f64> = (0..dim).map(|index| deterministic_probe_sign(probe, index)).collect();
+        let mut rhs = z.clone();
+        mean_center_prefix(&mut rhs, num_items);
+
+        let solution = preconditioned_conjugate_gradient(
+            hessvec,
+            &rhs,
+            diagonal,
+            max_cg_iterations,
+            cg_tol,
+        );
+        let mut transformed_solution = solution;
+        mean_center_prefix(&mut transformed_solution, num_items);
+
+        let mut baseline_solution: Vec<f64> =
+            rhs.iter().zip(diagonal).map(|(&value, &scale)| value / scale).collect();
+        mean_center_prefix(&mut baseline_solution, num_items);
+
+        for index in 0..dim {
+            correction[index] += z[index] * (transformed_solution[index] - baseline_solution[index]);
+        }
+    }
+
+    for index in 0..dim {
+        // A finite probe set can occasionally undershoot zero even though a
+        // covariance diagonal is non-negative. Clamp only at the mathematical
+        // boundary instead of falling back to diagonal Fisher.
+        baseline_diagonal[index] =
+            (baseline_diagonal[index] + correction[index] / probes as f64).max(0.0);
+    }
+    baseline_diagonal
+}
+
+fn mean_center_prefix(values: &mut [f64], prefix_len: usize) {
+    if prefix_len == 0 {
+        return;
+    }
+    let mean = values[..prefix_len].iter().sum::<f64>() / prefix_len as f64;
+    for value in &mut values[..prefix_len] {
+        *value -= mean;
+    }
+}
+
+/// Reproducible Rademacher sign for an inverse-Hessian probe.
+fn deterministic_probe_sign(probe: usize, index: usize) -> f64 {
+    let mut value = (probe as u64)
+        .wrapping_mul(0x9E37_79B9_7F4A_7C15)
+        .wrapping_add((index as u64).wrapping_mul(0xBF58_476D_1CE4_E5B9))
+        .wrapping_add(0x94D0_49BB_1331_11EB);
+    value = (value ^ (value >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    value = (value ^ (value >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+    value ^= value >> 31;
+    if value & 1 == 0 { -1.0 } else { 1.0 }
+}
+
+/// Jacobi-preconditioned CG with a relative residual tolerance and a fixed
+/// iteration cap. The cap makes each covariance probe O(#comparisons).
+fn preconditioned_conjugate_gradient(
+    hessvec: &impl Fn(&[f64]) -> Vec<f64>,
+    b: &[f64],
+    diagonal: &[f64],
+    max_iter: usize,
+    relative_tol: f64,
+) -> Vec<f64> {
+    let dim = b.len();
+    let dot = |a: &[f64], b: &[f64]| -> f64 { a.iter().zip(b).map(|(x, y)| x * y).sum() };
+
+    let mut x = vec![0.0; dim];
+    let mut r = b.to_vec();
+    let mut z: Vec<f64> = r.iter().zip(diagonal).map(|(&value, &scale)| value / scale).collect();
+    let mut p = z.clone();
+    let mut rz_old = dot(&r, &z);
+    let target = relative_tol * dot(b, b).sqrt();
+    if dot(&r, &r).sqrt() <= target || rz_old <= 0.0 {
+        return x;
+    }
+
+    for _ in 0..max_iter {
+        let ap = hessvec(&p);
+        let denom = dot(&p, &ap);
+        if denom <= 0.0 {
+            break;
+        }
+        let alpha = rz_old / denom;
+        for index in 0..dim {
+            x[index] += alpha * p[index];
+            r[index] -= alpha * ap[index];
+        }
+        if dot(&r, &r).sqrt() <= target {
+            break;
+        }
+        for index in 0..dim {
+            z[index] = r[index] / diagonal[index];
+        }
+        let rz_new = dot(&r, &z);
+        if rz_new <= 0.0 {
+            break;
+        }
+        let beta = rz_new / rz_old;
+        for index in 0..dim {
+            p[index] = z[index] + beta * p[index];
+        }
+        rz_old = rz_new;
+    }
+    x
 }
 
 /// Conjugate gradient solve of `A x = b` for a symmetric positive-definite `A`
@@ -298,7 +477,7 @@ fn conjugate_gradient(
 mod tests {
     use super::*;
 
-    // Defaults mirroring the CLI/MCMC.
+    // Defaults mirroring the CLI.
     const PRIOR_TAU2: f64 = 10.0;
     const REG: f64 = 0.01;
     const BIAS_PRIOR_MU: f64 = 0.0;
@@ -330,12 +509,65 @@ mod tests {
     }
 
     #[test]
-    fn test_unplayed_item_falls_back_to_prior_std() {
-        // Item 2 plays nothing; its std should be the prior std √(1/precision).
+    fn test_unplayed_item_gets_mean_centered_prior_std() {
+        // Item 2 plays nothing. The raw parameter has the prior variance, but
+        // reported item scores subtract their shared mean. For three items this
+        // leaves (1 - 1/3) of the independent prior variance.
         let comps: Vec<IndexedComparison> = (0..10).map(|_| (0usize, 1usize, 1.0, 0usize, 0, 1)).collect();
         let f = fit_default(3, 1, &comps);
-        let prior_std = (1.0 / (1.0 / PRIOR_TAU2 + REG)).sqrt();
-        assert!((f.stds[2] - prior_std).abs() < 1e-6, "unplayed std {} vs prior {}", f.stds[2], prior_std);
+        let prior_std = ((2.0 / 3.0) / (1.0 / PRIOR_TAU2 + REG)).sqrt();
+        assert!((f.stds[2] - prior_std).abs() < 1e-6, "unplayed centered std {} vs expected {}", f.stds[2], prior_std);
+    }
+
+    #[test]
+    fn test_variance_probes_match_exact_centered_covariance() {
+        // A small SPD precision matrix with three item parameters and one bias.
+        // The off-diagonals make the diagonal-Fisher control variate inexact.
+        let matrix = [
+            [4.0, -0.8, 0.2, 0.5],
+            [-0.8, 3.0, -0.4, -0.3],
+            [0.2, -0.4, 2.5, 0.6],
+            [0.5, -0.3, 0.6, 2.0],
+        ];
+        let diagonal = [4.0, 3.0, 2.5, 2.0];
+        let hessvec = |v: &[f64]| -> Vec<f64> {
+            matrix.iter()
+                .map(|row| row.iter().zip(v).map(|(a, b)| a * b).sum())
+                .collect()
+        };
+
+        let estimated = estimate_transformed_inverse_diagonal(&hessvec, &diagonal, 3, 4096, 4, 1e-12);
+
+        // Apply Tᵀ to each coordinate basis vector, solve exactly (CG terminates
+        // within dim iterations), then apply T to obtain the reference diagonal.
+        let mut exact = Vec::new();
+        for coordinate in 0..4 {
+            let mut rhs = vec![0.0; 4];
+            rhs[coordinate] = 1.0;
+            mean_center_prefix(&mut rhs, 3);
+            let mut solution = conjugate_gradient(&hessvec, &rhs, 4, 4, 1e-14);
+            mean_center_prefix(&mut solution, 3);
+            exact.push(solution[coordinate]);
+        }
+
+        for coordinate in 0..4 {
+            assert!(
+                (estimated[coordinate] - exact[coordinate]).abs() < 0.01,
+                "coordinate {coordinate}: estimated {}, exact {}",
+                estimated[coordinate],
+                exact[coordinate]
+            );
+        }
+    }
+
+    #[test]
+    fn test_laplace_variances_are_deterministic() {
+        let comps: Vec<IndexedComparison> =
+            (0..30).map(|n| (n % 3, (n + 1) % 3, (n % 2) as f64, 0usize, 0, 1)).collect();
+        let first = fit_default(3, 1, &comps);
+        let second = fit_default(3, 1, &comps);
+        assert_eq!(first.stds, second.stds);
+        assert_eq!(first.bias_stds, second.bias_stds);
     }
 
     #[test]

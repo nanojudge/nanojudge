@@ -371,7 +371,6 @@ pub async fn run(args: RankArgs) {
     let mut judge_assign_rng = seed::make_rng(resolved.seed, seed::SUBSYSTEM_JUDGE_ASSIGN);
     let mut jitter_rng = seed::make_rng(resolved.seed, seed::SUBSYSTEM_TEMP_JITTER);
 
-    let mut interim_warm_start: Option<nanojudge_core::WarmStartState> = None;
     // When --emit-round-rankings is set, record (cumulative comparisons, ranked
     // names) after each round so the benchmark can plot per-round convergence.
     let mut round_rankings: Vec<(usize, Vec<String>)> = Vec::new();
@@ -658,23 +657,16 @@ pub async fn run(args: RankArgs) {
                 &item_ids,
                 &engine.completed_comparisons,
                 &ScoringOptions {
-                    iterations: resolved.mcmc_iterations,
-                    burn_in: if interim_warm_start.is_some() { 0 } else { 100 },
                     confidence_level: resolved.confidence_level,
                     selection_sharpness,
                     anchor_index: resolved.anchor_index,
                     selection_cutoff: resolved.selection_cutoff,
                     selection_coverage: resolved.selection_coverage,
                     target_prior_games: resolved.target_prior_games,
-                    warm_start: interim_warm_start.take(),
                     regularization_strength: resolved.regularization_strength,
                     prior_tau2: resolved.prior_tau2,
-                    proposal_std: resolved.proposal_std,
                     bias_prior_tau2: resolved.bias_prior_tau2,
-                    bias_proposal_std: resolved.bias_proposal_std,
                     bias_prior_logit: resolved.bias_prior_logit,
-                    seed: resolved.seed,
-                    inference: resolved.inference,
                 },
                 &judge_info,
             );
@@ -721,7 +713,6 @@ pub async fn run(args: RankArgs) {
                     limit,
                 );
             }
-            interim_warm_start = Some(interim.warm_start_state);
         } else {
             engine.update_current_ratings();
         }
@@ -743,31 +734,24 @@ pub async fn run(args: RankArgs) {
     }
 
     if resolved.verbose {
-        eprintln!("Running final MCMC scoring ({total_comparisons} comparisons)...");
+        eprintln!("Running final scoring ({total_comparisons} comparisons)...");
     }
 
-    // Final scoring with full MCMC
+    // Final scoring over all completed comparisons.
     let scoring_result = run_scoring(
         &item_ids,
         &engine.completed_comparisons,
         &ScoringOptions {
-            iterations: resolved.mcmc_iterations,
-            burn_in: resolved.mcmc_burn_in,
             confidence_level: resolved.confidence_level,
             selection_sharpness: None,
             anchor_index: resolved.anchor_index,
             selection_cutoff: resolved.selection_cutoff,
             selection_coverage: resolved.selection_coverage,
             target_prior_games: resolved.target_prior_games,
-            warm_start: None,
             regularization_strength: resolved.regularization_strength,
             prior_tau2: resolved.prior_tau2,
-            proposal_std: resolved.proposal_std,
             bias_prior_tau2: resolved.bias_prior_tau2,
-            bias_proposal_std: resolved.bias_proposal_std,
             bias_prior_logit: resolved.bias_prior_logit,
-            seed: resolved.seed,
-            inference: resolved.inference,
         },
         &judge_info,
     );
@@ -1054,7 +1038,6 @@ async fn run_three_way(
     // placement unbiased and lets the bias be estimated out.
     let mut slot_rng = seed::make_rng(resolved.seed, seed::SUBSYSTEM_EDGE_ORIENTATION);
 
-    let mut interim_warm_start: Option<nanojudge_core::WarmStartState> = None;
     let mut round_rankings: Vec<(usize, Vec<String>)> = Vec::new();
 
     // Set when --stop-confidence is active and an interim fit shows the
@@ -1309,23 +1292,16 @@ async fn run_three_way(
                 &item_ids,
                 &engine.completed_comparisons,
                 &ScoringOptions {
-                    iterations: resolved.mcmc_iterations,
-                    burn_in: if interim_warm_start.is_some() { 0 } else { 100 },
                     confidence_level: resolved.confidence_level,
                     selection_sharpness,
                     anchor_index: resolved.anchor_index,
                     selection_cutoff: resolved.selection_cutoff,
                     selection_coverage: resolved.selection_coverage,
                     target_prior_games: resolved.target_prior_games,
-                    warm_start: interim_warm_start.take(),
                     regularization_strength: resolved.regularization_strength,
                     prior_tau2: resolved.prior_tau2,
-                    proposal_std: resolved.proposal_std,
                     bias_prior_tau2: resolved.bias_prior_tau2,
-                    bias_proposal_std: resolved.bias_proposal_std,
                     bias_prior_logit: resolved.bias_prior_logit,
-                    seed: resolved.seed,
-                    inference: resolved.inference,
                 },
                 &judge_info,
             );
@@ -1364,7 +1340,6 @@ async fn run_three_way(
             if let Some(limit) = resolved.live_top {
                 output::print_live_table(&interim.rankings, &titles, round + 1, total_comparisons, limit);
             }
-            interim_warm_start = Some(interim.warm_start_state);
         } else {
             engine.update_current_ratings();
         }
@@ -1386,7 +1361,7 @@ async fn run_three_way(
     }
 
     if resolved.verbose {
-        eprintln!("Running final MCMC scoring ({} three-way comparisons, {} edges)...",
+        eprintln!("Running final scoring ({} three-way comparisons, {} edges)...",
             total_comparisons, engine.completed_comparisons.len());
     }
 
@@ -1394,23 +1369,16 @@ async fn run_three_way(
         &item_ids,
         &engine.completed_comparisons,
         &ScoringOptions {
-            iterations: resolved.mcmc_iterations,
-            burn_in: resolved.mcmc_burn_in,
             confidence_level: resolved.confidence_level,
             selection_sharpness: None,
             anchor_index: resolved.anchor_index,
             selection_cutoff: resolved.selection_cutoff,
             selection_coverage: resolved.selection_coverage,
             target_prior_games: resolved.target_prior_games,
-            warm_start: None,
             regularization_strength: resolved.regularization_strength,
             prior_tau2: resolved.prior_tau2,
-            proposal_std: resolved.proposal_std,
             bias_prior_tau2: resolved.bias_prior_tau2,
-            bias_proposal_std: resolved.bias_proposal_std,
             bias_prior_logit: resolved.bias_prior_logit,
-            seed: resolved.seed,
-            inference: resolved.inference,
         },
         &judge_info,
     );

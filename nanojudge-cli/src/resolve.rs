@@ -1,7 +1,7 @@
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
-use nanojudge_core::{ComparisonDistribution, InferenceMode, stable_hash};
+use nanojudge_core::{ComparisonDistribution, stable_hash};
 
 use crate::args::{ConfigArgs, OutputFormat};
 use crate::bail;
@@ -74,17 +74,12 @@ pub struct ResolvedConfig {
     pub prompt_template: String,
     pub confidence_level: f64,
     pub regularization_strength: f64,
-    pub inference: InferenceMode,
-    pub mcmc_iterations: usize,
-    pub mcmc_burn_in: usize,
     pub bias_prior_logit: f64,
     pub matchmaking_sharpness: f64,
     pub min_uniform_games: usize,
     pub refits_per_round: usize,
     pub prior_tau2: f64,
-    pub proposal_std: f64,
     pub bias_prior_tau2: f64,
-    pub bias_proposal_std: f64,
     pub live_top: Option<usize>,
     pub emit_round_rankings: bool,
     pub save_comparisons: Option<PathBuf>,
@@ -407,21 +402,6 @@ pub fn resolve_config(shared: &ConfigArgs, cfg: &config::NanojudgeConfig) -> Res
     if !regularization_strength.is_finite() || regularization_strength <= 0.0 {
         bail(format!("regularization-strength={regularization_strength}, must be finite and > 0"));
     }
-    let inference = merge_opt(shared.inference.clone(), cfg.inference.clone(), "inference");
-    let inference = match inference.as_deref() {
-        None | Some("laplace-linear") => InferenceMode::LaplaceLinear,
-        Some("mcmc") => InferenceMode::Mcmc,
-        Some(other) => bail(format!(
-            "inference={other}, must be \"mcmc\" or \"laplace-linear\""
-        )),
-    };
-    let mcmc_iterations = merge_opt(shared.mcmc_iterations, cfg.mcmc_iterations, "mcmc-iterations")
-        .unwrap_or(5000);
-    if mcmc_iterations == 0 {
-        bail("mcmc-iterations must be at least 1");
-    }
-    let mcmc_burn_in = merge_opt(shared.mcmc_burn_in, cfg.mcmc_burn_in, "mcmc-burn-in")
-        .unwrap_or(500);
     let matchmaking_sharpness = merge_opt(shared.matchmaking_sharpness, cfg.matchmaking_sharpness, "matchmaking-sharpness")
         .unwrap_or(1.0);
     if !matchmaking_sharpness.is_finite() || matchmaking_sharpness <= 0.0 {
@@ -444,22 +424,11 @@ pub fn resolve_config(shared: &ConfigArgs, cfg: &config::NanojudgeConfig) -> Res
     if !prior_tau2.is_finite() || prior_tau2 <= 0.0 {
         bail(format!("prior-tau2={prior_tau2}, must be finite and > 0"));
     }
-    let proposal_std = merge_opt(shared.proposal_std, cfg.proposal_std, "proposal-std")
-        .unwrap_or(0.3);
-    if !proposal_std.is_finite() || proposal_std <= 0.0 {
-        bail(format!("proposal-std={proposal_std}, must be finite and > 0"));
-    }
     let bias_prior_tau2 = merge_opt(shared.bias_prior_tau2, cfg.bias_prior_tau2, "bias-prior-tau2")
         .unwrap_or(2.0);
     if !bias_prior_tau2.is_finite() || bias_prior_tau2 <= 0.0 {
         bail(format!("bias-prior-tau2={bias_prior_tau2}, must be finite and > 0"));
     }
-    let bias_proposal_std = merge_opt(shared.bias_proposal_std, cfg.bias_proposal_std, "bias-proposal-std")
-        .unwrap_or(0.15);
-    if !bias_proposal_std.is_finite() || bias_proposal_std <= 0.0 {
-        bail(format!("bias-proposal-std={bias_proposal_std}, must be finite and > 0"));
-    }
-
     let live_top = merge_opt(shared.live_top, cfg.live_top, "live-top");
     let emit_round_rankings = shared.emit_round_rankings.unwrap_or(false);
     let save_comparisons = match (shared.save_comparisons.clone(), cfg.save_comparisons.clone()) {
@@ -550,17 +519,12 @@ pub fn resolve_config(shared: &ConfigArgs, cfg: &config::NanojudgeConfig) -> Res
         prompt_template,
         confidence_level,
         regularization_strength,
-        inference,
-        mcmc_iterations,
-        mcmc_burn_in,
         bias_prior_logit,
         matchmaking_sharpness,
         min_uniform_games,
         refits_per_round,
         prior_tau2,
-        proposal_std,
         bias_prior_tau2,
-        bias_proposal_std,
         live_top,
         emit_round_rankings,
         save_comparisons,
@@ -599,17 +563,12 @@ mod tests {
             prompt_template: None,
             confidence_level: None,
             regularization_strength: None,
-            inference: None,
-            mcmc_iterations: None,
-            mcmc_burn_in: None,
             bias_prior: None,
             matchmaking_sharpness: None,
             min_uniform_games: None,
             refits_per_round: None,
             prior_tau2: None,
-            proposal_std: None,
             bias_prior_tau2: None,
-            bias_proposal_std: None,
             live_top: None,
             emit_round_rankings: None,
             save_comparisons: None,
@@ -815,31 +774,6 @@ mod tests {
         let cfg = NanojudgeConfig { reasoning_enabled: Some(false), ..Default::default() };
         let resolved = resolve_config(&cli, &cfg);
         assert!(!resolved.reasoning_enabled);
-    }
-
-    #[test]
-    fn test_inference_default() {
-        let cli = default_cli();
-        let cfg = NanojudgeConfig::default();
-        let resolved = resolve_config(&cli, &cfg);
-        assert_eq!(resolved.inference, InferenceMode::LaplaceLinear);
-    }
-
-    #[test]
-    fn test_inference_from_config() {
-        let cli = default_cli();
-        let cfg = NanojudgeConfig { inference: Some("mcmc".into()), ..Default::default() };
-        let resolved = resolve_config(&cli, &cfg);
-        assert_eq!(resolved.inference, InferenceMode::Mcmc);
-    }
-
-    #[test]
-    fn test_inference_cli_overrides_config() {
-        let mut cli = default_cli();
-        cli.inference = Some("laplace-linear".into());
-        let cfg = NanojudgeConfig { inference: Some("mcmc".into()), ..Default::default() };
-        let resolved = resolve_config(&cli, &cfg);
-        assert_eq!(resolved.inference, InferenceMode::LaplaceLinear);
     }
 
     #[test]

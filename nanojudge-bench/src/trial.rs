@@ -24,10 +24,8 @@ pub struct TrialConfig<'a> {
     pub coverage: Option<f64>,
     pub target_prior_games: Option<f64>,
     pub stop_confidence: Option<f64>,
-    pub mcmc_iterations: Option<usize>,
     pub min_uniform_games: Option<usize>,
     pub refits_per_round: Option<usize>,
-    pub inference: Option<&'a str>,
     pub items_per_comparison: usize,
     pub nanojudge_bin: &'a Path,
 }
@@ -123,7 +121,7 @@ pub async fn run(
     );
     std::fs::write(config_file.path(), &config_toml).map_err(|e| e.to_string())?;
 
-    // Derive a CLI seed from the trial seed so pairing + MCMC are reproducible.
+    // Derive a CLI seed from the trial seed so pairing is reproducible.
     let cli_seed = seed.wrapping_add(2);
 
     // Run the real CLI as a subprocess.
@@ -169,17 +167,11 @@ pub async fn run(
     if let Some(prior_tau2) = config.prior_tau2 {
         cmd.arg("--prior-tau2").arg(prior_tau2.to_string());
     }
-    if let Some(mcmc_iterations) = config.mcmc_iterations {
-        cmd.arg("--mcmc-iterations").arg(mcmc_iterations.to_string());
-    }
     if let Some(min_uniform_games) = config.min_uniform_games {
         cmd.arg("--min-uniform-games").arg(min_uniform_games.to_string());
     }
     if let Some(refits_per_round) = config.refits_per_round {
         cmd.arg("--refits-per-round").arg(refits_per_round.to_string());
-    }
-    if let Some(inference) = config.inference {
-        cmd.arg("--inference").arg(inference);
     }
     if config.items_per_comparison != 2 {
         cmd.arg("--items-per-comparison").arg(config.items_per_comparison.to_string());

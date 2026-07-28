@@ -4,7 +4,7 @@ use std::collections::HashMap;
 ///
 /// Rust's `DefaultHasher` (SipHash) is randomized per process to prevent HashDoS,
 /// which means it produces different hashes across runs. We need stable hashes for
-/// judge identity (warm start state, saved comparisons), so we use FNV-1a instead.
+/// judge identity in saved comparisons, so we use FNV-1a instead.
 pub fn stable_hash(input: &str) -> u64 {
     let mut hash: u64 = 0xcbf29ce484222325; // FNV offset basis
     for byte in input.as_bytes() {
@@ -62,7 +62,7 @@ pub struct JudgeInfo {
     pub logprobs_mode: bool,
 }
 
-/// Per-judge analytics from MCMC estimation.
+/// Per-judge analytics from Bradley-Terry estimation.
 #[derive(Debug, Clone)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct JudgeAnalytics {
@@ -74,55 +74,22 @@ pub struct JudgeAnalytics {
     pub num_comparisons: usize,
 }
 
-/// Warm start state for multi-judge MCMC.
-#[derive(Debug, Clone)]
-#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
-pub struct WarmStartState {
-    /// Item log-strengths (θ, the engines' native state), same order as item_ids.
-    pub item_log_strengths: Vec<f64>,
-    /// Per-judge positional bias in logit space, keyed by judge_id hash. Each
-    /// judge carries a vector of free per-slot advantages (length `num_slots − 1`;
-    /// the highest slot is the pinned zero reference). For plain pairwise scoring
-    /// this is a single value — the first-position advantage. Positive slot-0
-    /// values mean the judge favors the first-listed item.
-    pub judge_biases: Vec<(u64, Vec<f64>)>,
-}
-
 /// A ranked item with point estimate and confidence interval bounds.
 #[derive(Debug, Clone, Copy)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct RankedItem {
     /// Item ID.
     pub item: i64,
-    /// Point estimate (mean of posterior samples, or MLE score).
+    /// MAP log-strength estimate.
     pub score: f64,
     pub lower_bound: f64,
     pub upper_bound: f64,
 }
 
-/// Which inference engine `run_scoring()` uses to turn comparisons into a
-/// posterior summary `(mean, std)` per item.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
-pub enum InferenceMode {
-    /// Gaussian-BT MCMC sampler. Samples the full posterior.
-    Mcmc,
-    /// Linear-time Laplace approximation (default): finds the posterior mode by
-    /// Newton-CG (no dense matrix) with a diagonal-Fisher std. Deterministic, no
-    /// sampling, O(#comparisons); scales to large item counts.
-    LaplaceLinear,
-}
-
-/// Options for `run_scoring()` — the unified scoring wrapper.
+/// Options for Laplace Bradley-Terry scoring via `run_scoring()`.
 #[derive(Debug, Clone)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct ScoringOptions {
-    /// Number of post-burn-in MCMC iterations (e.g. 5000 interim, 5000 final).
-    pub iterations: usize,
-    /// Burn-in iterations run before collecting samples. Applied even when `warm_start` is
-    /// provided, so set to 0 (or a small value) if the warm start is already near the
-    /// stationary distribution.
-    pub burn_in: usize,
     /// Confidence interval level (e.g. 0.95).
     pub confidence_level: f64,
     /// Top-heavy item-selection weighting. `None` skips it entirely (uniform
@@ -172,24 +139,14 @@ pub struct ScoringOptions {
     /// plays more. `target_prior_games = 0` disables the blend (pure observed
     /// anchor). Must be finite and >= 0. Ignored when `selection_sharpness` is `None`.
     pub target_prior_games: f64,
-    /// Previous warm start state. `None` = cold start.
-    pub warm_start: Option<WarmStartState>,
     /// Ghost player regularization strength (e.g. 0.01).
     pub regularization_strength: f64,
     /// Prior variance on log-strengths. Default: 10.0.
     pub prior_tau2: f64,
-    /// MH proposal step size for strengths. Default: 0.3.
-    pub proposal_std: f64,
     /// Prior variance on positional bias (logit space). Default: 2.0.
     pub bias_prior_tau2: f64,
-    /// MH proposal step size for bias. Default: 0.15.
-    pub bias_proposal_std: f64,
     /// Prior mean for positional bias in logit space. Default: 0.0 (= 0.5 probability = no bias).
     pub bias_prior_logit: f64,
-    /// RNG seed for reproducible MCMC sampling. `None` = OS entropy.
-    pub seed: Option<u64>,
-    /// Which inference engine to use (MCMC sampling or Laplace approximation).
-    pub inference: InferenceMode,
 }
 
 /// Result from `run_scoring()`.
@@ -224,24 +181,18 @@ pub struct ScoringResult {
     /// `item_ids` (`rankings` is the score-sorted view of the same values).
     pub item_means: Vec<f64>,
     /// Per-item posterior std of log-strength, same order as input `item_ids`.
-    /// Sample stds on the MCMC path, diagonal-Fisher stds on the Laplace path.
-    /// Together with `item_means` this feeds uncertainty-integrated
-    /// matchmaking via `RankingEngine::set_current_posterior`.
+    /// Estimated from the inverse Hessian with deterministic matrix-free probes.
+    /// Together with `item_means`, this feeds uncertainty-integrated matchmaking
+    /// via `RankingEngine::set_current_posterior`.
     pub item_stds: Vec<f64>,
-    /// Warm start state for next round.
-    pub warm_start_state: WarmStartState,
-    /// Number of post-burn-in samples (for DB storage).
-    pub sample_size: usize,
     /// Per-judge analytics. One entry per judge, same order as `JudgeInfo.judge_ids`.
     pub judge_analytics: Vec<JudgeAnalytics>,
-    /// Panel-level positional bias: posterior mean of the comparison-count-weighted
-    /// average of the judges' bias probabilities (equal weights when there are no
+    /// Panel-level positional bias: comparison-count-weighted average of the
+    /// judges' estimated bias probabilities (equal weights when there are no
     /// comparisons).
     pub panel_positional_bias: f64,
-    /// Credible interval for `panel_positional_bias`, computed from per-iteration
-    /// posterior samples of the weighted average — not by averaging per-judge
-    /// interval endpoints, which would be too wide. With a single judge this
-    /// equals that judge's `positional_bias_ci`.
+    /// Approximate credible interval for `panel_positional_bias`, propagated from
+    /// the per-judge Laplace variances with the delta method.
     pub panel_positional_bias_ci: (f64, f64),
 }
 

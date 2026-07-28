@@ -101,11 +101,11 @@ impl RankingEngine {
     ///
     /// # Panics
     ///
-    /// Panics if the round's effective distribution is top-heavy and the MCMC
-    /// data is missing or malformed. The effective distribution is top-heavy
+    /// Panics if the round's effective distribution is top-heavy and the
+    /// posterior summary is missing or malformed. The effective distribution is top-heavy
     /// when the engine is configured with `ComparisonDistribution::TopHeavy`
     /// and every item has reached `min_uniform_games` (the uniform stage needs
-    /// no MCMC data). In a top-heavy round `selection_weights` must be set, with
+    /// no posterior summary). In a top-heavy round `selection_weights` must be set, with
     /// one entry per item.
     pub fn generate_pairs_for_round(&mut self, _round_index: usize) -> Vec<Pair> {
         let pairs_count = calculate_pairs_for_round(self.id_map.len());

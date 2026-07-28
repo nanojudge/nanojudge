@@ -2,7 +2,7 @@
 name = "nanojudge-core"
 version = "3.0.0"
 edition = "2024"
-description = "Pure-computation ranking engine using Bradley-Terry models and MCMC sampling"
+description = "Pure-computation ranking engine using Laplace Bradley-Terry inference"
 license = "MIT"
 
 [dependencies]

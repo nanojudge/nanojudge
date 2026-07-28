@@ -55,17 +55,12 @@ pub struct NanojudgeConfig {
     pub retries: Option<usize>,
     pub confidence_level: Option<f64>,
     pub regularization_strength: Option<f64>,
-    pub inference: Option<String>,
-    pub mcmc_iterations: Option<usize>,
-    pub mcmc_burn_in: Option<usize>,
     pub bias_prior: Option<f64>,
     pub matchmaking_sharpness: Option<f64>,
     pub min_uniform_games: Option<usize>,
     pub refits_per_round: Option<usize>,
     pub prior_tau2: Option<f64>,
-    pub proposal_std: Option<f64>,
     pub bias_prior_tau2: Option<f64>,
-    pub bias_proposal_std: Option<f64>,
     pub reasoning_enabled: Option<bool>,
     pub min_logprob_coverage: Option<f64>,
     pub verdict_temperature: Option<f64>,
@@ -240,7 +235,7 @@ temperature = 0.7
 # weight = 3
 # temperature = 1.0
 
-# --- Scoring & MCMC hyperparameters ---
+# --- Scoring hyperparameters ---
 # Most users should not need to change these.
 
 # Confidence interval level. Default: 0.95 (95%).
@@ -248,16 +243,6 @@ temperature = 0.7
 
 # Ghost player regularization strength. Default: 0.01.
 # regularization_strength = 0.01
-
-# Inference engine: \"laplace-linear\" (deterministic MAP via Newton-CG +
-# diagonal-Fisher std, O(#comparisons), default) or \"mcmc\" (Gaussian-BT sampler).
-# inference = \"laplace-linear\"
-
-# Number of post-burn-in MCMC iterations for final scoring. Default: 5000.
-# mcmc_iterations = 5000
-
-# MCMC burn-in iterations for final scoring. Default: 500.
-# mcmc_burn_in = 500
 
 # Positional bias prior in probability space. 0.5 = no bias (default).
 # Values > 0.5 mean the model tends to favor the first-listed item.
@@ -274,14 +259,8 @@ temperature = 0.7
 # Prior variance on log-strengths. Default: 10.0.
 # prior_tau2 = 10.0
 
-# MH proposal step size for strengths. Default: 0.3.
-# proposal_std = 0.3
-
 # Prior variance on positional bias (logit space). Default: 2.0.
 # bias_prior_tau2 = 2.0
-
-# MH proposal step size for bias. Default: 0.15.
-# bias_proposal_std = 0.15
 ";
 
 /// Returns the default config path.

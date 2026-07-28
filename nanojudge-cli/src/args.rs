@@ -168,20 +168,6 @@ pub struct ConfigArgs {
     #[arg(long)]
     pub regularization_strength: Option<f64>,
 
-    /// Inference engine: "laplace-linear" (deterministic MAP via Newton-CG +
-    /// diagonal-Fisher std, O(#comparisons), default) or "mcmc" (Gaussian-BT
-    /// sampler).
-    #[arg(long)]
-    pub inference: Option<String>,
-
-    /// Number of post-burn-in MCMC iterations for final scoring. Default: 5000.
-    #[arg(long)]
-    pub mcmc_iterations: Option<usize>,
-
-    /// MCMC burn-in iterations for final scoring. Default: 500.
-    #[arg(long)]
-    pub mcmc_burn_in: Option<usize>,
-
     /// Positional bias prior in probability space (0.0-1.0 exclusive).
     /// 0.5 = no bias (default). >0.5 = model tends to favor item listed first.
     #[arg(long)]
@@ -208,17 +194,9 @@ pub struct ConfigArgs {
     #[arg(long)]
     pub prior_tau2: Option<f64>,
 
-    /// MH proposal step size for strengths. Default: 0.3.
-    #[arg(long)]
-    pub proposal_std: Option<f64>,
-
     /// Prior variance on positional bias (logit space). Default: 2.0.
     #[arg(long)]
     pub bias_prior_tau2: Option<f64>,
-
-    /// MH proposal step size for bias. Default: 0.15.
-    #[arg(long)]
-    pub bias_proposal_std: Option<f64>,
 
     /// Print a live ranking table after each round.
     /// With no value: prints all items. With a number: prints top N only.
@@ -226,7 +204,7 @@ pub struct ConfigArgs {
     pub live_top: Option<usize>,
 
     /// Emit the interim ranking after every round as a `round_rankings` array
-    /// in JSON output. Forces an interim MCMC pass each round even for uniform.
+    /// in JSON output. Forces an interim scoring pass each round even for uniform.
     /// Intended for the benchmark harness to plot per-round convergence.
     #[arg(long, num_args = 0..=1, default_missing_value = "true")]
     pub emit_round_rankings: Option<bool>,

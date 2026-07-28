@@ -87,11 +87,6 @@ struct Args {
     #[arg(long)]
     stop_confidence: Option<f64>,
 
-    /// MCMC iterations forwarded to the CLI (governs both the per-round interim
-    /// scoring and the final scoring). Omit to use the CLI's default (5000).
-    #[arg(long)]
-    mcmc_iterations: Option<usize>,
-
     /// Minimum uniform-stage games per item forwarded to the CLI, before
     /// top-heavy concentration engages. Omit to use the CLI's default (2).
     #[arg(long)]
@@ -103,11 +98,6 @@ struct Args {
     /// adaptive pairing. The uniform stage is never subdivided.
     #[arg(long)]
     refits_per_round: Option<usize>,
-
-    /// Inference engine forwarded to the CLI: "mcmc" or "laplace-linear". Omit to
-    /// use the CLI's default (laplace-linear).
-    #[arg(long)]
-    inference: Option<String>,
 
     /// Use logprobs mode instead of text-verdict mode.
     #[arg(long)]
@@ -212,10 +202,8 @@ struct SharedTrialConfig {
     coverage: Option<f64>,
     target_prior_games: Option<f64>,
     stop_confidence: Option<f64>,
-    mcmc_iterations: Option<usize>,
     min_uniform_games: Option<usize>,
     refits_per_round: Option<usize>,
-    inference: Option<String>,
     items_per_comparison: usize,
     nanojudge_bin: PathBuf,
 }
@@ -291,13 +279,6 @@ async fn main() {
     eprintln!("  Report top-K: {}", top_k);
     eprintln!("  Distribution: {}", args.comparison_distribution);
     eprintln!(
-        "  MCMC iterations: {}",
-        match args.mcmc_iterations {
-            Some(n) => n.to_string(),
-            None => "CLI default (5000)".to_string(),
-        }
-    );
-    eprintln!(
         "  Min uniform games: {}",
         match args.min_uniform_games {
             Some(n) => n.to_string(),
@@ -311,10 +292,7 @@ async fn main() {
             None => "CLI default (1)".to_string(),
         }
     );
-    eprintln!(
-        "  Inference: {}",
-        args.inference.as_deref().unwrap_or("CLI default (laplace-linear)")
-    );
+    eprintln!("  Inference: Laplace");
     eprintln!("  Seed: {}", master_seed);
     eprintln!("  Concurrency: {}", concurrency);
     eprintln!();
@@ -333,10 +311,8 @@ async fn main() {
         coverage: args.coverage,
         target_prior_games: args.target_prior_games,
         stop_confidence: args.stop_confidence,
-        mcmc_iterations: args.mcmc_iterations,
         min_uniform_games: args.min_uniform_games,
         refits_per_round: args.refits_per_round,
-        inference: args.inference.clone(),
         items_per_comparison: args.items_per_comparison,
         nanojudge_bin: nanojudge_bin.clone(),
     });
@@ -372,10 +348,8 @@ async fn main() {
                 coverage: shared.coverage,
                 target_prior_games: shared.target_prior_games,
                 stop_confidence: shared.stop_confidence,
-                mcmc_iterations: shared.mcmc_iterations,
                 min_uniform_games: shared.min_uniform_games,
                 refits_per_round: shared.refits_per_round,
-                inference: shared.inference.as_deref(),
                 items_per_comparison: shared.items_per_comparison,
                 nanojudge_bin: &shared.nanojudge_bin,
             };

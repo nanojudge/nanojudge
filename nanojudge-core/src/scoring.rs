@@ -1,38 +1,14 @@
-/// Unified MCMC scoring wrapper.
+/// Laplace Bradley-Terry scoring wrapper.
 ///
 /// One function, one options struct. Pure function — no IO, no state.
 /// Items are identified by caller-provided `i64` IDs.
 use std::collections::HashMap;
 
-use crate::gaussian_bt::GaussianBT;
 use crate::laplace_bt;
-use crate::seed;
 use crate::types::{
-    ComparisonInput, IdMap, IndexedComparison, InferenceMode, JudgeAnalytics, JudgeInfo,
-    RankedItem, ScoringOptions, ScoringResult, WarmStartState,
+    ComparisonInput, IdMap, IndexedComparison, JudgeAnalytics, JudgeInfo, RankedItem,
+    ScoringOptions, ScoringResult,
 };
-
-/// Compute confidence interval from sorted samples.
-fn ci_from_sorted(samples: &[f64], confidence_level: f64) -> (f64, f64) {
-    if samples.is_empty() {
-        return (0.0, 0.0);
-    }
-    let alpha = 1.0 - confidence_level;
-    let n = samples.len();
-    let lower_idx = ((alpha / 2.0) * n as f64).floor() as usize;
-    let upper_idx = ((1.0 - alpha / 2.0) * n as f64).floor() as usize;
-    let upper_idx = upper_idx.saturating_sub(1).max(lower_idx);
-    (samples[lower_idx], samples[upper_idx])
-}
-
-/// Convert logit-space samples to probability-space CI.
-fn logit_to_prob_ci(sorted_logit_samples: &[f64], mean_logit: f64, confidence_level: f64) -> (f64, (f64, f64)) {
-    let prob = 1.0 / (1.0 + (-mean_logit).exp());
-    let (lower_logit, upper_logit) = ci_from_sorted(sorted_logit_samples, confidence_level);
-    let lower = 1.0 / (1.0 + (-lower_logit).exp());
-    let upper = 1.0 / (1.0 + (-upper_logit).exp());
-    (prob, (lower, upper))
-}
 
 /// Standard normal CDF Φ(x).
 ///
@@ -255,7 +231,7 @@ fn compute_selection_weights(
     SelectionWeightsOutput { weights, partition_log_confidence }
 }
 
-/// Run MCMC scoring on pairwise comparison data.
+/// Run Laplace Bradley-Terry scoring on pairwise comparison data.
 ///
 /// `item_ids` is the full list of item IDs being ranked. The returned
 /// `selection_weights` (when requested) is in the same order as `item_ids`.
@@ -267,8 +243,6 @@ fn compute_selection_weights(
 /// - `item_ids` contains a duplicate ID
 /// - a comparison references an item ID not present in `item_ids`
 /// - a comparison's `judge_id` is not present in `judge_info.judge_ids`
-/// - `options.warm_start` is set and its `item_log_strengths` length does not
-///   match `item_ids.len()`
 /// - `options.selection_sharpness` is set and `options.anchor_index` is not
 ///   finite or lies outside `[0, item_ids.len() - 1]`
 pub fn run_scoring(
@@ -277,7 +251,6 @@ pub fn run_scoring(
     options: &ScoringOptions,
     judge_info: &JudgeInfo,
 ) -> ScoringResult {
-    assert!(options.iterations > 0, "iterations must be at least 1");
     assert!(
         !judge_info.judge_ids.is_empty(),
         "judge_info.judge_ids must contain at least one judge"
@@ -294,119 +267,7 @@ pub fn run_scoring(
 
     let indexed = id_map.convert_comparisons(comparisons, &judge_id_to_idx);
 
-    // Laplace path: deterministic MAP + curvature, no sampling. Produces the
-    // same ScoringResult shape as the MCMC path below.
-    if options.inference == InferenceMode::LaplaceLinear {
-        return run_scoring_laplace(&id_map, num_items, &indexed, options, judge_info);
-    }
-
-    let mut mcmc = GaussianBT::new(
-        num_items,
-        &indexed,
-        options,
-        judge_info,
-    );
-
-    let mut rng = seed::make_rng(options.seed, seed::SUBSYSTEM_MCMC);
-
-    let samples_result = if let Some(ref warm_start) = options.warm_start {
-        assert_eq!(
-            warm_start.item_log_strengths.len(), num_items,
-            "warm_start item_log_strengths length ({}) must match num_items ({})",
-            warm_start.item_log_strengths.len(), num_items
-        );
-        mcmc.calculate_incremental_with_samples(
-            &warm_start.item_log_strengths,
-            &warm_start.judge_biases,
-            &judge_id_to_idx,
-            options.iterations,
-            options.burn_in,
-            &mut rng,
-        )
-    } else {
-        mcmc.calculate_with_samples(options.iterations, options.burn_in, &mut rng)
-    };
-
-    // Compute confidence intervals; returned items use index-as-i64, map back to real IDs
-    let mut rankings = GaussianBT::compute_confidence_intervals_from_sorted_samples(
-        &samples_result.sorted_samples,
-        &samples_result.means,
-        options.confidence_level,
-    );
-
-    for r in &mut rankings {
-        r.item = id_map.to_id(r.item as usize);
-    }
-
-    // Build per-judge analytics
-    let mut judge_analytics = Vec::with_capacity(judge_info.judge_ids.len());
-    for (j, &judge_id) in judge_info.judge_ids.iter().enumerate() {
-        let (bias_prob, bias_ci) = logit_to_prob_ci(
-            &samples_result.bias_logit_samples[j],
-            samples_result.bias_logit_means[j],
-            options.confidence_level,
-        );
-
-        judge_analytics.push(JudgeAnalytics {
-            judge_id,
-            positional_bias: bias_prob,
-            positional_bias_ci: bias_ci,
-            num_comparisons: samples_result.comparisons_per_judge[j],
-        });
-    }
-
-    // Panel-level bias: posterior mean and quantiles of the per-iteration
-    // weighted average of judge biases (probability space).
-    let panel_samples = &samples_result.panel_bias_samples;
-    let panel_positional_bias =
-        panel_samples.iter().sum::<f64>() / panel_samples.len() as f64;
-    let panel_positional_bias_ci = ci_from_sorted(panel_samples, options.confidence_level);
-
-    // Build warm start state
-    let warm_start_state = WarmStartState {
-        item_log_strengths: mcmc.get_current_state(),
-        judge_biases: mcmc.get_current_biases(judge_info),
-    };
-
-    // Top-heavy selection weights: each item's sharpened uncertainty ratio
-    // around the anchor's mean, built from the posterior (mean, std) summary,
-    // with a proportional-fair coverage pull. `None` for uniform.
-    let selection = options.selection_sharpness.map(|selection_sharpness| {
-        // Comparisons played per item so far (each comparison touches two items).
-        let mut games_per_item = vec![0usize; num_items];
-        for &(idx1, idx2, _, _, _, _) in &indexed {
-            games_per_item[idx1] += 1;
-            games_per_item[idx2] += 1;
-        }
-        compute_selection_weights(
-            &samples_result.means,
-            &samples_result.stds,
-            &games_per_item,
-            selection_sharpness,
-            options.anchor_index,
-            options.selection_cutoff,
-            options.selection_coverage,
-            options.prior_tau2,
-            options.target_prior_games,
-        )
-    });
-    let (selection_weights, partition_log_confidence) = match selection {
-        Some(s) => (Some(s.weights), Some(s.partition_log_confidence)),
-        None => (None, None),
-    };
-
-    ScoringResult {
-        rankings,
-        selection_weights,
-        partition_log_confidence,
-        item_means: samples_result.means.clone(),
-        item_stds: samples_result.stds.clone(),
-        warm_start_state,
-        sample_size: options.iterations,
-        judge_analytics,
-        panel_positional_bias,
-        panel_positional_bias_ci,
-    }
+    build_scoring_result(&id_map, num_items, &indexed, options, judge_info)
 }
 
 /// Inverse standard-normal CDF for a confidence level, via bisection on
@@ -471,12 +332,10 @@ fn sigmoid_scalar(x: f64) -> f64 {
     }
 }
 
-/// Laplace-approximation scoring path: deterministic MAP fit + curvature, no
-/// sampling. Produces the same `ScoringResult` shape as the MCMC path, with CIs
-/// computed analytically as symmetric Gaussian intervals from the per-parameter
-/// standard deviations.
+/// Deterministic MAP fit plus curvature, with confidence intervals computed as
+/// Gaussian intervals from the per-parameter standard deviations.
 #[allow(clippy::needless_range_loop)]
-fn run_scoring_laplace(
+fn build_scoring_result(
     id_map: &IdMap,
     num_items: usize,
     indexed: &[IndexedComparison],
@@ -540,15 +399,6 @@ fn run_scoring_laplace(
         None => (None, None),
     };
 
-    // The Laplace fit refits from scratch each call, so warm start is unused;
-    // we still return a valid state for API symmetry with the MCMC path.
-    let warm_start_state = WarmStartState {
-        item_log_strengths: fit.means.clone(),
-        judge_biases: (0..num_judges)
-            .map(|k| (judge_info.judge_ids[k], fit.bias_free[k].clone()))
-            .collect(),
-    };
-
     // Per-judge analytics: bias in probability space with a symmetric CI.
     let judge_analytics: Vec<JudgeAnalytics> = (0..num_judges)
         .map(|k| {
@@ -586,11 +436,15 @@ fn run_scoring_laplace(
         }
         (mean, var)
     };
-    let panel_sd = panel_var.sqrt();
-    let panel_positional_bias_ci = (
-        (panel_positional_bias - z * panel_sd).clamp(0.0, 1.0),
-        (panel_positional_bias + z * panel_sd).clamp(0.0, 1.0),
-    );
+    let panel_positional_bias_ci = if num_judges == 1 {
+        judge_analytics[0].positional_bias_ci
+    } else {
+        let panel_sd = panel_var.sqrt();
+        (
+            (panel_positional_bias - z * panel_sd).clamp(0.0, 1.0),
+            (panel_positional_bias + z * panel_sd).clamp(0.0, 1.0),
+        )
+    };
 
     ScoringResult {
         rankings,
@@ -598,8 +452,6 @@ fn run_scoring_laplace(
         partition_log_confidence,
         item_means: fit.means.clone(),
         item_stds: fit.stds.clone(),
-        warm_start_state,
-        sample_size: 0,
         judge_analytics,
         panel_positional_bias,
         panel_positional_bias_ci,
@@ -632,31 +484,21 @@ mod tests {
 
     fn default_scoring_options() -> ScoringOptions {
         ScoringOptions {
-            iterations: 200,
-            burn_in: 100,
             confidence_level: 0.95,
             selection_sharpness: None,
             anchor_index: 0.0,
             selection_cutoff: 0.05,
             selection_coverage: 0.0,
             target_prior_games: 10.0,
-            warm_start: None,
             regularization_strength: 0.01,
             prior_tau2: 10.0,
-            proposal_std: 0.3,
             bias_prior_tau2: 2.0,
-            bias_proposal_std: 0.15,
-
             bias_prior_logit: 0.0,
-            seed: None,
-            inference: InferenceMode::Mcmc,
         }
     }
 
     #[test]
-    fn test_laplace_and_mcmc_agree_on_ordering() {
-        // Both engines fit the same posterior, so on clear data they must
-        // produce the same ranking order.
+    fn test_clear_data_produces_expected_ordering_and_intervals() {
         let item_ids = vec![10, 20, 30];
         let mut comparisons: Vec<ComparisonInput> = Vec::new();
         for _ in 0..10 {
@@ -666,22 +508,10 @@ mod tests {
         }
         let ji = single_judge_info();
 
-        let mut mcmc_opts = default_scoring_options();
-        mcmc_opts.iterations = 3000;
-        mcmc_opts.burn_in = 500;
-        mcmc_opts.seed = Some(7);
-        let mut laplace_opts = mcmc_opts.clone();
-        laplace_opts.inference = InferenceMode::LaplaceLinear;
-
-        let mcmc = run_scoring(&item_ids, &comparisons, &mcmc_opts, &ji);
-        let laplace = run_scoring(&item_ids, &comparisons, &laplace_opts, &ji);
-
-        let mcmc_order: Vec<i64> = mcmc.rankings.iter().map(|r| r.item).collect();
-        let laplace_order: Vec<i64> = laplace.rankings.iter().map(|r| r.item).collect();
-        assert_eq!(mcmc_order, vec![10, 20, 30]);
-        assert_eq!(laplace_order, vec![10, 20, 30]);
-        // Laplace CIs are finite and bracket the score.
-        for r in &laplace.rankings {
+        let result = run_scoring(&item_ids, &comparisons, &default_scoring_options(), &ji);
+        let order: Vec<i64> = result.rankings.iter().map(|r| r.item).collect();
+        assert_eq!(order, vec![10, 20, 30]);
+        for r in &result.rankings {
             assert!(r.lower_bound <= r.score && r.score <= r.upper_bound);
             assert!(r.lower_bound.is_finite() && r.upper_bound.is_finite());
         }
@@ -690,9 +520,9 @@ mod tests {
     #[test]
     fn test_item_means_and_stds_are_input_order_posteriors() {
         // item_means/item_stds are the flat per-item posterior summary in
-        // item_ids order — rankings is the same data sorted by score. On both
-        // engines each ranked score must equal the item_means entry for that
-        // item, and every std must be a usable (finite, positive) value.
+        // item_ids order — rankings is the same data sorted by score. Each
+        // ranked score must equal the item_means entry for that item, and every
+        // std must be a usable (finite, positive) value.
         let item_ids = vec![10, 20, 30];
         let mut comparisons: Vec<ComparisonInput> = Vec::new();
         for _ in 0..10 {
@@ -702,22 +532,15 @@ mod tests {
         }
         let ji = single_judge_info();
 
-        let mut mcmc_opts = default_scoring_options();
-        mcmc_opts.seed = Some(7);
-        let mut laplace_opts = mcmc_opts.clone();
-        laplace_opts.inference = InferenceMode::LaplaceLinear;
-
-        for opts in [mcmc_opts, laplace_opts] {
-            let result = run_scoring(&item_ids, &comparisons, &opts, &ji);
-            assert_eq!(result.item_means.len(), item_ids.len());
-            assert_eq!(result.item_stds.len(), item_ids.len());
-            for r in &result.rankings {
-                let idx = item_ids.iter().position(|&id| id == r.item).unwrap();
-                assert_eq!(r.score, result.item_means[idx]);
-            }
-            for &s in &result.item_stds {
-                assert!(s.is_finite() && s > 0.0, "posterior std must be finite and positive, got {s}");
-            }
+        let result = run_scoring(&item_ids, &comparisons, &default_scoring_options(), &ji);
+        assert_eq!(result.item_means.len(), item_ids.len());
+        assert_eq!(result.item_stds.len(), item_ids.len());
+        for r in &result.rankings {
+            let idx = item_ids.iter().position(|&id| id == r.item).unwrap();
+            assert_eq!(r.score, result.item_means[idx]);
+        }
+        for &s in &result.item_stds {
+            assert!(s.is_finite() && s > 0.0, "posterior std must be finite and positive, got {s}");
         }
     }
 
@@ -730,117 +553,35 @@ mod tests {
         // cutpoint center without negation, inverting its direction.
         let mut opts = default_scoring_options();
         opts.bias_prior_logit = (0.8_f64 / 0.2).ln(); // bias_prior = 0.8
-        opts.iterations = 5000;
-        opts.burn_in = 1000;
-        // With no likelihood, the center chain samples the prior alone. The
-        // production proposal step (0.15) mixes that wide prior too slowly for
-        // a stable 5000-sample mean; use a step matched to the prior scale.
-        opts.bias_proposal_std = 1.0;
 
         let ji = single_judge_info();
         let result = run_scoring(&[1, 2], &[], &opts, &ji);
         let bias = result.judge_analytics[0].positional_bias;
         assert!(
-            bias > 0.55,
-            "bias_prior 0.8 with no data must report positional_bias well above 0.5, got {bias:.4}"
+            (bias - 0.8).abs() < 1e-10,
+            "bias_prior 0.8 with no data must report positional_bias 0.8, got {bias:.4}"
         );
     }
 
     #[test]
-    fn test_cold_start_scoring() {
+    fn test_scoring() {
         let item_ids = vec![100, 200, 300];
-        // Clear wins for item 100 (0.95 -> category A) and enough samples that
-        // the posterior-mean ordering is stable run to run.
+        // Clear wins for item 100 (0.95 -> category A).
         let comparisons: Vec<ComparisonInput> = [
             make_pair(100, 200, 0.95),
             make_pair(100, 300, 0.95),
             make_pair(200, 300, 0.7),
         ].into_iter().flatten().collect();
 
-        let mut opts = default_scoring_options();
-        opts.iterations = 2000;
-        opts.burn_in = 300;
-
         let ji = single_judge_info();
-        let result = run_scoring(&item_ids, &comparisons, &opts, &ji);
+        let result = run_scoring(&item_ids, &comparisons, &default_scoring_options(), &ji);
 
         assert_eq!(result.rankings.len(), 3);
         assert_eq!(result.rankings[0].item, 100);
         assert!(result.selection_weights.is_none());
         assert!(result.partition_log_confidence.is_none());
-        assert_eq!(result.warm_start_state.item_log_strengths.len(), 3);
-        assert_eq!(result.sample_size, 2000);
         assert_eq!(result.judge_analytics.len(), 1);
         assert_eq!(result.judge_analytics[0].judge_id, 42);
-    }
-
-    #[test]
-    fn test_warm_start_scoring() {
-        let item_ids = vec![10, 20, 30];
-        let comparisons: Vec<ComparisonInput> = [
-            make_pair(10, 20, 0.9),
-            make_pair(20, 30, 0.7),
-        ].into_iter().flatten().collect();
-
-        let ji = single_judge_info();
-        let result1 = run_scoring(&item_ids, &comparisons, &default_scoring_options(), &ji);
-
-        let mut opts2 = default_scoring_options();
-        opts2.warm_start = Some(result1.warm_start_state);
-        opts2.burn_in = 0;
-
-        let result2 = run_scoring(&item_ids, &comparisons, &opts2, &ji);
-
-        assert_eq!(result2.rankings.len(), 3);
-        assert_eq!(result2.warm_start_state.item_log_strengths.len(), 3);
-    }
-
-    #[test]
-    fn test_warm_start_state_is_log_strengths_in_both_engines() {
-        // Both engines must write the SAME unit into WarmStartState: raw
-        // log-strengths (mean-centered θ). Regression test for the Laplace path
-        // exp()-ing its means — exp values are all positive, so requiring a
-        // negative entry and a ~0 sum catches any strength-space leak.
-        let item_ids = vec![10, 20, 30];
-        let comparisons: Vec<ComparisonInput> = (0..10).flat_map(|_| {
-            [make_pair(10, 20, 0.9), make_pair(20, 30, 0.9)]
-        }).flatten().collect();
-        let ji = single_judge_info();
-
-        for inference in [InferenceMode::Mcmc, InferenceMode::LaplaceLinear] {
-            let mut opts = default_scoring_options();
-            opts.inference = inference;
-            opts.seed = Some(11);
-            let state = run_scoring(&item_ids, &comparisons, &opts, &ji).warm_start_state;
-            let sum: f64 = state.item_log_strengths.iter().sum();
-            assert!(
-                sum.abs() < 1e-6,
-                "{inference:?}: log-strengths are mean-centered, sum should be ~0, got {sum}"
-            );
-            assert!(
-                state.item_log_strengths.iter().any(|&s| s < 0.0),
-                "{inference:?}: the losing item's log-strength must be negative, got {:?}",
-                state.item_log_strengths
-            );
-        }
-    }
-
-    #[test]
-    #[should_panic(expected = "warm_start item_log_strengths length (2) must match num_items (3)")]
-    fn test_warm_start_wrong_length_panics() {
-        let item_ids = vec![10, 20, 30];
-        let comparisons: Vec<ComparisonInput> = [
-            make_pair(10, 20, 0.9),
-        ].into_iter().flatten().collect();
-
-        let ji = single_judge_info();
-        let mut opts = default_scoring_options();
-        opts.warm_start = Some(WarmStartState {
-            item_log_strengths: vec![1.0, 1.0], // Wrong length: 2 instead of 3
-            judge_biases: vec![],
-        });
-
-        run_scoring(&item_ids, &comparisons, &opts, &ji);
     }
 
     #[test]
@@ -984,9 +725,8 @@ mod tests {
 
     #[test]
     fn test_single_judge_panel_bias_matches_judge() {
-        // With one judge the panel aggregate is that judge's own posterior.
-        // The CI must match exactly: quantiles commute with the monotone
-        // logit->probability transform, so the same sample ranks are picked.
+        // With one judge the panel aggregate is exactly that judge's estimate
+        // and transformed-Gaussian interval.
         let item_ids = vec![100, 200, 300];
         let comparisons: Vec<ComparisonInput> = [
             make_pair(100, 200, 0.9),
@@ -997,10 +737,8 @@ mod tests {
         let result = run_scoring(&item_ids, &comparisons, &default_scoring_options(), &ji);
 
         let ja = &result.judge_analytics[0];
-        assert!((result.panel_positional_bias_ci.0 - ja.positional_bias_ci.0).abs() < 1e-12);
-        assert!((result.panel_positional_bias_ci.1 - ja.positional_bias_ci.1).abs() < 1e-12);
-        // Point estimates differ only by mean-of-sigmoid vs sigmoid-of-mean.
-        assert!((result.panel_positional_bias - ja.positional_bias).abs() < 0.05);
+        assert!((result.panel_positional_bias - ja.positional_bias).abs() < 1e-12);
+        assert_eq!(result.panel_positional_bias_ci, ja.positional_bias_ci);
     }
 
     #[test]
@@ -1021,20 +759,17 @@ mod tests {
             logprobs_mode: true,
         };
 
-        let mut opts = default_scoring_options();
-        opts.iterations = 2000;
-        opts.burn_in = 300;
-        let result = run_scoring(&item_ids, &comparisons, &opts, &ji);
+        let result = run_scoring(&item_ids, &comparisons, &default_scoring_options(), &ji);
 
         let (lo, hi) = result.panel_positional_bias_ci;
         assert!(lo <= result.panel_positional_bias && result.panel_positional_bias <= hi);
         assert!(0.0 < lo && hi < 1.0);
-        // The weighted average of independent biases concentrates: the panel CI
-        // must not be wider than the widest per-judge CI.
-        let max_judge_width = result.judge_analytics.iter()
-            .map(|ja| ja.positional_bias_ci.1 - ja.positional_bias_ci.0)
-            .fold(0.0_f64, f64::max);
-        assert!(hi - lo <= max_judge_width + 1e-12);
+        for judge in &result.judge_analytics {
+            assert!(
+                judge.positional_bias_ci.0 <= judge.positional_bias
+                    && judge.positional_bias <= judge.positional_bias_ci.1
+            );
+        }
     }
 
     #[test]

@@ -25,23 +25,16 @@ let comparisons = vec![
 let judge_info = JudgeInfo { judge_ids: vec![judge_id], logprobs_mode: false };
 
 let result = run_scoring(&item_ids, &comparisons, &ScoringOptions {
-    iterations: 200,
-    burn_in: 100,
     confidence_level: 0.95,
     selection_sharpness: None,
     anchor_index: 0.0,
     selection_cutoff: 0.0005,
     selection_coverage: 1.0,
     target_prior_games: 5.0,
-    warm_start: None,
     regularization_strength: 0.01,
     prior_tau2: 10.0,
-    proposal_std: 0.3,
     bias_prior_tau2: 2.0,
-    bias_proposal_std: 0.15,
     bias_prior_logit: 0.0,
-    seed: None,
-    inference: nanojudge_core::InferenceMode::Mcmc,
 }, &judge_info);
 
 for r in &result.rankings {
@@ -73,11 +66,9 @@ let config = EngineConfig {
 let mut engine = RankingEngine::new(&item_ids, config);
 
 for round in 0..20 {
-    // 1. Score existing comparisons to get MCMC data for pairing
+    // 1. Score existing comparisons to get posterior summaries for pairing
     if !engine.completed_comparisons.is_empty() {
         let scoring = run_scoring(&item_ids, &engine.completed_comparisons, &ScoringOptions {
-            iterations: 200,
-            burn_in: 100,
             confidence_level: 0.95,
             // Top-heavy selection: weight each item by its sharpened
             // uncertainty ratio around the anchor (anchor_index 0.0 = the
@@ -90,15 +81,10 @@ for round in 0..20 {
             selection_cutoff: 0.0005,
             selection_coverage: 1.0,
             target_prior_games: 5.0,
-            warm_start: None,
             regularization_strength: 0.01,
             prior_tau2: 10.0,
-            proposal_std: 0.3,
             bias_prior_tau2: 2.0,
-            bias_proposal_std: 0.15,
             bias_prior_logit: 0.0,
-            seed: None,
-            inference: nanojudge_core::InferenceMode::Mcmc,
         }, &judge_info);
         // The posterior (means + stds) drives matchmaking: opponent selection
         // integrates its win probabilities over the rating uncertainty, so
@@ -126,19 +112,19 @@ for round in 0..20 {
 
 ## The math
 
-1. **Bradley-Terry MLE** — fast iterative algorithm for point-estimate scores from pairwise win rates
-2. **Gaussian BT MCMC** — Bayesian posterior sampling via Metropolis-Hastings within Gibbs, producing confidence intervals and per-item selection weights (each item's uncertainty ratio around the anchor — by default the current leader, configurable via `anchor_index`, with the split integrated over the anchor's own posterior uncertainty — so the contested boundary gets the comparisons)
-3. **Positional bias estimation** — jointly estimated during MCMC sampling. LLMs tend to favor whichever option is shown first; the sampler detects and corrects for this automatically
+1. **Bradley-Terry MLE** — fast iterative algorithm for point-estimate scores used by lightweight rating updates
+2. **Laplace Bradley-Terry inference** — deterministic MAP fitting via Newton-CG, with correlation-aware inverse-Hessian probes producing approximate credible intervals and per-item selection weights in linear work for fixed solver limits
+3. **Positional bias estimation** — jointly estimated in the Laplace fit. LLMs tend to favor whichever option is shown first; the model detects and corrects for this automatically
 4. **Smart pairing** — decides which pairs to compare next to maximize information gain per comparison
 
 ## Modules
 
 | Module | What it does |
 |---|---|
-| `scoring` | `run_scoring()` — unified MCMC wrapper, the main entry point |
+| `scoring` | `run_scoring()` — Laplace Bradley-Terry scoring, the main entry point |
 | `engine` | `RankingEngine` — multi-round orchestrator with smart pair selection |
 | `pairing` | Uniform and top-heavy comparison distributions |
-| `gaussian_bt` | Bayesian MCMC sampler (Metropolis-Hastings within Gibbs) |
+| `laplace_bt` | Deterministic MAP fit and matrix-free covariance estimation |
 | `bradley_terry` | Fast iterative MLE for quick rating updates between rounds |
 | `types` | `ComparisonInput`, `ScoringOptions`, `ScoringResult`, `RankedItem` |
 
@@ -155,9 +141,8 @@ The engine handles two stages automatically:
 ## Key concepts
 
 - **Win probability**: Not binary win/loss. Each comparison produces P(A beats B) from LLM logprobs. A value of 0.73 means "A is probably better but not certain." This preserves uncertainty through to the final ranking.
-- **Warm-start**: Pass `state` from a previous `ScoringResult` back as `warm_start` to skip burn-in. Makes interim scoring fast between rounds.
 - **Ghost player regularization**: A virtual opponent that every item has a tiny draw against. Prevents infinite scores when an item has a 100% or 0% win rate.
-- **Positional bias**: Jointly estimated during MCMC — no manual calibration needed. The `ScoringResult` reports the estimated bias and its confidence interval.
+- **Positional bias**: Jointly estimated during scoring — no manual calibration needed. The `ScoringResult` reports the estimated bias and its approximate credible interval.
 
 ## Design philosophy
 

@@ -17,7 +17,7 @@ pub const INITIAL_BRADLEY_TERRY_RATING: f64 = 1.0;
 /// in behavior). The value 100 provides more than enough candidates for
 /// good-quality weighted sampling while keeping pairing fast at any scale.
 ///
-/// Benchmarked on 2025-02-25 (see misc/benchmarks/mcmc-bench):
+/// Benchmarked on 2025-02-25:
 ///   10K items: 452ms (old O(N^2)) vs ~5ms with windowing
 ///   100K items: 46s (old O(N^2)) vs ~50ms with windowing
 pub const OPPONENT_WINDOW_SIZE: usize = 100;

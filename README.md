@@ -149,13 +149,13 @@ Per-judge settings (in `[[judge]]` blocks):
 
 1. **Pairwise comparisons** — each round, the engine picks which pairs to compare. Each judge in the panel evaluates its assigned pairs. With `logprobs = true`, token logprobs give continuous confidence. With `logprobs = false`, verdicts are parsed from the response text.
 
-2. **Bradley-Terry scoring** — all pairwise probabilities are combined into global scores using Bayesian MCMC inference (Gaussian Bradley-Terry with Metropolis-Hastings sampling). This produces point estimates plus confidence intervals.
+2. **Bradley-Terry scoring** — all pairwise probabilities are combined into global scores using deterministic Laplace inference. Newton-CG finds the posterior mode, while matrix-free inverse-Hessian probes estimate correlation-aware credible intervals without dense O(n²) matrices.
 
 3. **Adaptive pairing** — the engine uses the results of previous comparisons to decide what to compare next, maximizing information gain. Two comparison distributions:
    - **Uniform**: every item gets equal comparison time (good for full rankings)
    - **Top-heavy**: focuses comparisons on top contenders (good for large lists where you mainly want the best items)
 
-4. **Positional bias correction** — LLMs tend to favor whichever option is shown first. The MCMC sampler jointly estimates this bias and corrects for it automatically.
+4. **Positional bias correction** — LLMs tend to favor whichever option is shown first. The Bradley-Terry fit jointly estimates this bias and corrects for it automatically.
 
 ## Recommended models
 
