@@ -16,7 +16,7 @@ pub struct TrialConfig<'a> {
     pub rounds: usize,
     pub actual_tau2: f64,
     pub prior_tau2: Option<f64>,
-    pub use_logprobs: bool,
+    pub samples_per_comparison: usize,
     pub distribution: &'a str,
     pub selection_sharpness: Option<f64>,
     pub anchor_index: Option<f64>,
@@ -101,6 +101,7 @@ pub async fn run(
     let state = Arc::new(server::JudgeState {
         strengths,
         seed: server_seed,
+        samples_per_comparison: config.samples_per_comparison,
         pair_counts: std::sync::Mutex::new(std::collections::HashMap::new()),
     });
     let (port, server_handle) = server::start(state).await;
@@ -108,16 +109,20 @@ pub async fn run(
     // Guard ensures server is always cleaned up, even on early return.
     let _server_guard = ServerGuard(&server_handle);
 
+    // The benchmark always uses the CLI's logprob-shaped transport so the fake
+    // endpoint can pass empirical sample frequencies through as one soft
+    // comparison. This is an implementation detail, not a benchmark mode:
+    // `samples_per_comparison = 1` naturally produces a hard judgment.
     let config_toml = format!(
         "reasoning_enabled = false\n\
-         logprobs = {logprobs}\n\
+         logprobs = true\n\
+         verdict_temperature = 1.0\n\
          \n\
          [[judge]]\n\
          endpoint = \"http://127.0.0.1:{port}\"\n\
          model = \"synthetic-judge\"\n\
          temperature = 0.0\n\
          concurrency = 1\n",
-        logprobs = config.use_logprobs,
     );
     std::fs::write(config_file.path(), &config_toml).map_err(|e| e.to_string())?;
 

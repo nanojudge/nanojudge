@@ -99,9 +99,11 @@ struct Args {
     #[arg(long)]
     refits_per_round: Option<usize>,
 
-    /// Use logprobs mode instead of text-verdict mode.
-    #[arg(long)]
-    logprobs: bool,
+    /// Number of independent samples used to estimate each verdict-token
+    /// distribution. One comparison still counts as one comparison regardless
+    /// of this value. Default: 1 (a hard judgment).
+    #[arg(long, default_value_t = 1)]
+    samples_per_comparison: usize,
 
     /// How many items each judgment compares at once: 2 (pairwise, default) or 3.
     /// With 3, each LLM call ranks three items; `comparisons` then counts LLM
@@ -194,7 +196,7 @@ struct SharedTrialConfig {
     rounds: usize,
     actual_tau2: f64,
     prior_tau2: Option<f64>,
-    use_logprobs: bool,
+    samples_per_comparison: usize,
     distribution: String,
     selection_sharpness: Option<f64>,
     anchor_index: Option<f64>,
@@ -214,6 +216,10 @@ async fn main() {
 
     if args.items_per_comparison != 2 && args.items_per_comparison != 3 {
         eprintln!("Error: --items-per-comparison must be 2 or 3");
+        std::process::exit(1);
+    }
+    if args.samples_per_comparison == 0 {
+        eprintln!("Error: --samples-per-comparison must be at least 1");
         std::process::exit(1);
     }
     let min_items = if args.items_per_comparison == 3 { 3 } else { 2 };
@@ -274,7 +280,7 @@ async fn main() {
             None => "CLI default (10)".to_string(),
         }
     );
-    eprintln!("  Logprobs: {}", args.logprobs);
+    eprintln!("  Samples per comparison: {}", args.samples_per_comparison);
     eprintln!("  Items per comparison: {}", args.items_per_comparison);
     eprintln!("  Report top-K: {}", top_k);
     eprintln!("  Distribution: {}", args.comparison_distribution);
@@ -303,7 +309,7 @@ async fn main() {
         rounds: args.rounds,
         actual_tau2: args.actual_tau2,
         prior_tau2: args.prior_tau2,
-        use_logprobs: args.logprobs,
+        samples_per_comparison: args.samples_per_comparison,
         distribution: args.comparison_distribution.clone(),
         selection_sharpness: args.selection_sharpness,
         anchor_index: args.anchor_index,
@@ -340,7 +346,7 @@ async fn main() {
                 rounds: shared.rounds,
                 actual_tau2: shared.actual_tau2,
                 prior_tau2: shared.prior_tau2,
-                use_logprobs: shared.use_logprobs,
+                samples_per_comparison: shared.samples_per_comparison,
                 distribution: &shared.distribution,
                 selection_sharpness: shared.selection_sharpness,
                 anchor_index: shared.anchor_index,
