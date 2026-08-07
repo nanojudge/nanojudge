@@ -355,8 +355,6 @@ fn info_gain_pairs(
     sorted_pool.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
 
     let n = sorted_pool.len();
-    // alive[p] == false means sorted_pool[p] has already been paired this round.
-    let mut alive = vec![true; n];
     // live_positions holds the sorted-pool indices still available. Picking
     // item1 is a swap_remove on this list (O(1) random removal). live_idx_of is
     // the inverse map: live_idx_of[p] = index of p inside live_positions, or
@@ -364,10 +362,12 @@ fn info_gain_pairs(
     // sorted-pool position.
     let mut live_positions: Vec<usize> = (0..n).collect();
     let mut live_idx_of: Vec<Option<usize>> = (0..n).map(Some).collect();
+    // Rating-order links let an exhausted fixed window reach the nearest live
+    // entries outside it without scanning across an unbounded run of tombstones.
+    let (mut previous_live, mut next_live) = make_live_neighbour_links(n);
 
-    let half_w = OPPONENT_WINDOW_SIZE / 2;
-    let mut weights: Vec<f64> = Vec::with_capacity(OPPONENT_WINDOW_SIZE + 1);
-    let mut candidates: Vec<usize> = Vec::with_capacity(OPPONENT_WINDOW_SIZE + 1);
+    let mut weights: Vec<f64> = Vec::with_capacity(OPPONENT_WINDOW_SIZE + 2);
+    let mut candidates: Vec<usize> = Vec::with_capacity(OPPONENT_WINDOW_SIZE + 2);
 
     let mut pairs: Vec<(usize, usize)> = Vec::with_capacity(max_pairs);
 
@@ -378,26 +378,37 @@ fn info_gain_pairs(
 
         // Pick item1: random live entry, removed via swap_remove.
         let live_idx1 = rng.random_range(0..live_positions.len());
-        let pos1 = swap_remove_live(&mut live_positions, &mut live_idx_of, live_idx1);
-        alive[pos1] = false;
+        let (pos1, left, right) = remove_live_position(
+            &mut live_positions,
+            &mut live_idx_of,
+            &mut previous_live,
+            &mut next_live,
+            live_idx1,
+        );
         let (item1, item1_rating) = sorted_pool[pos1];
 
-        // Collect live candidates in the rating window around pos1.
-        let window_start = pos1.saturating_sub(half_w);
-        let window_end = (pos1 + half_w + 1).min(n);
-        candidates.clear();
+        // Use the normal fixed rating window. If it has been exhausted by
+        // earlier pairings, extend only far enough to reach one live opponent.
+        collect_live_window_candidates(
+            pos1,
+            left,
+            right,
+            &previous_live,
+            &next_live,
+            n,
+            1,
+            &mut candidates,
+        );
         weights.clear();
-        for p in window_start..window_end {
-            if alive[p] {
-                candidates.push(p);
-                weights.push(window_info_gain(
-                    item1_rating, sorted_pool[p].1, item1, sorted_pool[p].0, current_stds, sharpness,
-                ));
-            }
-        }
-        if candidates.is_empty() {
-            // Window exhausted — skip this item1 for the rest of this round.
-            continue;
+        for &p in &candidates {
+            weights.push(window_info_gain(
+                item1_rating,
+                sorted_pool[p].1,
+                item1,
+                sorted_pool[p].0,
+                current_stds,
+                sharpness,
+            ));
         }
 
         let total_weight: f64 = weights.iter().sum();
@@ -409,8 +420,13 @@ fn info_gain_pairs(
 
         let pos2 = candidates[selected];
         let live_idx2 = live_idx_of[pos2].expect("candidate must be alive");
-        swap_remove_live(&mut live_positions, &mut live_idx_of, live_idx2);
-        alive[pos2] = false;
+        remove_live_position(
+            &mut live_positions,
+            &mut live_idx_of,
+            &mut previous_live,
+            &mut next_live,
+            live_idx2,
+        );
         let (item2, _) = sorted_pool[pos2];
 
         pairs.push((item1, item2));
@@ -419,14 +435,25 @@ fn info_gain_pairs(
     pairs
 }
 
-/// Remove the entry at `live_idx` from `live_positions` in O(1) using
-/// swap_remove, keeping `live_idx_of` in sync. Returns the sorted-pool
-/// position that was removed.
-fn swap_remove_live(
+/// Build a doubly linked list over the rating-sorted positions.
+fn make_live_neighbour_links(n: usize) -> (Vec<Option<usize>>, Vec<Option<usize>>) {
+    let previous = (0..n).map(|pos| pos.checked_sub(1)).collect();
+    let next = (0..n)
+        .map(|pos| if pos + 1 < n { Some(pos + 1) } else { None })
+        .collect();
+    (previous, next)
+}
+
+/// Remove one live entry in O(1), keeping both the random-selection pool and
+/// the rating-order neighbour links in sync. Returns the removed sorted-pool
+/// position and the live neighbours it had immediately before removal.
+fn remove_live_position(
     live_positions: &mut Vec<usize>,
     live_idx_of: &mut [Option<usize>],
+    previous_live: &mut [Option<usize>],
+    next_live: &mut [Option<usize>],
     live_idx: usize,
-) -> usize {
+) -> (usize, Option<usize>, Option<usize>) {
     let removed_pos = live_positions.swap_remove(live_idx);
     live_idx_of[removed_pos] = None;
     // If we didn't remove the last entry, the old last entry now sits at live_idx.
@@ -434,7 +461,88 @@ fn swap_remove_live(
         let moved_pos = live_positions[live_idx];
         live_idx_of[moved_pos] = Some(live_idx);
     }
-    removed_pos
+
+    let previous = previous_live[removed_pos];
+    let next = next_live[removed_pos];
+    if let Some(previous_pos) = previous {
+        next_live[previous_pos] = next;
+    }
+    if let Some(next_pos) = next {
+        previous_live[next_pos] = previous;
+    }
+
+    (removed_pos, previous, next)
+}
+
+/// Collect live opponents in the existing fixed positional window around an
+/// anchor. If tombstones leave fewer than `minimum` candidates there, follow
+/// the live-neighbour links outward only until the minimum is reached.
+/// Candidates remain in ascending rating-position order, preserving the
+/// existing weighted-selection behavior whenever the fixed window suffices.
+#[allow(clippy::too_many_arguments)]
+fn collect_live_window_candidates(
+    anchor_pos: usize,
+    mut left: Option<usize>,
+    mut right: Option<usize>,
+    previous_live: &[Option<usize>],
+    next_live: &[Option<usize>],
+    n: usize,
+    minimum: usize,
+    candidates: &mut Vec<usize>,
+) {
+    let half_w = OPPONENT_WINDOW_SIZE / 2;
+    let window_start = anchor_pos.saturating_sub(half_w);
+    let window_end = (anchor_pos + half_w + 1).min(n);
+
+    candidates.clear();
+
+    // Walking left discovers candidates in reverse rating order. Reverse that
+    // portion before appending the ascending right-hand side.
+    while let Some(pos) = left {
+        if pos < window_start {
+            break;
+        }
+        candidates.push(pos);
+        left = previous_live[pos];
+    }
+    candidates.reverse();
+
+    while let Some(pos) = right {
+        if pos >= window_end {
+            break;
+        }
+        candidates.push(pos);
+        right = next_live[pos];
+    }
+
+    // The fixed window is normally sufficient. In the rare exhausted case,
+    // choose the closest remaining rating-order neighbour on either side and
+    // stop as soon as the comparison can be completed.
+    while candidates.len() < minimum {
+        let take_left = match (left, right) {
+            (Some(left_pos), Some(right_pos)) => {
+                anchor_pos.abs_diff(left_pos) <= anchor_pos.abs_diff(right_pos)
+            }
+            (Some(_), None) => true,
+            (None, Some(_)) => false,
+            (None, None) => break,
+        };
+
+        if take_left {
+            let pos = left.expect("left live neighbour must exist");
+            candidates.insert(0, pos);
+            left = previous_live[pos];
+        } else {
+            let pos = right.expect("right live neighbour must exist");
+            candidates.push(pos);
+            right = next_live[pos];
+        }
+    }
+
+    assert!(
+        candidates.len() >= minimum,
+        "live pool did not contain the required number of opponents"
+    );
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -633,10 +741,11 @@ fn info_gain_triples(
     sorted_pool.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
 
     let n = sorted_pool.len();
-    let mut alive = vec![true; n];
     let mut live_positions: Vec<usize> = (0..n).collect();
     let mut live_idx_of: Vec<Option<usize>> = (0..n).map(Some).collect();
-    let half_w = OPPONENT_WINDOW_SIZE / 2;
+    let (mut previous_live, mut next_live) = make_live_neighbour_links(n);
+    let mut candidates: Vec<usize> = Vec::with_capacity(OPPONENT_WINDOW_SIZE + 2);
+    let mut weights: Vec<f64> = Vec::with_capacity(OPPONENT_WINDOW_SIZE + 2);
 
     let mut triples: Vec<IndexedTriple> = Vec::with_capacity(max_triples);
 
@@ -647,71 +756,64 @@ fn info_gain_triples(
 
         // item1: random live entry.
         let live_idx1 = rng.random_range(0..live_positions.len());
-        let pos1 = swap_remove_live(&mut live_positions, &mut live_idx_of, live_idx1);
-        alive[pos1] = false;
+        let (pos1, left, right) = remove_live_position(
+            &mut live_positions,
+            &mut live_idx_of,
+            &mut previous_live,
+            &mut next_live,
+            live_idx1,
+        );
         let (item1, item1_rating) = sorted_pool[pos1];
 
-        // Two opponents from the rating window around pos1.
-        let mut picked: Vec<usize> = Vec::with_capacity(2);
-        for _ in 0..2 {
-            if let Some(pos) = pick_window_opponent(
-                &sorted_pool, &alive, pos1, item1_rating, current_stds, sharpness, half_w, n, rng,
-            ) {
-                let live_idx = live_idx_of[pos].expect("candidate must be alive");
-                swap_remove_live(&mut live_positions, &mut live_idx_of, live_idx);
-                alive[pos] = false;
-                picked.push(pos);
-            }
+        // Gather both opponents before selecting either one. The ordinary
+        // fixed window is unchanged; only an exhausted window expands far
+        // enough through live rating neighbours to make the triple possible.
+        collect_live_window_candidates(
+            pos1,
+            left,
+            right,
+            &previous_live,
+            &next_live,
+            n,
+            2,
+            &mut candidates,
+        );
+        weights.clear();
+        for &pos in &candidates {
+            weights.push(window_info_gain(
+                item1_rating,
+                sorted_pool[pos].1,
+                item1,
+                sorted_pool[pos].0,
+                current_stds,
+                sharpness,
+            ));
         }
-        if picked.len() < 2 {
-            // Window around item1 was exhausted — skip item1 this round.
-            continue;
+
+        let mut picked = [0usize; 2];
+        for picked_pos in &mut picked {
+            let total_weight: f64 = weights.iter().sum();
+            let selected = if total_weight == 0.0 {
+                rng.random_range(0..candidates.len())
+            } else {
+                weighted_random_select(&weights, total_weight, rng)
+            };
+            let pos = candidates.remove(selected);
+            weights.remove(selected);
+            let live_idx = live_idx_of[pos].expect("candidate must be alive");
+            remove_live_position(
+                &mut live_positions,
+                &mut live_idx_of,
+                &mut previous_live,
+                &mut next_live,
+                live_idx,
+            );
+            *picked_pos = pos;
         }
         triples.push((item1, sorted_pool[picked[0]].0, sorted_pool[picked[1]].0));
     }
 
     triples
-}
-
-/// Pick one alive opponent from the rating window around `pos1`, weighted by
-/// info gain against `item1_rating`. Returns the chosen sorted-pool position, or
-/// `None` if the window holds no alive candidates. Does not mutate `alive` — the
-/// caller marks the returned position dead.
-#[allow(clippy::too_many_arguments)]
-fn pick_window_opponent(
-    sorted_pool: &[(usize, f64)],
-    alive: &[bool],
-    pos1: usize,
-    item1_rating: f64,
-    current_stds: Option<&[f64]>,
-    sharpness: f64,
-    half_w: usize,
-    n: usize,
-    rng: &mut impl Rng,
-) -> Option<usize> {
-    let item1 = sorted_pool[pos1].0;
-    let window_start = pos1.saturating_sub(half_w);
-    let window_end = (pos1 + half_w + 1).min(n);
-    let mut candidates: Vec<usize> = Vec::new();
-    let mut weights: Vec<f64> = Vec::new();
-    for p in window_start..window_end {
-        if alive[p] {
-            candidates.push(p);
-            weights.push(window_info_gain(
-                item1_rating, sorted_pool[p].1, item1, sorted_pool[p].0, current_stds, sharpness,
-            ));
-        }
-    }
-    if candidates.is_empty() {
-        return None;
-    }
-    let total_weight: f64 = weights.iter().sum();
-    let selected = if total_weight == 0.0 {
-        rng.random_range(0..candidates.len())
-    } else {
-        weighted_random_select(&weights, total_weight, rng)
-    };
-    Some(candidates[selected])
 }
 
 /// Generate top-heavy triples. item1 is sampled from the selection weights
@@ -923,6 +1025,101 @@ mod tests {
             assert!(*a >= 100 && *a <= 109, "ID {} not in range", a);
             assert!(*b >= 100 && *b <= 109, "ID {} not in range", b);
         }
+    }
+
+    #[test]
+    fn test_uniform_info_gain_pairs_fill_large_rounds() {
+        let num_items = 500;
+        let ratings: Vec<f64> = (0..num_items).map(|i| i as f64 * 0.01).collect();
+
+        for seed in 0..128 {
+            let mut rng = make_rng(Some(seed), crate::seed::SUBSYSTEM_PAIRING);
+            let pairs = info_gain_pairs(num_items, &ratings, None, 1.0, num_items / 2, &mut rng);
+            assert_eq!(
+                pairs.len(),
+                num_items / 2,
+                "short pair round for seed {seed}"
+            );
+
+            let mut seen = vec![false; num_items];
+            for (a, b) in pairs {
+                assert!(!seen[a], "item {a} was paired twice for seed {seed}");
+                assert!(!seen[b], "item {b} was paired twice for seed {seed}");
+                seen[a] = true;
+                seen[b] = true;
+            }
+        }
+    }
+
+    #[test]
+    fn test_live_window_expands_only_after_fixed_window_is_exhausted() {
+        let num_items = 201;
+
+        // With a dense pool, position 100 sees exactly the existing fixed
+        // window: positions 50..=150 except for the removed anchor itself.
+        let mut live_positions: Vec<usize> = (0..num_items).collect();
+        let mut live_idx_of: Vec<Option<usize>> = (0..num_items).map(Some).collect();
+        let (mut previous_live, mut next_live) = make_live_neighbour_links(num_items);
+        let anchor_idx = live_idx_of[100].unwrap();
+        let (_, left, right) = remove_live_position(
+            &mut live_positions,
+            &mut live_idx_of,
+            &mut previous_live,
+            &mut next_live,
+            anchor_idx,
+        );
+        let mut candidates = Vec::new();
+        collect_live_window_candidates(
+            100,
+            left,
+            right,
+            &previous_live,
+            &next_live,
+            num_items,
+            2,
+            &mut candidates,
+        );
+        assert_eq!(candidates.len(), OPPONENT_WINDOW_SIZE);
+        assert_eq!(candidates.first(), Some(&50));
+        assert_eq!(candidates.last(), Some(&150));
+
+        // Leave only the anchor and two entries beyond that window. The same
+        // lookup now follows the live links outward just far enough to find both.
+        let mut live_positions: Vec<usize> = (0..num_items).collect();
+        let mut live_idx_of: Vec<Option<usize>> = (0..num_items).map(Some).collect();
+        let (mut previous_live, mut next_live) = make_live_neighbour_links(num_items);
+        for pos in 0..num_items {
+            if pos == 0 || pos == 100 || pos == 200 {
+                continue;
+            }
+            let live_idx = live_idx_of[pos].unwrap();
+            remove_live_position(
+                &mut live_positions,
+                &mut live_idx_of,
+                &mut previous_live,
+                &mut next_live,
+                live_idx,
+            );
+        }
+        let anchor_idx = live_idx_of[100].unwrap();
+        let (_, left, right) = remove_live_position(
+            &mut live_positions,
+            &mut live_idx_of,
+            &mut previous_live,
+            &mut next_live,
+            anchor_idx,
+        );
+        collect_live_window_candidates(
+            100,
+            left,
+            right,
+            &previous_live,
+            &next_live,
+            num_items,
+            2,
+            &mut candidates,
+        );
+        assert_eq!(candidates, vec![0, 200]);
     }
 
     #[test]
@@ -1197,6 +1394,33 @@ mod tests {
         let triples = generate_uniform_triples_indexed(12, 4, &ratings, None, 1.0, &games, &mut rng);
         assert_eq!(triples.len(), 4);
         assert_triples_distinct(&triples);
+    }
+
+    #[test]
+    fn test_uniform_info_gain_triples_fill_large_rounds() {
+        let num_items = 500;
+        let ratings: Vec<f64> = (0..num_items).map(|i| i as f64 * 0.01).collect();
+
+        for seed in 0..128 {
+            let mut rng = make_rng(Some(seed), crate::seed::SUBSYSTEM_PAIRING);
+            let triples =
+                info_gain_triples(num_items, &ratings, None, 1.0, num_items / 3, &mut rng);
+            assert_eq!(
+                triples.len(),
+                num_items / 3,
+                "short triple round for seed {seed}"
+            );
+
+            let mut seen = vec![false; num_items];
+            for (a, b, c) in triples {
+                assert!(!seen[a], "item {a} was grouped twice for seed {seed}");
+                assert!(!seen[b], "item {b} was grouped twice for seed {seed}");
+                assert!(!seen[c], "item {c} was grouped twice for seed {seed}");
+                seen[a] = true;
+                seen[b] = true;
+                seen[c] = true;
+            }
+        }
     }
 
     #[test]
