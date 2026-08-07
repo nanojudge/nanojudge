@@ -165,7 +165,7 @@ fn compute_selection_weights(
         kept[idx] = true;
     }
 
-    let weights = (0..n)
+    let mut weights: Vec<f64> = (0..n)
         .map(|i| {
             let base = if ratios[i] >= selection_cutoff || kept[i] {
                 ratios[i].powf(selection_sharpness)
@@ -180,6 +180,15 @@ fn compute_selection_weights(
             base / served.powf(selection_coverage)
         })
         .collect();
+
+    // In an extreme finite-precision state every uncertainty ratio can round
+    // to exactly zero, leaving no distribution for top-heavy selection to
+    // sample. Keep the run moving by making item selection uniform. This only
+    // handles the all-zero case; NaNs and negative weights are not converted by
+    // this recovery and remain invalid.
+    if weights.iter().all(|&weight| weight == 0.0) {
+        weights.fill(1.0);
+    }
 
     // Stopping statistic: ln P(every checked item sits on its
     // posterior-favored side of the anchor), taking the per-item side
@@ -795,6 +804,22 @@ mod tests {
         let w = compute_selection_weights(&means, &stds, &games, 1.0, 0.0, 0.0, 0.0, 10.0, 0.0).weights;
         assert!((w[0] - 1.0).abs() < 1e-6, "leader ratio should be 1, got {}", w[0]);
         assert!(w[0] > w[1] && w[1] > w[2] && w[2] > w[3]);
+    }
+
+    #[test]
+    fn test_all_zero_selection_weights_become_uniform() {
+        // A fractional anchor halfway across a huge gap puts every finite-width
+        // posterior so far into a normal tail that the ordinary CDF calculation
+        // rounds all uncertainty ratios to zero. Selection must remain defined.
+        let means = vec![100.0, 0.0, -100.0];
+        let stds = vec![0.01, 0.01, 0.01];
+        let games = vec![10, 10, 10];
+
+        let out = compute_selection_weights(
+            &means, &stds, &games, 1.0, 0.5, 0.0, 0.0, 10.0, 0.0,
+        );
+
+        assert_eq!(out.weights, vec![1.0, 1.0, 1.0]);
     }
 
     #[test]
