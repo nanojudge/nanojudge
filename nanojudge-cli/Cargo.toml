@@ -2,7 +2,7 @@
 name = "nanojudge-cli"
 version = "3.0.0"
 edition = "2024"
-description = "CLI tool for ranking items using LLM pairwise comparisons"
+description = "CLI tool for ranking items using LLM two-item judgements"
 license = "MIT"
 
 [[bin]]

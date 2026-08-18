@@ -38,26 +38,26 @@ pub struct JudgeConfig {
 #[serde(deny_unknown_fields)]
 pub struct NanojudgeConfig {
     pub rounds: Option<usize>,
-    pub comparisons: Option<usize>,
+    pub judgements: Option<usize>,
     pub concurrency: Option<usize>,
     pub prompt_template: Option<String>,
     pub logprobs: Option<bool>,
     pub analysis_length: Option<String>,
-    pub comparison_distribution: Option<String>,
-    /// How many items each judgment compares at once: 2 (pairwise) or 3 (three-way).
-    pub items_per_comparison: Option<usize>,
+    pub judgement_distribution: Option<String>,
+    /// Number of items in each judged lineup: 2 or 3.
+    pub lineup_size: Option<usize>,
     pub selection_sharpness: Option<f64>,
     pub anchor_index: Option<f64>,
     pub cutoff: Option<f64>,
     pub coverage: Option<f64>,
-    pub target_prior_games: Option<f64>,
+    pub target_prior_edges: Option<f64>,
     pub stop_confidence: Option<f64>,
     pub retries: Option<usize>,
     pub confidence_level: Option<f64>,
     pub regularization_strength: Option<f64>,
     pub bias_prior: Option<f64>,
     pub matchmaking_sharpness: Option<f64>,
-    pub min_uniform_games: Option<usize>,
+    pub min_uniform_edges: Option<usize>,
     pub refits_per_round: Option<usize>,
     pub prior_tau2: Option<f64>,
     pub bias_prior_tau2: Option<f64>,
@@ -65,7 +65,7 @@ pub struct NanojudgeConfig {
     pub min_logprob_coverage: Option<f64>,
     pub verdict_temperature: Option<f64>,
     pub live_top: Option<usize>,
-    pub save_comparisons: Option<PathBuf>,
+    pub save_judgements: Option<PathBuf>,
     pub output_format: Option<OutputFormat>,
     pub verbose: Option<bool>,
     pub save_failures: Option<PathBuf>,
@@ -78,12 +78,12 @@ const DEFAULT_CONFIG_TEMPLATE: &str = "\
 # nanojudge configuration
 # All values here can be overridden by CLI flags unless noted otherwise.
 
-# Number of comparison rounds (mutually exclusive with comparisons)
+# Number of judgement rounds (mutually exclusive with judgements)
 # rounds = 10
 
-# Target number of comparisons (alternative to rounds).
-# Converted to rounds by dividing by comparisons-per-round, rounded up.
-# comparisons = 500
+# Target number of judgements (alternative to rounds).
+# Converted to rounds by dividing by judgements-per-round, rounded up.
+# judgements = 500
 
 # Default max concurrent LLM requests per judge (can be overridden per-judge)
 # concurrency = 16
@@ -108,24 +108,24 @@ const DEFAULT_CONFIG_TEMPLATE: &str = "\
 # Cannot be used with a custom prompt_template.
 # reasoning_enabled = true
 
-# Comparison distribution: \"uniform\" or \"top-heavy\".
+# Judgement distribution: \"uniform\" or \"top-heavy\".
 # Uniform gives equal attention to all items. Top-heavy focuses on contenders.
-# comparison_distribution = \"uniform\"
+# judgement_distribution = \"uniform\"
 
-# How many items each judgment compares at once: 2 (pairwise, default) or 3.
-# With 3, each judgment ranks three items and is folded into up to three pairwise
-# comparisons, so one LLM call yields more information. Requires logprobs for the
+# Number of items in each judged lineup: 2 (default) or 3.
+# With 3, each judgement ranks three items and is folded into up to three edges,
+# so one LLM call yields more information. Requires logprobs for the
 # full benefit.
-# items_per_comparison = 2
+# lineup_size = 2
 
 # Tuning for the top-heavy distribution. Each item's pairing weight is its
 # uncertainty ratio around the anchor: min/max of the probability of sitting
 # above vs below the anchor, integrated over both the item's and the anchor's
 # posterior uncertainty — 1 when the item straddles the anchor, near 0 once
 # it is confidently above or below — raised to `selection_sharpness`. The
-# first item of each comparison is drawn from these weights; its opponent is
+# first item of each judgement is drawn from these weights; its opponent is
 # picked by info-gain matchmaking from a rating window around it, so the
-# contested boundary gets the comparisons.
+# contested boundary gets the judgements.
 #   selection_sharpness: lower = flatter = more exploration; 1.0 = raw ratios (> 0).
 #   anchor_index: which rank is the anchor, 0-based into the ranking sorted
 #             best-first. 0.0 = the current leader; 9.0 = the 10th-best (right
@@ -137,9 +137,9 @@ const DEFAULT_CONFIG_TEMPLATE: &str = "\
 #             dropped, except the two highest, which are always kept.
 #             [0,1); 0 disables the cutoff.
 #   coverage: proportional-fair pull. Each weight is divided by
-#             games-played^coverage, pulling cumulative comparisons toward the
+#             edge-count^coverage, pulling cumulative edges toward the
 #             ratio-implied share. 0 = off, 1 = proportional-fair, > 1 over-corrects.
-# Only used with comparison_distribution = \"top-heavy\".
+# Only used with judgement_distribution = \"top-heavy\".
 # selection_sharpness = 0.7
 # anchor_index = 0.0
 # cutoff = 0.0
@@ -148,15 +148,15 @@ const DEFAULT_CONFIG_TEMPLATE: &str = "\
 # Early stop for top-heavy runs. After each interim fit, the run ends early
 # once the probability that every item sits on its side of the anchor — the
 # product of the per-item side probabilities — reaches this value; final
-# scoring then runs on the comparisons collected so far. In (0.5, 1.0), e.g.
+# scoring then runs on the judgements collected so far. In (0.5, 1.0), e.g.
 # 0.95. No default: when unset, the run always uses its full round budget.
-# Rejected with comparison_distribution = \"uniform\".
+# Rejected with judgement_distribution = \"uniform\".
 # stop_confidence = 0.95
 
 # Minimum fraction of verdict-token probability mass the top-logprobs must
 # cover for a logprob-based verdict to be trusted (logprobs mode only) — the
-# option digits for pairwise, the option letters for 3-way. Below this, the
-# comparison is treated as unparseable. Must be > 0.0 and <= 1.0.
+# option digits for pairwise, the option letters for three-item lineup. Below this, the
+# judgement is treated as unparseable. Must be > 0.0 and <= 1.0.
 # Can be overridden per-judge.
 # min_logprob_coverage = 0.95
 
@@ -175,11 +175,11 @@ const DEFAULT_CONFIG_TEMPLATE: &str = "\
 # Omit or comment out to disable.
 # live_top = 10
 
-# Save all comparisons to a JSONL file. Value is a path.
-# Use \".\" for the current directory (auto-generates comparisons-{timestamp}.jsonl).
+# Save all judgements to a JSONL file. Value is a path.
+# Use \".\" for the current directory (auto-generates judgements-{timestamp}.jsonl).
 # A directory path auto-generates a filename inside it.
 # Omit or comment out to disable.
-# save_comparisons = \".\"
+# save_judgements = \".\"
 
 # Output format for final results: \"table\" or \"json\".
 # output_format = \"table\"
@@ -187,13 +187,13 @@ const DEFAULT_CONFIG_TEMPLATE: &str = "\
 # Show progress during execution.
 # verbose = false
 
-# Save failed comparisons (unparseable responses) to a JSONL file. Value is a path.
+# Save failed judgements (unparseable responses) to a JSONL file. Value is a path.
 # Use \".\" for the current directory (auto-generates failures-{timestamp}.jsonl).
 # A directory path auto-generates a filename inside it.
 # Omit or comment out to disable.
 # save_failures = \".\"
 
-# Max retries per comparison on HTTP errors. 0 = no retries. Default: 3.
+# Max retries per judgement on HTTP errors. 0 = no retries. Default: 3.
 # retries = 3
 
 # RNG seed for reproducible runs. Omit for OS entropy.
@@ -252,9 +252,9 @@ temperature = 0.7
 # Info-gain exponent for matchmaking. Higher = more exploitation. Default: 1.0.
 # matchmaking_sharpness = 1.0
 
-# Minimum games per item before the top-heavy distribution kicks in.
+# Minimum edges per item before the top-heavy distribution kicks in.
 # Must be at least 1. Default: 2.
-# min_uniform_games = 2
+# min_uniform_edges = 2
 
 # Prior variance on log-strengths. Default: 10.0.
 # prior_tau2 = 10.0
@@ -490,12 +490,12 @@ rounds = 5
 [[judge]]
 endpoint = "http://localhost:8000"
 model = "test"
-comparison_distribution = "top-heavy"
+judgement_distribution = "top-heavy"
 "#;
         let result: Result<NanojudgeConfig, _> = toml::from_str(input);
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
-        assert!(err.contains("comparison_distribution"), "error should name the bad field: {err}");
+        assert!(err.contains("judgement_distribution"), "error should name the bad field: {err}");
     }
 
     #[test]

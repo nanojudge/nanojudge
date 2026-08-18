@@ -1,14 +1,14 @@
-//! Three-way comparison → pairwise edges.
+//! Three-item lineup judgement → edges.
 //!
-//! A 3-way judgment (show the judge three items, ask for a ranking) is summarized
+//! A judgement over a three-item lineup is summarized
 //! as a **winner-distribution**: the probability each of the three items is the
 //! best of the three (`q_A`, `q_B`, `q_C`). Under a Luce model this distribution
 //! is the top-1 marginal, with `q_i ∝ s_i` (the items' latent strengths).
 //!
-//! The ranking engine speaks pairwise. This module converts one winner-distribution
-//! into up to three pairwise `ComparisonInput` edges — one per unordered pair — via
+//! The ranking engine consumes edges. This module converts one winner distribution
+//! into up to three `Edge` values — one per unordered pair — via
 //! the Luce ratio `P(i beats j) = q_i / (q_i + q_j)`. The engine then treats them
-//! as three ordinary (mutually consistent) pairwise comparisons; the core likelihood
+//! as three ordinary, mutually consistent edges; the core likelihood
 //! is untouched.
 //!
 //! Because the ratio only depends on `q_i / q_j`, the winner-distribution need not
@@ -27,15 +27,15 @@
 //! | Logprobs | 2     | 2  | 1           | 2     |
 //! | Text     | 2     | 1  | 1/2         | 1     |
 
-use crate::types::ComparisonInput;
+use crate::types::Edge;
 
 /// The three unordered pairs of a 3-item set, as index pairs into a `[_; 3]`.
 const PAIRS: [(usize, usize); 3] = [(0, 1), (0, 2), (1, 2)];
 
-/// Convert a 3-way winner-distribution into pairwise comparison edges.
+/// Convert a three-item lineup's winner distribution into edges.
 ///
 /// `item_ids` are the three caller IDs; `winner_probs[k]` is the probability that
-/// `item_ids[k]` is the best of the three. Produces up to three `ComparisonInput`s
+/// `item_ids[k]` is the best of the three. Produces up to three `Edge`s
 /// (pairs `(0,1)`, `(0,2)`, `(1,2)`), each carrying `P(item1 beats item2)` from the
 /// Luce ratio, all attributed to `judge_id`.
 ///
@@ -55,7 +55,7 @@ pub fn winner_dist_to_edges(
     winner_probs: [f64; 3],
     judge_id: u64,
     logprobs_mode: bool,
-) -> Vec<ComparisonInput> {
+) -> Vec<Edge> {
     for &q in &winner_probs {
         assert!(
             q.is_finite() && q >= 0.0,
@@ -64,7 +64,7 @@ pub fn winner_dist_to_edges(
     }
     assert!(
         item_ids[0] != item_ids[1] && item_ids[0] != item_ids[2] && item_ids[1] != item_ids[2],
-        "three-way item_ids must be distinct, got {item_ids:?}"
+        "lineup item_ids must be distinct, got {item_ids:?}"
     );
 
     let mut edges = Vec::with_capacity(3);
@@ -75,7 +75,7 @@ pub fn winner_dist_to_edges(
             continue;
         }
         let win_prob = qa / total;
-        edges.push(ComparisonInput {
+        edges.push(Edge {
             item1: item_ids[a],
             item2: item_ids[b],
             category_probs: [win_prob, 1.0 - win_prob],
@@ -98,7 +98,7 @@ pub fn winner_dist_to_edges(
 mod tests {
     use super::*;
 
-    fn win_prob(edge: &ComparisonInput) -> f64 {
+    fn win_prob(edge: &Edge) -> f64 {
         edge.category_probs[0]
     }
 

@@ -1,6 +1,6 @@
 //! nanojudge-core: Pure-computation ranking engine.
 //!
-//! Pairwise comparison → Bradley-Terry scores → ranked list with confidence intervals.
+//! Edges → Bradley-Terry scores → ranked list with confidence intervals.
 //! No IO, no HTTP, no filesystem — just math. Bring your own LLM.
 //!
 //! Items are identified by caller-provided `i64` IDs. The crate handles the
@@ -18,15 +18,15 @@
 //! # Quick start
 //!
 //! ```rust
-//! use nanojudge_core::{run_scoring, ComparisonInput, JudgeInfo, ScoringOptions, stable_hash};
+//! use nanojudge_core::{run_scoring, Edge, JudgeInfo, ScoringOptions, stable_hash};
 //!
 //! let item_ids = vec![100, 200, 300]; // your IDs — any i64 values
 //! let judge_id = stable_hash("http://localhost:8000\0my-model");
 //!
 //! // category_probs = [P(item1 wins), P(item2 wins)]
-//! let comparisons = vec![
-//!     ComparisonInput { slot1: 0, slot2: 1, item1: 100, item2: 200, category_probs: [1.0, 0.0], judge_id, weight: 1.0 },
-//!     ComparisonInput { slot1: 0, slot2: 1, item1: 200, item2: 300, category_probs: [0.7, 0.3], judge_id, weight: 1.0 },
+//! let edges = vec![
+//!     Edge { slot1: 0, slot2: 1, item1: 100, item2: 200, category_probs: [1.0, 0.0], judge_id, weight: 1.0 },
+//!     Edge { slot1: 0, slot2: 1, item1: 200, item2: 300, category_probs: [0.7, 0.3], judge_id, weight: 1.0 },
 //! ];
 //!
 //! let judge_info = JudgeInfo {
@@ -34,13 +34,13 @@
 //!     logprobs_mode: true,
 //! };
 //!
-//! let result = run_scoring(&item_ids, &comparisons, &ScoringOptions {
+//! let result = run_scoring(&item_ids, &edges, &ScoringOptions {
 //!     confidence_level: 0.95,
 //!     selection_sharpness: None,
 //!     anchor_index: 0.0,
 //!     selection_cutoff: 0.0005,
 //!     selection_coverage: 1.0,
-//!     target_prior_games: 10.0,
+//!     target_prior_edges: 10.0,
 //!     regularization_strength: 0.01,
 //!     prior_tau2: 10.0,
 //!     bias_prior_tau2: 2.0,
@@ -65,23 +65,23 @@ pub mod laplace_bt;
 pub mod pairing;
 pub mod scoring;
 pub mod seed;
-pub mod three_way;
+pub mod lineup;
 pub mod types;
 
 // Re-export primary public API at crate root.
 pub use engine::{
-    calculate_pairs_for_round, calculate_rounds_for_target_comparisons,
-    calculate_total_expected_comparisons, split_round_into_chunks, EngineConfig,
+    calculate_pairs_for_round, calculate_rounds_for_target_judgements,
+    calculate_total_expected_judgements, split_round_into_chunks, EngineConfig,
     RankingEngine,
 };
 pub use pairing::{
-    calculate_info_gain, calculate_integrated_info_gain, calculate_triples_for_round,
+    calculate_info_gain, calculate_integrated_info_gain, calculate_lineups_for_round,
     generate_uniform_pairings, generate_top_heavy_pairings,
-    get_effective_comparison_distribution, ComparisonDistribution,
+    get_effective_judgement_distribution, JudgementDistribution,
 };
 pub use scoring::run_scoring;
-pub use three_way::winner_dist_to_edges;
+pub use lineup::winner_dist_to_edges;
 pub use types::{
-    stable_hash, ComparisonInput, JudgeAnalytics, JudgeInfo, Pair, RankedItem,
+    stable_hash, Edge, JudgeAnalytics, JudgeInfo, Pair, RankedItem,
     ScoringOptions, ScoringResult,
 };

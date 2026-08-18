@@ -16,24 +16,24 @@ pub struct TrialConfig<'a> {
     pub rounds: usize,
     pub actual_tau2: f64,
     pub prior_tau2: Option<f64>,
-    pub samples_per_comparison: usize,
-    pub distribution: &'a str,
+    pub samples_per_judgement: usize,
+    pub judgement_distribution: &'a str,
     pub selection_sharpness: Option<f64>,
     pub anchor_index: Option<f64>,
     pub cutoff: Option<f64>,
     pub coverage: Option<f64>,
-    pub target_prior_games: Option<f64>,
+    pub target_prior_edges: Option<f64>,
     pub stop_confidence: Option<f64>,
-    pub min_uniform_games: Option<usize>,
+    pub min_uniform_edges: Option<usize>,
     pub refits_per_round: Option<usize>,
-    pub items_per_comparison: usize,
+    pub lineup_size: usize,
     pub nanojudge_bin: &'a Path,
 }
 
 /// Accuracy metrics for one round's interim ranking, measured against ground
 /// truth. One per round when the CLI is run with `--emit-round-rankings`.
 pub struct RoundMetrics {
-    pub comparisons: usize,
+    pub judgements: usize,
     pub spearman_rho: f64,
     pub top_1_displacement: f64,
     pub top_k_displacement: f64,
@@ -43,7 +43,7 @@ pub struct TrialResult {
     pub spearman_rho: f64,
     pub top_1_displacement: f64,
     pub top_k_displacement: f64,
-    pub comparisons: usize,
+    pub judgements: usize,
     pub duration: std::time::Duration,
     /// Per-round interim metrics (round 1..N), for plotting convergence.
     pub per_round: Vec<RoundMetrics>,
@@ -101,8 +101,8 @@ pub async fn run(
     let state = Arc::new(server::JudgeState {
         strengths,
         seed: server_seed,
-        samples_per_comparison: config.samples_per_comparison,
-        pair_counts: std::sync::Mutex::new(std::collections::HashMap::new()),
+        samples_per_judgement: config.samples_per_judgement,
+        encounter_counts: std::sync::Mutex::new(std::collections::HashMap::new()),
     });
     let (port, server_handle) = server::start(state).await;
 
@@ -111,8 +111,8 @@ pub async fn run(
 
     // The benchmark always uses the CLI's logprob-shaped transport so the fake
     // endpoint can pass empirical sample frequencies through as one soft
-    // comparison. This is an implementation detail, not a benchmark mode:
-    // `samples_per_comparison = 1` naturally produces a hard judgment.
+    // judgement. This is an implementation detail, not a benchmark mode:
+    // `samples_per_judgement = 1` naturally produces a hard judgement.
     let config_toml = format!(
         "reasoning_enabled = false\n\
          logprobs = true\n\
@@ -142,8 +142,8 @@ pub async fn run(
         .arg("json")
         .arg("--rounds")
         .arg(config.rounds.to_string())
-        .arg("--comparison-distribution")
-        .arg(config.distribution)
+        .arg("--judgement-distribution")
+        .arg(config.judgement_distribution)
         .arg("--seed")
         .arg(cli_seed.to_string())
         // Emit the interim ranking after every round so we can measure the
@@ -163,8 +163,8 @@ pub async fn run(
     if let Some(coverage) = config.coverage {
         cmd.arg("--coverage").arg(coverage.to_string());
     }
-    if let Some(target_prior_games) = config.target_prior_games {
-        cmd.arg("--target-prior-games").arg(target_prior_games.to_string());
+    if let Some(target_prior_edges) = config.target_prior_edges {
+        cmd.arg("--target-prior-edges").arg(target_prior_edges.to_string());
     }
     if let Some(stop_confidence) = config.stop_confidence {
         cmd.arg("--stop-confidence").arg(stop_confidence.to_string());
@@ -172,14 +172,14 @@ pub async fn run(
     if let Some(prior_tau2) = config.prior_tau2 {
         cmd.arg("--prior-tau2").arg(prior_tau2.to_string());
     }
-    if let Some(min_uniform_games) = config.min_uniform_games {
-        cmd.arg("--min-uniform-games").arg(min_uniform_games.to_string());
+    if let Some(min_uniform_edges) = config.min_uniform_edges {
+        cmd.arg("--min-uniform-edges").arg(min_uniform_edges.to_string());
     }
     if let Some(refits_per_round) = config.refits_per_round {
         cmd.arg("--refits-per-round").arg(refits_per_round.to_string());
     }
-    if config.items_per_comparison != 2 {
-        cmd.arg("--items-per-comparison").arg(config.items_per_comparison.to_string());
+    if config.lineup_size != 2 {
+        cmd.arg("--lineup-size").arg(config.lineup_size.to_string());
     }
 
     let output = cmd
@@ -210,7 +210,7 @@ pub async fn run(
         .map(|item| item["name"].as_str().unwrap().to_string())
         .collect();
 
-    let comparisons = json["total_comparisons"].as_u64().unwrap_or(0) as usize;
+    let judgements = json["total_judgements"].as_u64().unwrap_or(0) as usize;
 
     // Render the example ranking table only for the trial that asked for it.
     let example_ranking = if capture_example {
@@ -235,7 +235,7 @@ pub async fn run(
     let per_round: Vec<RoundMetrics> = round_rankings
         .iter()
         .map(|entry| {
-            let comparisons = entry["comparisons"].as_u64().unwrap_or(0) as usize;
+            let judgements = entry["judgements"].as_u64().unwrap_or(0) as usize;
             let order: Vec<String> = entry["order"]
                 .as_array()
                 .ok_or("round entry missing 'order' array")?
@@ -243,7 +243,7 @@ pub async fn run(
                 .map(|v| v.as_str().unwrap().to_string())
                 .collect();
             Ok(RoundMetrics {
-                comparisons,
+                judgements,
                 spearman_rho: metrics::spearman_rho(&true_order, &order),
                 top_1_displacement: metrics::top_k_displacement(&true_order, &order, 1),
                 top_k_displacement: metrics::top_k_displacement(&true_order, &order, top_k),
@@ -255,7 +255,7 @@ pub async fn run(
         spearman_rho,
         top_1_displacement,
         top_k_displacement,
-        comparisons,
+        judgements,
         duration,
         per_round,
         example_ranking,
@@ -264,7 +264,7 @@ pub async fn run(
 
 /// Render the CLI's JSON `items` array into a human-readable ranking table,
 /// mirroring the CLI's own table columns (rank, item, score, 95% CI, per-item
-/// comparison count, id).
+/// edge count, id).
 fn render_ranking_table(items: &[serde_json::Value]) -> String {
     let name_width = items
         .iter()
@@ -275,22 +275,22 @@ fn render_ranking_table(items: &[serde_json::Value]) -> String {
 
     let mut out = String::new();
     out.push_str(&format!(
-        " # | {:<name_width$} |   Score | 95% CI Low | 95% CI High | Comparisons | ID\n",
+        " # | {:<name_width$} |   Score | 95% CI Low | 95% CI High | Edges | ID\n",
         "Item",
     ));
     out.push_str(&format!(
-        "---|-{}-|---------|------------|-------------|-------------|----\n",
+        "---|-{}-|---------|------------|-------------|-------|----\n",
         "-".repeat(name_width)
     ));
     for it in items {
         out.push_str(&format!(
-            "{:>2} | {:<name_width$} | {:>7.4} | {:>10.2} | {:>11.2} | {:>11} | {:>2}\n",
+            "{:>2} | {:<name_width$} | {:>7.4} | {:>10.2} | {:>11.2} | {:>5} | {:>2}\n",
             it["rank"].as_u64().unwrap_or(0),
             it["name"].as_str().unwrap_or(""),
             it["score"].as_f64().unwrap_or(0.0),
             it["lower_bound"].as_f64().unwrap_or(0.0),
             it["upper_bound"].as_f64().unwrap_or(0.0),
-            it["comparisons"].as_u64().unwrap_or(0),
+            it["edges"].as_u64().unwrap_or(0),
             it["id"].as_i64().unwrap_or(0),
         ));
     }

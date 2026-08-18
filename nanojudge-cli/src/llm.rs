@@ -1,9 +1,9 @@
-/// OpenAI-compatible API client for pairwise comparisons.
+/// OpenAI-compatible API client for LLM judgements.
 use crate::parse::{
-    LogprobContent, ParseResult, parse_response, parse_response_text, parse_three_way,
-    parse_three_way_text,
+    LogprobContent, ParseResult, parse_response, parse_response_text, parse_lineup,
+    parse_lineup_text,
 };
-use crate::prompt::{build_prompt, build_three_way_prompt};
+use crate::prompt::{build_prompt, build_lineup_prompt};
 use rand::Rng;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
@@ -106,8 +106,8 @@ struct ChoiceLogprobs {
     content: Option<Vec<LogprobContent>>,
 }
 
-/// Result of a single LLM comparison call.
-pub struct ComparisonResult {
+/// Result of a single LLM judgement call.
+pub struct PairJudgementResult {
     pub item1_id: i64,
     pub item2_id: i64,
     pub parse_result: ParseResult,
@@ -154,7 +154,7 @@ pub(crate) fn jittered_temperature(base: f64, jitter_std: f64, rng: &mut impl Rn
 /// the response text, the token logprobs (empty in text mode), token usage, and
 /// whether the response hit `max_tokens`. Returns Err only on HTTP/network
 /// failures. Bails (fatal) if logprobs were requested but none came back, since
-/// that is a misconfiguration rather than a per-comparison failure.
+/// that is a misconfiguration rather than a per-judgement failure.
 async fn send_chat_raw(
     client: &Client,
     config: &LlmConfig,
@@ -225,7 +225,7 @@ async fn send_chat_raw(
 /// Send one HTTP request to the LLM and parse the pairwise verdict.
 /// Returns Ok on any successful HTTP response (even if verdict is unparseable).
 /// Returns Err only on HTTP/network failures.
-pub async fn send_comparison_request(
+pub async fn send_pair_judgement_request(
     client: &Client,
     config: &LlmConfig,
     prompt: &str,
@@ -247,7 +247,7 @@ pub async fn send_comparison_request(
 /// Retries up to `max_retries` times with exponential backoff (1s, 4s, 16s).
 /// Only HTTP/network errors trigger retries — unparseable verdicts do not.
 #[allow(clippy::too_many_arguments)]
-pub async fn compare_pair(
+pub async fn judge_pair(
     client: &Client,
     config: &LlmConfig,
     template: &str,
@@ -263,14 +263,14 @@ pub async fn compare_pair(
     max_retries: usize,
     verbose: bool,
     judge_name: &str,
-) -> Result<ComparisonResult, String> {
+) -> Result<PairJudgementResult, String> {
     let prompt = build_prompt(template, criterion, item1_name, item2_name, item1_title, item2_title, analysis_length);
 
     let mut last_err = String::new();
     for attempt in 0..=max_retries {
-        match send_comparison_request(client, config, &prompt, min_logprob_coverage).await {
+        match send_pair_judgement_request(client, config, &prompt, min_logprob_coverage).await {
             Ok((parse_result, content, usage, hit_max_tokens)) => {
-                return Ok(ComparisonResult {
+                return Ok(PairJudgementResult {
                     item1_id,
                     item2_id,
                     parse_result,
@@ -303,8 +303,8 @@ pub async fn compare_pair(
     Err(last_err)
 }
 
-/// Result of a single 3-way (three-item) comparison call.
-pub struct ThreeWayResult {
+/// Result of a single three-item lineup (three-item) judgement call.
+pub struct LineupJudgementResult {
     pub item_a_id: i64,
     pub item_b_id: i64,
     pub item_c_id: i64,
@@ -318,10 +318,10 @@ pub struct ThreeWayResult {
     pub hit_max_tokens: bool,
 }
 
-/// Send one HTTP request for a 3-way comparison and fold the response into a
+/// Send one HTTP request for a three-item lineup judgement and fold the response into a
 /// winner-distribution over the three options. Returns Err only on HTTP/network
 /// failures; an unparseable ranking yields `Ok` with `winner_dist = None`.
-async fn send_three_way_request(
+async fn send_lineup_judgement_request(
     client: &Client,
     config: &LlmConfig,
     prompt: &str,
@@ -330,19 +330,19 @@ async fn send_three_way_request(
     let (content, logprobs, usage, hit_max_tokens) = send_chat_raw(client, config, prompt).await?;
 
     let winner_dist = if config.logprobs {
-        parse_three_way(&logprobs, min_logprob_coverage)
+        parse_lineup(&logprobs, min_logprob_coverage)
     } else {
-        parse_three_way_text(&content)
+        parse_lineup_text(&content)
     };
 
     Ok((winner_dist, content, usage, hit_max_tokens))
 }
 
 /// Call the LLM to rank three items, with retries on HTTP errors. Mirrors
-/// `compare_pair`: retries only HTTP/network errors, never an unparseable
+/// `judge_pair`: retries only HTTP/network errors, never an unparseable
 /// ranking.
 #[allow(clippy::too_many_arguments)]
-pub async fn compare_triple(
+pub async fn judge_lineup(
     client: &Client,
     config: &LlmConfig,
     template: &str,
@@ -358,14 +358,14 @@ pub async fn compare_triple(
     max_retries: usize,
     verbose: bool,
     judge_name: &str,
-) -> Result<ThreeWayResult, String> {
-    let prompt = build_three_way_prompt(template, criterion, option_a, option_b, option_c, analysis_length);
+) -> Result<LineupJudgementResult, String> {
+    let prompt = build_lineup_prompt(template, criterion, option_a, option_b, option_c, analysis_length);
 
     let mut last_err = String::new();
     for attempt in 0..=max_retries {
-        match send_three_way_request(client, config, &prompt, min_logprob_coverage).await {
+        match send_lineup_judgement_request(client, config, &prompt, min_logprob_coverage).await {
             Ok((winner_dist, content, usage, hit_max_tokens)) => {
-                return Ok(ThreeWayResult {
+                return Ok(LineupJudgementResult {
                     item_a_id,
                     item_b_id,
                     item_c_id,
@@ -382,7 +382,7 @@ pub async fn compare_triple(
                 if attempt < max_retries {
                     if verbose {
                         eprintln!(
-                            "  Retry {}/{} for 3-way [{}]: {}",
+                            "  Retry {}/{} for three-item lineup [{}]: {}",
                             attempt + 1, max_retries, judge_name, last_err
                         );
                     }

@@ -5,8 +5,8 @@ pub const SUBSYSTEM_PAIRING: u64 = 1;
 pub const SUBSYSTEM_JUDGE_ASSIGN: u64 = 3;
 pub const SUBSYSTEM_TEMP_JITTER: u64 = 4;
 pub const SUBSYSTEM_BENCHMARK: u64 = 5;
-/// Randomizing which side of a folded 3-way edge is listed first, so the
-/// positional-bias estimator stays unbiased in three-way mode.
+/// Randomizing which side of a folded three-item lineup edge is listed first, so the
+/// positional-bias estimator stays unbiased in three-item lineup mode.
 pub const SUBSYSTEM_EDGE_ORIENTATION: u64 = 6;
 
 pub fn make_rng(seed: Option<u64>, subsystem: u64) -> StdRng {

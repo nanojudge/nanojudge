@@ -19,11 +19,11 @@
 ///
 /// The log-posterior is concave (logistic log-likelihood + Gaussian priors), so
 /// the mode is unique and Newton converges quickly. The prior makes `A`
-/// positive-definite even for items with no comparisons, so the matrix-free
+/// positive-definite even for items with no edges, so the matrix-free
 /// linear solves never face a singular system.
 ///
 /// Internal module — operates on pre-mapped `usize` indices, not caller IDs.
-use crate::types::IndexedComparison;
+use crate::types::IndexedEdge;
 
 /// Result of a Laplace fit. Vectors are indexed the same as the inputs:
 /// `means[i]`/`stds[i]` for item `i`, `bias_means[k]`/`bias_stds[k]` for judge `k`.
@@ -63,7 +63,7 @@ fn log_sigmoid(x: f64) -> f64 {
 }
 
 // A fixed probe count keeps the covariance pass linear in the number of
-// comparisons. Eight probes plus short Jacobi-preconditioned CG solves capture
+// edges. Eight probes plus short Jacobi-preconditioned CG solves capture
 // the large correlation correction without making Laplace disproportionately
 // expensive.
 const VARIANCE_PROBES: usize = 8;
@@ -78,7 +78,7 @@ const VARIANCE_CG_TOL: f64 = 1e-6;
 /// the mode. The item covariance is transformed through the same mean-centering
 /// applied to the reported scores.
 ///
-/// Cost is O(#comparisons) per inner CG step and the covariance pass uses fixed
+/// Cost is O(#edges) per inner CG step and the covariance pass uses fixed
 /// probe/iteration counts, so it remains linear in problem size and uses linear
 /// memory. The covariance diagonal is approximate, but unlike diagonal Fisher it
 /// includes between-parameter correlations; the std only feeds selection
@@ -88,7 +88,7 @@ const VARIANCE_CG_TOL: f64 = 1e-6;
 pub(crate) fn fit_linear(
     num_items: usize,
     num_judges: usize,
-    comparisons: &[IndexedComparison],
+    edges: &[IndexedEdge],
     prior_tau2: f64,
     regularization_strength: f64,
     bias_prior_mu: f64,
@@ -100,7 +100,7 @@ pub(crate) fn fit_linear(
     // least 2. Each judge gets `num_slots − 1` free advantage params; the highest
     // slot is the pinned zero reference.
     let mut num_slots = 2usize;
-    for &(_, _, _, _, s1, s2, _) in comparisons {
+    for &(_, _, _, _, s1, s2, _) in edges {
         num_slots = num_slots.max(s1 as usize + 1).max(s2 as usize + 1);
     }
     let free_per_judge = num_slots - 1;
@@ -125,7 +125,7 @@ pub(crate) fn fit_linear(
 
     let log_posterior = |phi: &[f64]| -> f64 {
         let mut lp = 0.0;
-        for &(i, j, p, k, s1, s2, wt) in comparisons {
+        for &(i, j, p, k, s1, s2, wt) in edges {
             let g1 = bias_idx(k, s1 as usize).map(|b| phi[b]).unwrap_or(0.0);
             let g2 = bias_idx(k, s2 as usize).map(|b| phi[b]).unwrap_or(0.0);
             let d = phi[i] - phi[j] + g1 - g2;
@@ -142,12 +142,12 @@ pub(crate) fn fit_linear(
     };
 
     // Per-pairwise Newton weight w_c = wt·σ(1−σ), refreshed each Newton step.
-    let mut w = vec![0.0; comparisons.len()];
+    let mut w = vec![0.0; edges.len()];
 
     for _ in 0..max_iterations {
         // Gradient g and the weights w_c at the current point.
         let mut g = vec![0.0; dim];
-        for (c, &(i, j, p, k, s1, s2, wt)) in comparisons.iter().enumerate() {
+        for (c, &(i, j, p, k, s1, s2, wt)) in edges.iter().enumerate() {
             let b1 = bias_idx(k, s1 as usize);
             let b2 = bias_idx(k, s2 as usize);
             let g1 = b1.map(|b| phi[b]).unwrap_or(0.0);
@@ -182,7 +182,7 @@ pub(crate) fn fit_linear(
             for idx in num_items..dim {
                 out[idx] = bias_precision * v[idx];
             }
-            for (c, &(i, j, _p, k, s1, s2, _wt)) in comparisons.iter().enumerate() {
+            for (c, &(i, j, _p, k, s1, s2, _wt)) in edges.iter().enumerate() {
                 let b1 = bias_idx(k, s1 as usize);
                 let b2 = bias_idx(k, s2 as usize);
                 let mut uv = v[i] - v[j];
@@ -227,7 +227,7 @@ pub(crate) fn fit_linear(
     for idx in num_items..dim {
         info[idx] = bias_precision;
     }
-    for (c, &(i, j, _p, k, s1, s2, wt)) in comparisons.iter().enumerate() {
+    for (c, &(i, j, _p, k, s1, s2, wt)) in edges.iter().enumerate() {
         let b1 = bias_idx(k, s1 as usize);
         let b2 = bias_idx(k, s2 as usize);
         let g1 = b1.map(|b| phi[b]).unwrap_or(0.0);
@@ -243,7 +243,7 @@ pub(crate) fn fit_linear(
     }
     let final_hessvec = |v: &[f64]| -> Vec<f64> {
         let mut out: Vec<f64> = info.iter().zip(v).map(|(&diagonal, &value)| diagonal * value).collect();
-        for (c, &(i, j, _p, k, s1, s2, _wt)) in comparisons.iter().enumerate() {
+        for (c, &(i, j, _p, k, s1, s2, _wt)) in edges.iter().enumerate() {
             let b1 = bias_idx(k, s1 as usize);
             let b2 = bias_idx(k, s2 as usize);
             let mut uv = v[i] - v[j];
@@ -374,7 +374,7 @@ fn deterministic_probe_sign(probe: usize, index: usize) -> f64 {
 }
 
 /// Jacobi-preconditioned CG with a relative residual tolerance and a fixed
-/// iteration cap. The cap makes each covariance probe O(#comparisons).
+/// iteration cap. The cap makes each covariance probe O(#edges).
 fn preconditioned_conjugate_gradient(
     hessvec: &impl Fn(&[f64]) -> Vec<f64>,
     b: &[f64],
@@ -478,16 +478,16 @@ mod tests {
     const BIAS_PRIOR_MU: f64 = 0.0;
     const BIAS_PRIOR_TAU2: f64 = 2.0;
 
-    fn fit_default(num_items: usize, num_judges: usize, comps: &[IndexedComparison]) -> LaplaceFit {
-        fit_linear(num_items, num_judges, comps, PRIOR_TAU2, REG, BIAS_PRIOR_MU, BIAS_PRIOR_TAU2, 100, 1e-10)
+    fn fit_default(num_items: usize, num_judges: usize, edges: &[IndexedEdge]) -> LaplaceFit {
+        fit_linear(num_items, num_judges, edges, PRIOR_TAU2, REG, BIAS_PRIOR_MU, BIAS_PRIOR_TAU2, 100, 1e-10)
     }
 
     #[test]
     fn test_orders_clear_winner() {
         // Item 0 beats item 1 every time → θ_0 > θ_1, both stds positive.
-        let comps: Vec<IndexedComparison> =
+        let edges: Vec<IndexedEdge> =
             (0..20).map(|_| (0usize, 1usize, 1.0, 0usize, 0, 1, 1.0)).collect();
-        let f = fit_default(2, 1, &comps);
+        let f = fit_default(2, 1, &edges);
         assert!(f.means[0] > f.means[1], "winner should rank higher: {:?}", f.means);
         assert!(f.stds[0] > 0.0 && f.stds[1] > 0.0);
         // Mean-centered → means sum to ~0.
@@ -496,8 +496,8 @@ mod tests {
 
     #[test]
     fn test_more_data_shrinks_std() {
-        let few: Vec<IndexedComparison> = (0..4).map(|n| (0usize, 1usize, (n % 2) as f64, 0usize, 0, 1, 1.0)).collect();
-        let many: Vec<IndexedComparison> = (0..200).map(|n| (0usize, 1usize, (n % 2) as f64, 0usize, 0, 1, 1.0)).collect();
+        let few: Vec<IndexedEdge> = (0..4).map(|n| (0usize, 1usize, (n % 2) as f64, 0usize, 0, 1, 1.0)).collect();
+        let many: Vec<IndexedEdge> = (0..200).map(|n| (0usize, 1usize, (n % 2) as f64, 0usize, 0, 1, 1.0)).collect();
         let f_few = fit_default(2, 1, &few);
         let f_many = fit_default(2, 1, &many);
         assert!(f_many.stds[0] < f_few.stds[0], "more data should tighten std: {} vs {}", f_many.stds[0], f_few.stds[0]);
@@ -508,8 +508,8 @@ mod tests {
         // Item 2 plays nothing. The raw parameter has the prior variance, but
         // reported item scores subtract their shared mean. For three items this
         // leaves (1 - 1/3) of the independent prior variance.
-        let comps: Vec<IndexedComparison> = (0..10).map(|_| (0usize, 1usize, 1.0, 0usize, 0, 1, 1.0)).collect();
-        let f = fit_default(3, 1, &comps);
+        let edges: Vec<IndexedEdge> = (0..10).map(|_| (0usize, 1usize, 1.0, 0usize, 0, 1, 1.0)).collect();
+        let f = fit_default(3, 1, &edges);
         let prior_std = ((2.0 / 3.0) / (1.0 / PRIOR_TAU2 + REG)).sqrt();
         assert!((f.stds[2] - prior_std).abs() < 1e-6, "unplayed centered std {} vs expected {}", f.stds[2], prior_std);
     }
@@ -557,10 +557,10 @@ mod tests {
 
     #[test]
     fn test_laplace_variances_are_deterministic() {
-        let comps: Vec<IndexedComparison> =
+        let edges: Vec<IndexedEdge> =
             (0..30).map(|n| (n % 3, (n + 1) % 3, (n % 2) as f64, 0usize, 0, 1, 1.0)).collect();
-        let first = fit_default(3, 1, &comps);
-        let second = fit_default(3, 1, &comps);
+        let first = fit_default(3, 1, &edges);
+        let second = fit_default(3, 1, &edges);
         assert_eq!(first.stds, second.stds);
         assert_eq!(first.bias_stds, second.bias_stds);
     }
@@ -570,12 +570,12 @@ mod tests {
         // Symmetric strengths (θ_0 = θ_1) but item1 wins 90% — the asymmetry must
         // be absorbed by a positive bias, not by strength differences. We feed
         // both orderings equally so strengths stay tied and β carries the signal.
-        let mut comps: Vec<IndexedComparison> = Vec::new();
+        let mut edges: Vec<IndexedEdge> = Vec::new();
         for _ in 0..100 {
-            comps.push((0, 1, 0.9, 0, 0, 1, 1.0)); // item1=0 wins 90%
-            comps.push((1, 0, 0.9, 0, 0, 1, 1.0)); // item1=1 wins 90% (same first-position edge)
+            edges.push((0, 1, 0.9, 0, 0, 1, 1.0)); // item1=0 wins 90%
+            edges.push((1, 0, 0.9, 0, 0, 1, 1.0)); // item1=1 wins 90% (same first-position edge)
         }
-        let f = fit_default(2, 1, &comps);
+        let f = fit_default(2, 1, &edges);
         assert!(f.bias_means[0] > 0.5, "first-position edge → positive bias, got {}", f.bias_means[0]);
         // With the position edge explained by bias, strengths stay ~equal.
         assert!((f.means[0] - f.means[1]).abs() < 0.2, "strengths should stay close: {:?}", f.means);
@@ -587,12 +587,12 @@ mod tests {
         // sits in slot A beats whoever sits in slot C 90% of the time — the edge
         // must be absorbed by slot A's advantage, not by strengths. Feed both
         // items through slot A equally so strengths stay tied.
-        let mut comps: Vec<IndexedComparison> = Vec::new();
+        let mut edges: Vec<IndexedEdge> = Vec::new();
         for _ in 0..100 {
-            comps.push((0, 1, 0.9, 0, 0, 2, 1.0)); // item0 in slot A beats item1 in slot C
-            comps.push((1, 0, 0.9, 0, 0, 2, 1.0)); // item1 in slot A beats item0 in slot C
+            edges.push((0, 1, 0.9, 0, 0, 2, 1.0)); // item0 in slot A beats item1 in slot C
+            edges.push((1, 0, 0.9, 0, 0, 2, 1.0)); // item1 in slot A beats item0 in slot C
         }
-        let f = fit_default(2, 1, &comps);
+        let f = fit_default(2, 1, &edges);
         // num_slots = 3 → two free advantages per judge [γ_A, γ_B]; slot C is the
         // reference. γ_A (bias_means / bias_free[_][0]) is the recovered slot-A edge.
         assert_eq!(f.bias_free[0].len(), 2, "two free slot advantages expected");

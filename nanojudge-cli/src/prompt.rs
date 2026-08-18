@@ -1,4 +1,4 @@
-//! Prompt building for pairwise comparisons.
+//! Prompt building for LLM judgements.
 //!
 //! Supports custom prompt templates with variable substitution.
 //! Required variables: $criterion, $option1, $option2
@@ -43,13 +43,13 @@ Verdict: Option 2
 const REQUIRED_VARIABLES: &[&str] = &["$criterion", "$option1", "$option2"];
 const REQUIRED_VARIABLES_NO_REASONING: &[&str] = &["$criterion", "$option1", "$option2"];
 
-// --- Three-way (3-item) comparison templates ---
+// --- Three-item lineup (3-item) judgement templates ---
 //
 // The judge ranks all three items (first/second/third); the parser reads the
 // last three "Option <letter>" lines and folds them into a `[q_A, q_B, q_C]`
 // winner-distribution that feeds `winner_dist_to_edges`.
 
-pub const DEFAULT_THREE_WAY_TEMPLATE: &str = "\
+pub const DEFAULT_LINEUP_TEMPLATE: &str = "\
 $criterion
 
 Option A:
@@ -69,7 +69,7 @@ Second place is Option Y
 Third place is Option Z
 ";
 
-pub const DEFAULT_THREE_WAY_TEMPLATE_NO_REASONING: &str = "\
+pub const DEFAULT_LINEUP_TEMPLATE_NO_REASONING: &str = "\
 $criterion
 
 Option A:
@@ -89,7 +89,7 @@ Second place is Option Y
 Third place is Option Z
 ";
 
-const REQUIRED_THREE_WAY_VARIABLES: &[&str] = &["$criterion", "$optionA", "$optionB", "$optionC"];
+const REQUIRED_LINEUP_VARIABLES: &[&str] = &["$criterion", "$optionA", "$optionB", "$optionC"];
 
 /// Validate that a template contains all required variables.
 /// Returns an error message listing any missing variables.
@@ -110,10 +110,10 @@ pub fn validate_template(template: &str, reasoning_enabled: bool) -> Result<(), 
     }
 }
 
-/// Validate that a three-way template contains all required variables
+/// Validate that a three-item lineup template contains all required variables
 /// (`$criterion`, `$optionA`, `$optionB`, `$optionC`).
-pub fn validate_three_way_template(template: &str) -> Result<(), String> {
-    let missing: Vec<&&str> = REQUIRED_THREE_WAY_VARIABLES
+pub fn validate_lineup_template(template: &str) -> Result<(), String> {
+    let missing: Vec<&&str> = REQUIRED_LINEUP_VARIABLES
         .iter()
         .filter(|var| !template.contains(**var))
         .collect();
@@ -122,7 +122,7 @@ pub fn validate_three_way_template(template: &str) -> Result<(), String> {
         Ok(())
     } else {
         Err(format!(
-            "Three-way prompt template is missing required variable(s): {}",
+            "Three-item lineup prompt template is missing required variable(s): {}",
             missing.iter().map(|v| v.to_string()).collect::<Vec<_>>().join(", ")
         ))
     }
@@ -140,19 +140,19 @@ pub fn load_template(path: &std::path::Path, reasoning_enabled: bool) -> String 
     content
 }
 
-/// Load a three-way prompt template from a file path, validate it, and return it.
-pub fn load_three_way_template(path: &std::path::Path) -> String {
+/// Load a three-item lineup prompt template from a file path, validate it, and return it.
+pub fn load_lineup_template(path: &std::path::Path) -> String {
     let content = std::fs::read_to_string(path)
         .unwrap_or_else(|e| bail(format!("Failed to read prompt template {}: {e}", path.display())));
 
-    if let Err(msg) = validate_three_way_template(&content) {
+    if let Err(msg) = validate_lineup_template(&content) {
         bail(format!("{} (in {})", msg, path.display()));
     }
 
     content
 }
 
-/// Build a comparison prompt by substituting variables into a template.
+/// Build a judgement prompt by substituting variables into a template.
 ///
 /// Single-pass substitution: only variables in the TEMPLATE are replaced.
 /// Substituted values are never rescanned, so item text containing literal
@@ -187,10 +187,10 @@ pub fn build_prompt(template: &str, criterion: &str, option1: &str, option2: &st
     out
 }
 
-/// Build a three-way comparison prompt by substituting the three options into a
+/// Build a three-item lineup judgement prompt by substituting the three options into a
 /// template. Single-pass, like `build_prompt`: item text containing literal
 /// template tokens passes through untouched.
-pub fn build_three_way_prompt(
+pub fn build_lineup_prompt(
     template: &str,
     criterion: &str,
     option_a: &str,
@@ -304,18 +304,18 @@ mod tests {
         assert!(DEFAULT_TEMPLATE_NO_REASONING.contains("Verdict: Option 2"));
     }
 
-    // --- Three-way template tests ---
+    // --- Three-item lineup template tests ---
 
     #[test]
-    fn test_default_three_way_templates_valid() {
-        validate_three_way_template(DEFAULT_THREE_WAY_TEMPLATE).unwrap();
-        validate_three_way_template(DEFAULT_THREE_WAY_TEMPLATE_NO_REASONING).unwrap();
+    fn test_default_lineup_templates_valid() {
+        validate_lineup_template(DEFAULT_LINEUP_TEMPLATE).unwrap();
+        validate_lineup_template(DEFAULT_LINEUP_TEMPLATE_NO_REASONING).unwrap();
     }
 
     #[test]
-    fn test_build_three_way_prompt() {
-        let prompt = build_three_way_prompt(
-            DEFAULT_THREE_WAY_TEMPLATE,
+    fn test_build_lineup_prompt() {
+        let prompt = build_lineup_prompt(
+            DEFAULT_LINEUP_TEMPLATE,
             "Which is tastier?",
             "Pizza", "Sushi", "Tacos",
             "2 paragraphs",
@@ -330,15 +330,15 @@ mod tests {
     }
 
     #[test]
-    fn test_validate_three_way_missing_option() {
-        let result = validate_three_way_template("$criterion $optionA $optionB only");
+    fn test_validate_lineup_missing_option() {
+        let result = validate_lineup_template("$criterion $optionA $optionB only");
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("$optionC"));
     }
 
     #[test]
-    fn test_three_way_item_text_with_tokens_passes_through() {
-        let prompt = build_three_way_prompt(
+    fn test_lineup_item_text_with_tokens_passes_through() {
+        let prompt = build_lineup_prompt(
             "$criterion|$optionA|$optionB|$optionC",
             "crit",
             "has $optionB inside", "plain", "also $length here",

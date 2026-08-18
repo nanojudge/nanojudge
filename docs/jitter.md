@@ -6,7 +6,7 @@ Each judge has a base `temperature`. Temperature jitter applies a per-prompt mul
 
 ## Why
 
-The goal is stylistic variety in the judge's analyses. We genuinely want a broad range of perspectives on each comparison: testing on real data shows that a panel of judges produces higher-quality rankings than relying on any single judge for all comparisons. Jitter is a way to move toward that effect within a single judge — higher temperature variety per prompt produces more variety in the style and emphasis of the analysis, which gets us part of the way toward the broader-range-of-analysis benefit a true panel provides.
+The goal is stylistic variety in the judge's analyses. We genuinely want a broad range of perspectives on each judgement: testing on real data shows that a panel of judges produces higher-quality rankings than relying on any single judge for all judgements. Jitter is a way to move toward that effect within a single judge — higher temperature variety per prompt produces more variety in the style and emphasis of the analysis, which gets us part of the way toward the broader-range-of-analysis benefit a true panel provides.
 
 It is meant to be used in conjunction with multiple judges, not as a replacement for them. Multiple judges give genuinely different perspectives (different models, different priors); jitter gives one judge a spread of stylistic takes. The two compose.
 

@@ -1,10 +1,10 @@
 //! Benchmark command: measures endpoint throughput, latency, reliability, and positional bias.
 //!
-//! Runs N pairs of comparisons, each in both directions (A vs B and B vs A),
+//! Runs N pairs of judgements, each in both directions (A vs B and B vs A),
 //! collecting timing, token usage, verdict distribution, and flip rate statistics.
 
 use crate::bail;
-use crate::llm::{LlmConfig, send_comparison_request};
+use crate::llm::{LlmConfig, send_pair_judgement_request};
 use crate::prompt::build_prompt;
 use nanojudge_core::seed;
 use rand::Rng;
@@ -25,7 +25,7 @@ struct BenchmarkQuestion {
 
 const BENCHMARK_QUESTIONS: &str = include_str!("benchmark_questions.json");
 
-/// Result of a single benchmark comparison (one direction).
+/// Result of a single benchmark judgement (one direction).
 struct SingleResult {
     latency_secs: f64,
     prompt_tokens: u64,
@@ -66,10 +66,10 @@ pub async fn run_benchmark(
             .collect()
     };
 
-    let total_comparisons = num_pairs * 2; // Each pair runs both directions
+    let total_judgements = num_pairs * 2; // Each pair runs both directions
     eprintln!(
-        "Running benchmark for {}: {} pairs x 2 directions = {} comparisons (concurrency: {})",
-        display_name, num_pairs, total_comparisons, concurrency
+        "Running benchmark for {}: {} pairs x 2 directions = {} judgements (concurrency: {})",
+        display_name, num_pairs, total_judgements, concurrency
     );
     eprintln!("Endpoint: {} | Model: {}", llm_config.endpoint, llm_config.model);
 
@@ -90,19 +90,19 @@ pub async fn run_benchmark(
     let client = Client::new();
     let semaphore = Arc::new(tokio::sync::Semaphore::new(concurrency));
 
-    // Build all comparison tasks: for each pair, run forward (item1 vs item2) and reverse (item2 vs item1)
-    struct ComparisonTask {
+    // Build all judgement tasks: for each pair, run forward (item1 vs item2) and reverse (item2 vs item1)
+    struct JudgementTask {
         pair_index: usize,
         is_forward: bool,
         prompt: String,
     }
 
-    let mut tasks: Vec<ComparisonTask> = Vec::with_capacity(total_comparisons);
+    let mut tasks: Vec<JudgementTask> = Vec::with_capacity(total_judgements);
     for (i, q) in selected.iter().enumerate() {
         let forward_prompt = build_prompt(template, &q.question, &q.item1, &q.item2, "", "", &q.target_length);
         let reverse_prompt = build_prompt(template, &q.question, &q.item2, &q.item1, "", "", &q.target_length);
-        tasks.push(ComparisonTask { pair_index: i, is_forward: true, prompt: forward_prompt });
-        tasks.push(ComparisonTask { pair_index: i, is_forward: false, prompt: reverse_prompt });
+        tasks.push(JudgementTask { pair_index: i, is_forward: true, prompt: forward_prompt });
+        tasks.push(JudgementTask { pair_index: i, is_forward: false, prompt: reverse_prompt });
     }
 
     // Shuffle to avoid sequential bias
@@ -110,7 +110,7 @@ pub async fn run_benchmark(
 
     let wall_clock_start = Instant::now();
 
-    // Run all comparisons with bounded concurrency
+    // Run all judgements with bounded concurrency
     let mut handles = Vec::with_capacity(tasks.len());
     for task in tasks {
         let sem = semaphore.clone();
@@ -123,7 +123,7 @@ pub async fn run_benchmark(
         let handle = tokio::spawn(async move {
             let _permit = sem.acquire().await.unwrap();
             let start = Instant::now();
-            let result = send_comparison_request(&client, &config, &prompt, min_logprob_coverage).await;
+            let result = send_pair_judgement_request(&client, &config, &prompt, min_logprob_coverage).await;
             let latency = start.elapsed().as_secs_f64();
 
             let single = match result {
@@ -202,7 +202,7 @@ pub async fn run_benchmark(
     let total_tokens = total_prompt_tokens + total_completion_tokens;
     let has_token_data = total_tokens > 0;
 
-    let comparisons_per_sec = successful.len() as f64 / wall_clock_secs;
+    let judgements_per_sec = successful.len() as f64 / wall_clock_secs;
 
     // Latency
     let mut latencies: Vec<f64> = successful.iter().map(|r| r.latency_secs).collect();
@@ -240,7 +240,7 @@ pub async fn run_benchmark(
     // --- Print report ---
 
     println!("── Throughput ──────────────────────────────────");
-    println!("Comparisons/sec:       {:.2}", comparisons_per_sec);
+    println!("Judgements/sec:       {:.2}", judgements_per_sec);
     if has_token_data {
         println!("Output tokens/sec:     {:.0}", total_completion_tokens as f64 / wall_clock_secs);
         println!("Avg input tokens:      {:.0}", total_prompt_tokens as f64 / successful.len().max(1) as f64);
@@ -250,14 +250,14 @@ pub async fn run_benchmark(
     }
 
     println!();
-    println!("── Latency (per comparison) ────────────────────");
+    println!("── Latency (per judgement) ────────────────────");
     if !latencies.is_empty() {
         println!("P50:    {:.2}s", percentile(&latencies, 0.50));
         println!("P95:    {:.2}s", percentile(&latencies, 0.95));
         println!("P99:    {:.2}s", percentile(&latencies, 0.99));
         println!("Min:    {:.2}s    Max: {:.2}s", latencies.first().unwrap(), latencies.last().unwrap());
     } else {
-        println!("(No successful comparisons)");
+        println!("(No successful judgements)");
     }
 
     println!();
@@ -293,8 +293,8 @@ pub async fn run_benchmark(
         println!("── Cost Estimate ───────────────────────────────");
         println!("Tokens used:           {:>7}  ({} in + {} out)", total_tokens, total_prompt_tokens, total_completion_tokens);
         if successful.len() > 1 {
-            let tokens_per_comparison = total_tokens as f64 / successful.len() as f64;
-            println!("At this rate, 1000 comparisons ≈ {:.0}K tokens", tokens_per_comparison * 1000.0 / 1000.0);
+            let tokens_per_judgement = total_tokens as f64 / successful.len() as f64;
+            println!("At this rate, 1000 judgements ≈ {:.0}K tokens", tokens_per_judgement * 1000.0 / 1000.0);
         }
     }
 
@@ -338,15 +338,15 @@ pub async fn run_benchmark(
     writeln!(file, "NanoJudge Benchmark Log").unwrap();
     writeln!(file, "Generated: {} UTC", timestamp.replace('_', " ")).unwrap();
     writeln!(file, "Judge: {} | Endpoint: {} | Model: {}", display_name, llm_config.endpoint, llm_config.model).unwrap();
-    writeln!(file, "Pairs: {} | Comparisons: {} | Wall time: {:.1}s", num_pairs, total_comparisons, wall_clock_secs).unwrap();
+    writeln!(file, "Pairs: {} | Judgements: {} | Wall time: {:.1}s", num_pairs, total_judgements, wall_clock_secs).unwrap();
     writeln!(file, "Parse rate: {}/{} ({:.1}%)", parseable_count, non_http_count, parseable_count as f64 / non_http_count.max(1) as f64 * 100.0).unwrap();
     writeln!(file).unwrap();
 
-    let mut comparison_num = 0usize;
+    let mut judgement_num = 0usize;
     for i in 0..num_pairs {
         for (direction, results) in [("FORWARD", &forward_results), ("REVERSE", &reverse_results)] {
             if let Some(ref result) = results[i] {
-                comparison_num += 1;
+                judgement_num += 1;
                 let status = if result.http_error {
                     "HTTP ERROR".to_string()
                 } else if result.parseable {
@@ -359,7 +359,7 @@ pub async fn run_benchmark(
                 };
 
                 writeln!(file, "{}", "=".repeat(80)).unwrap();
-                writeln!(file, "#{} | Pair {} {} | {:.2}s | {}", comparison_num, i + 1, direction, result.latency_secs, status).unwrap();
+                writeln!(file, "#{} | Pair {} {} | {:.2}s | {}", judgement_num, i + 1, direction, result.latency_secs, status).unwrap();
                 writeln!(file, "{}", "=".repeat(80)).unwrap();
                 writeln!(file).unwrap();
                 writeln!(file, "--- PROMPT ---").unwrap();

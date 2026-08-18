@@ -4,7 +4,7 @@
 /// looks up their true strengths, and estimates each verdict-token distribution
 /// with repeated Bradley-Terry/Plackett-Luce samples. The empirical distribution
 /// is returned in the OpenAI logprobs response shape that the real NanoJudge CLI
-/// expects, while the whole request still counts as one comparison.
+/// expects, while the whole request still counts as one judgement.
 use axum::extract::State;
 use axum::routing::post;
 use axum::{Json, Router};
@@ -91,16 +91,16 @@ pub struct JudgeState {
     /// Base seed for deterministic per-pair verdict derivation.
     pub seed: u64,
     /// Independent draws used to estimate each verdict-token distribution.
-    pub samples_per_comparison: usize,
+    pub samples_per_judgement: usize,
     /// Per-pair encounter counter so repeated matchups get independent sample batches.
-    pub pair_counts: Mutex<HashMap<(String, String), u64>>,
+    pub encounter_counts: Mutex<HashMap<(String, String), u64>>,
 }
 
 // ---------------------------------------------------------------------------
 // Prompt parsing
 // ---------------------------------------------------------------------------
 
-/// Extract the two item texts from a NanoJudge comparison prompt.
+/// Extract the two item texts from a NanoJudge judgement prompt.
 ///
 /// Relies on the fixed structure of the default prompt template:
 ///   Option 1:\n<item1>\n\nOption 2:\n<item2>\n\nInstructions:
@@ -127,14 +127,14 @@ fn extract_items(prompt: &str) -> (String, String) {
     (item1, item2)
 }
 
-/// True if this is a three-way (3-item) comparison prompt.
-fn is_three_way(prompt: &str) -> bool {
+/// True if this is a three-item lineup (3-item) judgement prompt.
+fn is_lineup_judgement(prompt: &str) -> bool {
     prompt.contains("Option A:\n")
 }
 
-/// Extract the three item texts from a three-way prompt. Mirrors `extract_items`
+/// Extract the three item texts from a three-item lineup prompt. Mirrors `extract_items`
 /// but for the "Option A:/Option B:/Option C:" layout.
-fn extract_three_items(prompt: &str) -> (String, String, String) {
+fn extract_lineup_items(prompt: &str) -> (String, String, String) {
     let a_marker = "Option A:\n";
     let b_marker = "Option B:\n";
     let c_marker = "Option C:\n";
@@ -200,7 +200,7 @@ fn sample_token_distribution<const N: usize>(
     samples: usize,
     rng: &mut impl Rng,
 ) -> SampledToken<N> {
-    assert!(samples > 0, "samples_per_comparison must be at least 1");
+    assert!(samples > 0, "samples_per_judgement must be at least 1");
 
     let mut counts = [0usize; N];
     let mut emitted = 0;
@@ -284,12 +284,12 @@ fn softmax3(vals: [f64; 3]) -> [f64; 3] {
     [e[0] / sum, e[1] / sum, e[2] / sum]
 }
 
-/// Estimate the two autoregressive token distributions of a three-way ranking.
+/// Estimate the two autoregressive token distributions of a three-item lineup ranking.
 /// First place gets `samples` draws from all three Plackett-Luce weights. The
 /// first draw is the emitted winner. Conditional on that emitted token, second
 /// place gets a fresh `samples` draws from the two remaining items; its first
 /// draw is emitted second. Third place is the one remaining item.
-fn sample_three_way_ranking(
+fn sample_lineup_ranking(
     strengths: [f64; 3],
     samples: usize,
     rng: &mut impl Rng,
@@ -316,20 +316,20 @@ fn sample_three_way_ranking(
 
 const RANK_LETTERS: [char; 3] = ['A', 'B', 'C'];
 
-/// Render the three-way ranking as the "Nth place is Option X" lines the
-/// default three-way template asks for.
-fn three_way_text(order: [usize; 3]) -> String {
+/// Render the three-item lineup ranking as the "Nth place is Option X" lines the
+/// default three-item lineup template asks for.
+fn lineup_judgement_text(order: [usize; 3]) -> String {
     format!(
         "First place is Option {}\nSecond place is Option {}\nThird place is Option {}",
         RANK_LETTERS[order[0]], RANK_LETTERS[order[1]], RANK_LETTERS[order[2]],
     )
 }
 
-/// Build the logprobs payload for a three-way ranking. Each "Nth place is
+/// Build the logprobs payload for a three-item lineup ranking. Each "Nth place is
 /// Option" line ends in a letter token carrying that slot's empirical
 /// distribution over A/B/C: 1st gets `p1`, 2nd gets the conditional `p2`, and
 /// 3rd is one-hot on the remaining option. "Option" is the parser's anchor.
-fn build_three_way_logprobs(order: [usize; 3], p1: [f64; 3], p2: [f64; 3]) -> ChoiceLogprobs {
+fn build_lineup_logprobs(order: [usize; 3], p1: [f64; 3], p2: [f64; 3]) -> ChoiceLogprobs {
     let mut p3 = [0.0_f64; 3];
     p3[order[2]] = 1.0;
 
@@ -369,8 +369,8 @@ async fn handle_chat(
     let prompt = &request.messages.last().expect("empty messages array").content;
     let want_logprobs = request.logprobs.unwrap_or(false);
 
-    if is_three_way(prompt) {
-        return handle_three_way(state, prompt, want_logprobs);
+    if is_lineup_judgement(prompt) {
+        return handle_lineup_judgement(state, prompt, want_logprobs);
     }
 
     let (item1, item2) = extract_items(prompt);
@@ -387,7 +387,7 @@ async fn handle_chat(
     let sampled_verdict = {
         let key = (item1.clone(), item2.clone());
         let encounter = {
-            let mut counts = state.pair_counts.lock().unwrap();
+            let mut counts = state.encounter_counts.lock().unwrap();
             let n = counts.entry(key).or_insert(0);
             let current = *n;
             *n += 1;
@@ -398,7 +398,7 @@ async fn handle_chat(
         let p1 = 1.0 / (1.0 + (-(s1 - s2)).exp());
         sample_token_distribution(
             [p1, 1.0 - p1],
-            state.samples_per_comparison,
+            state.samples_per_judgement,
             &mut rng,
         )
     };
@@ -426,25 +426,25 @@ async fn handle_chat(
     })
 }
 
-/// Handle a three-way comparison request: estimate the first-place distribution
-/// from repeated three-way draws, declare its first draw as the emitted winner,
+/// Handle a three-item lineup judgement request: estimate the first-place distribution
+/// from repeated three-item lineup draws, declare its first draw as the emitted winner,
 /// then independently estimate second place from repeated draws conditional on
 /// that emitted winner. Third place is deterministic.
-fn handle_three_way(
+fn handle_lineup_judgement(
     state: Arc<JudgeState>,
     prompt: &str,
     want_logprobs: bool,
 ) -> Json<ChatResponse> {
-    let (item_a, item_b, item_c) = extract_three_items(prompt);
+    let (item_a, item_b, item_c) = extract_lineup_items(prompt);
     let sa = *state.strengths.get(&item_a).unwrap_or_else(|| panic!("unknown item: {item_a:?}"));
     let sb = *state.strengths.get(&item_b).unwrap_or_else(|| panic!("unknown item: {item_b:?}"));
     let sc = *state.strengths.get(&item_c).unwrap_or_else(|| panic!("unknown item: {item_c:?}"));
 
-    // Independent draw per repeated (ordered) triple, keyed via the shared
-    // encounter counter (the second key slot is unused for triples).
+    // Independent draw per repeated (ordered) lineup, keyed via the shared
+    // encounter counter (the second key slot is unused for lineups).
     let key = (format!("{item_a}\u{0}{item_b}\u{0}{item_c}"), String::new());
     let encounter = {
-        let mut counts = state.pair_counts.lock().unwrap();
+        let mut counts = state.encounter_counts.lock().unwrap();
         let n = counts.entry(key).or_insert(0);
         let current = *n;
         *n += 1;
@@ -453,14 +453,14 @@ fn handle_three_way(
     let seed = deterministic_pair_seed(state.seed, &item_a, &item_b, encounter.wrapping_add(sc.to_bits()));
     let mut rng = StdRng::seed_from_u64(seed);
 
-    let (order, p1, p2) = sample_three_way_ranking(
+    let (order, p1, p2) = sample_lineup_ranking(
         [sa, sb, sc],
-        state.samples_per_comparison,
+        state.samples_per_judgement,
         &mut rng,
     );
-    let content = three_way_text(order);
+    let content = lineup_judgement_text(order);
     let logprobs = if want_logprobs {
-        Some(build_three_way_logprobs(order, p1, p2))
+        Some(build_lineup_logprobs(order, p1, p2))
     } else {
         None
     };
@@ -518,7 +518,7 @@ mod tests {
     }
 
     #[test]
-    fn one_sample_is_a_hard_judgment() {
+    fn one_sample_is_a_hard_judgement() {
         let mut rng = StdRng::seed_from_u64(1);
         let sampled = sample_token_distribution([0.5, 0.5], 1, &mut rng);
 
@@ -542,11 +542,11 @@ mod tests {
     }
 
     #[test]
-    fn three_way_samples_second_place_conditionally() {
+    fn lineup_samples_second_place_conditionally() {
         let samples = 10;
         let mut rng = StdRng::seed_from_u64(3);
         let (order, first, second) =
-            sample_three_way_ranking([0.8, 0.1, -0.4], samples, &mut rng);
+            sample_lineup_ranking([0.8, 0.1, -0.4], samples, &mut rng);
 
         let mut sorted_order = order;
         sorted_order.sort_unstable();
@@ -573,7 +573,7 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "samples_per_comparison must be at least 1")]
+    #[should_panic(expected = "samples_per_judgement must be at least 1")]
     fn zero_samples_panics() {
         let mut rng = StdRng::seed_from_u64(4);
         let _ = sample_token_distribution([0.5, 0.5], 0, &mut rng);

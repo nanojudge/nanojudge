@@ -1,7 +1,7 @@
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
-use nanojudge_core::{ComparisonDistribution, stable_hash};
+use nanojudge_core::{JudgementDistribution, stable_hash};
 
 use crate::args::{ConfigArgs, OutputFormat};
 use crate::bail;
@@ -43,10 +43,10 @@ fn merge_opt<T: PartialEq + std::fmt::Display>(
 /// All required values are concrete (no Options except genuinely optional ones).
 pub struct ResolvedConfig {
     pub rounds: Option<usize>,
-    pub comparisons: Option<usize>,
-    pub comparison_distribution: ComparisonDistribution,
-    /// How many items each judgment compares at once: 2 (pairwise) or 3 (three-way).
-    pub items_per_comparison: usize,
+    pub judgements: Option<usize>,
+    pub judgement_distribution: JudgementDistribution,
+    /// Number of items in each judged lineup: 2 or 3.
+    pub lineup_size: usize,
     /// Top-heavy selection sharpness (power applied to each item's uncertainty
     /// ratio around the anchor). Finite and > 0.
     pub selection_sharpness: f64,
@@ -59,9 +59,9 @@ pub struct ResolvedConfig {
     pub selection_cutoff: f64,
     /// Top-heavy proportional-fair coverage pull. Finite and >= 0; 0 disables it.
     pub selection_coverage: f64,
-    /// Top-heavy target-blend: prior-predicted anchor counts as this many pseudo-games.
+    /// Top-heavy target blend: prior-predicted anchor counts as this many pseudo-edges.
     /// Finite and >= 0; 0 disables the blend.
-    pub target_prior_games: f64,
+    pub target_prior_edges: f64,
     /// Early-stop confidence for top-heavy runs: end the run once the
     /// probability that every item sits on its side of the anchor (the
     /// product of the per-item side probabilities) reaches this value. In
@@ -76,13 +76,13 @@ pub struct ResolvedConfig {
     pub regularization_strength: f64,
     pub bias_prior_logit: f64,
     pub matchmaking_sharpness: f64,
-    pub min_uniform_games: usize,
+    pub min_uniform_edges: usize,
     pub refits_per_round: usize,
     pub prior_tau2: f64,
     pub bias_prior_tau2: f64,
     pub live_top: Option<usize>,
     pub emit_round_rankings: bool,
-    pub save_comparisons: Option<PathBuf>,
+    pub save_judgements: Option<PathBuf>,
     pub output_format: OutputFormat,
     pub verbose: bool,
     pub save_failures: Option<PathBuf>,
@@ -324,29 +324,29 @@ pub fn resolve_judges(
 /// Judge-specific settings (endpoint, model, temperature, etc.) are handled by resolve_judges().
 pub fn resolve_config(shared: &ConfigArgs, cfg: &config::NanojudgeConfig) -> ResolvedConfig {
     let rounds = merge_opt(shared.rounds, cfg.rounds, "rounds");
-    let comparisons = merge_opt(shared.comparisons, cfg.comparisons, "comparisons");
+    let judgements = merge_opt(shared.judgements, cfg.judgements, "judgements");
 
-    if rounds.is_some() && comparisons.is_some() {
-        bail("Specify --rounds or --comparisons, not both.");
+    if rounds.is_some() && judgements.is_some() {
+        bail("Specify --rounds or --judgements, not both.");
     }
     if rounds == Some(0) {
         bail("--rounds must be at least 1");
     }
 
-    let comparison_distribution_str = merge_opt(shared.comparison_distribution.clone(), cfg.comparison_distribution.clone(), "comparison-distribution")
+    let judgement_distribution_str = merge_opt(shared.judgement_distribution.clone(), cfg.judgement_distribution.clone(), "judgement-distribution")
         .unwrap_or_else(|| "uniform".to_string());
-    let comparison_distribution = match comparison_distribution_str.as_str() {
-        "uniform" => ComparisonDistribution::Uniform,
-        "top-heavy" => ComparisonDistribution::TopHeavy,
-        other => bail(format!("Unknown comparison distribution \"{other}\". Use \"uniform\" or \"top-heavy\".")),
+    let judgement_distribution = match judgement_distribution_str.as_str() {
+        "uniform" => JudgementDistribution::Uniform,
+        "top-heavy" => JudgementDistribution::TopHeavy,
+        other => bail(format!("Unknown judgement distribution \"{other}\". Use \"uniform\" or \"top-heavy\".")),
     };
 
-    let items_per_comparison = merge_opt(shared.items_per_comparison, cfg.items_per_comparison, "items-per-comparison")
+    let lineup_size = merge_opt(shared.lineup_size, cfg.lineup_size, "lineup-size")
         .unwrap_or(2);
-    if items_per_comparison != 2 && items_per_comparison != 3 {
-        bail(format!("items-per-comparison={items_per_comparison}, must be 2 (pairwise) or 3 (three-way)"));
+    if lineup_size != 2 && lineup_size != 3 {
+        bail(format!("lineup-size={lineup_size}, must be 2 or 3"));
     }
-    let three_way = items_per_comparison == 3;
+    let uses_three_item_lineups = lineup_size == 3;
 
     // Top-heavy selection tuning (only used with the top-heavy distribution).
     let selection_sharpness = merge_opt(shared.selection_sharpness, cfg.selection_sharpness, "selection-sharpness")
@@ -369,10 +369,10 @@ pub fn resolve_config(shared: &ConfigArgs, cfg: &config::NanojudgeConfig) -> Res
     if !selection_coverage.is_finite() || selection_coverage < 0.0 {
         bail(format!("coverage={selection_coverage}, must be finite and >= 0 (0 disables it)"));
     }
-    let target_prior_games = merge_opt(shared.target_prior_games, cfg.target_prior_games, "target-prior-games")
+    let target_prior_edges = merge_opt(shared.target_prior_edges, cfg.target_prior_edges, "target-prior-edges")
         .unwrap_or(5.0);
-    if !target_prior_games.is_finite() || target_prior_games < 0.0 {
-        bail(format!("target-prior-games={target_prior_games}, must be finite and >= 0 (0 disables the blend)"));
+    if !target_prior_edges.is_finite() || target_prior_edges < 0.0 {
+        bail(format!("target-prior-edges={target_prior_edges}, must be finite and >= 0 (0 disables the blend)"));
     }
     // Early stop has deliberately no default: absent means the run always uses
     // its full round budget.
@@ -381,8 +381,8 @@ pub fn resolve_config(shared: &ConfigArgs, cfg: &config::NanojudgeConfig) -> Res
         if !c.is_finite() || c <= 0.5 || c >= 1.0 {
             bail(format!("stop-confidence={c}, must be in (0.5, 1.0), e.g. 0.95"));
         }
-        if matches!(comparison_distribution, ComparisonDistribution::Uniform) {
-            bail("stop-confidence requires comparison-distribution = \"top-heavy\" (uniform runs have no anchor to measure against)");
+        if matches!(judgement_distribution, JudgementDistribution::Uniform) {
+            bail("stop-confidence requires judgement-distribution = \"top-heavy\" (uniform runs have no anchor to measure against)");
         }
     }
     let retries = merge_opt(shared.retries, cfg.retries, "retries")
@@ -407,12 +407,12 @@ pub fn resolve_config(shared: &ConfigArgs, cfg: &config::NanojudgeConfig) -> Res
     if !matchmaking_sharpness.is_finite() || matchmaking_sharpness <= 0.0 {
         bail(format!("matchmaking-sharpness={matchmaking_sharpness}, must be finite and > 0"));
     }
-    let min_uniform_games = merge_opt(shared.min_uniform_games, cfg.min_uniform_games, "min-uniform-games")
+    let min_uniform_edges = merge_opt(shared.min_uniform_edges, cfg.min_uniform_edges, "min-uniform-edges")
         .unwrap_or(2);
-    if min_uniform_games == 0 {
+    if min_uniform_edges == 0 {
         // 0 would let top-heavy pairing start before any results exist —
         // selection weights are only derived after a completed round.
-        bail("min-uniform-games must be at least 1");
+        bail("min-uniform-edges must be at least 1");
     }
     let refits_per_round = merge_opt(shared.refits_per_round, cfg.refits_per_round, "refits-per-round")
         .unwrap_or(1);
@@ -431,10 +431,10 @@ pub fn resolve_config(shared: &ConfigArgs, cfg: &config::NanojudgeConfig) -> Res
     }
     let live_top = merge_opt(shared.live_top, cfg.live_top, "live-top");
     let emit_round_rankings = shared.emit_round_rankings.unwrap_or(false);
-    let save_comparisons = match (shared.save_comparisons.clone(), cfg.save_comparisons.clone()) {
+    let save_judgements = match (shared.save_judgements.clone(), cfg.save_judgements.clone()) {
         (Some(c), Some(f)) => {
             if c != f {
-                eprintln!("Warning: --save-comparisons ({}) overrides config file value ({})",
+                eprintln!("Warning: --save-judgements ({}) overrides config file value ({})",
                     c.display(), f.display());
             }
             Some(c)
@@ -493,10 +493,10 @@ pub fn resolve_config(shared: &ConfigArgs, cfg: &config::NanojudgeConfig) -> Res
 
         let template_path = cli_path.or(cfg_path);
         match template_path {
-            Some(path) if three_way => prompt::load_three_way_template(&path),
+            Some(path) if uses_three_item_lineups => prompt::load_lineup_template(&path),
             Some(path) => prompt::load_template(&path, reasoning_enabled),
-            None if three_way && reasoning_enabled => prompt::DEFAULT_THREE_WAY_TEMPLATE.to_string(),
-            None if three_way => prompt::DEFAULT_THREE_WAY_TEMPLATE_NO_REASONING.to_string(),
+            None if uses_three_item_lineups && reasoning_enabled => prompt::DEFAULT_LINEUP_TEMPLATE.to_string(),
+            None if uses_three_item_lineups => prompt::DEFAULT_LINEUP_TEMPLATE_NO_REASONING.to_string(),
             None if reasoning_enabled => prompt::DEFAULT_TEMPLATE.to_string(),
             None => prompt::DEFAULT_TEMPLATE_NO_REASONING.to_string(),
         }
@@ -504,14 +504,14 @@ pub fn resolve_config(shared: &ConfigArgs, cfg: &config::NanojudgeConfig) -> Res
 
     ResolvedConfig {
         rounds,
-        comparisons,
-        comparison_distribution,
-        items_per_comparison,
+        judgements,
+        judgement_distribution,
+        lineup_size,
         selection_sharpness,
         anchor_index,
         selection_cutoff,
         selection_coverage,
-        target_prior_games,
+        target_prior_edges,
         stop_confidence,
         retries,
         analysis_length,
@@ -521,13 +521,13 @@ pub fn resolve_config(shared: &ConfigArgs, cfg: &config::NanojudgeConfig) -> Res
         regularization_strength,
         bias_prior_logit,
         matchmaking_sharpness,
-        min_uniform_games,
+        min_uniform_edges,
         refits_per_round,
         prior_tau2,
         bias_prior_tau2,
         live_top,
         emit_round_rankings,
-        save_comparisons,
+        save_judgements,
         output_format,
         verbose,
         save_failures,
@@ -545,17 +545,17 @@ mod tests {
             api_key: None,
             logprobs: None,
             rounds: None,
-            comparisons: None,
+            judgements: None,
             concurrency: None,
             min_logprob_coverage: None,
             verdict_temperature: None,
-            comparison_distribution: None,
-            items_per_comparison: None,
+            judgement_distribution: None,
+            lineup_size: None,
             selection_sharpness: None,
             anchor_index: None,
             cutoff: None,
             coverage: None,
-            target_prior_games: None,
+            target_prior_edges: None,
             stop_confidence: None,
             retries: None,
             analysis_length: None,
@@ -565,13 +565,13 @@ mod tests {
             regularization_strength: None,
             bias_prior: None,
             matchmaking_sharpness: None,
-            min_uniform_games: None,
+            min_uniform_edges: None,
             refits_per_round: None,
             prior_tau2: None,
             bias_prior_tau2: None,
             live_top: None,
             emit_round_rankings: None,
-            save_comparisons: None,
+            save_judgements: None,
             output_format: None,
             verbose: None,
             save_failures: None,
@@ -788,7 +788,7 @@ mod tests {
     #[test]
     fn test_stop_confidence_from_cli_with_top_heavy() {
         let mut cli = default_cli();
-        cli.comparison_distribution = Some("top-heavy".into());
+        cli.judgement_distribution = Some("top-heavy".into());
         cli.stop_confidence = Some(0.95);
         let cfg = NanojudgeConfig::default();
         let resolved = resolve_config(&cli, &cfg);
@@ -798,7 +798,7 @@ mod tests {
     #[test]
     fn test_stop_confidence_cli_overrides_config() {
         let mut cli = default_cli();
-        cli.comparison_distribution = Some("top-heavy".into());
+        cli.judgement_distribution = Some("top-heavy".into());
         cli.stop_confidence = Some(0.99);
         let cfg = NanojudgeConfig { stop_confidence: Some(0.9), ..Default::default() };
         let resolved = resolve_config(&cli, &cfg);

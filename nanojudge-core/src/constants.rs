@@ -5,7 +5,7 @@ pub const INITIAL_BRADLEY_TERRY_RATING: f64 = 1.0;
 /// Maximum number of nearby items to consider when selecting an opponent.
 ///
 /// When choosing who to pair an item against, we use info-gain weighting:
-/// items with similar ratings produce more informative comparisons.
+/// items with similar ratings produce more informative judgements.
 /// Info-gain drops off sharply with rating distance, so scanning all N items
 /// is wasteful — the far-away ones almost never get selected.
 ///

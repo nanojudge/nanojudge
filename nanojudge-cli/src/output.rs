@@ -11,7 +11,7 @@ struct JsonRankedItem {
     score: f64,
     lower_bound: f64,
     upper_bound: f64,
-    comparisons: usize,
+    edges: usize,
 }
 
 #[derive(Serialize)]
@@ -20,22 +20,22 @@ struct JsonJudgeAnalytics {
     positional_bias: f64,
     positional_bias_ci_low: f64,
     positional_bias_ci_high: f64,
-    num_comparisons: usize,
+    num_edges: usize,
 }
 
 /// One round's interim ranking, emitted only when `--emit-round-rankings` is
-/// set. `order` lists item names best-to-worst after that round; `comparisons`
-/// is the cumulative comparison count through that round.
+/// set. `order` lists item names best-to-worst after that round; `judgements`
+/// is the cumulative successful-judgement count through that round.
 #[derive(Serialize)]
 struct JsonRoundRanking {
-    comparisons: usize,
+    judgements: usize,
     order: Vec<String>,
 }
 
 #[derive(Serialize)]
 struct JsonOutput {
     items: Vec<JsonRankedItem>,
-    total_comparisons: usize,
+    total_judgements: usize,
     rounds: usize,
     positional_bias: f64,
     positional_bias_ci_low: f64,
@@ -50,9 +50,9 @@ struct JsonOutput {
 pub fn print_table(
     rankings: &[RankedItem],
     names: &[String],
-    games_played: &[usize],
+    edge_counts: &[usize],
     rounds: usize,
-    total_comparisons: usize,
+    total_judgements: usize,
     confidence_level: f64,
     judge_analytics: &[JudgeAnalytics],
     judge_names: &HashMap<u64, String>,
@@ -71,37 +71,37 @@ pub fn print_table(
 
     // Header
     println!(
-        " # | {:<name_width$} |   Score | {:>10} | {:>11} | Comparisons | ID",
+        " # | {:<name_width$} |   Score | {:>10} | {:>11} | Edges | ID",
         "Item",
         format!("{} Low", ci_label),
         format!("{} High", ci_label),
     );
     println!(
-        "---|-{}-|---------|------------|-------------|-------------|----",
+        "---|-{}-|---------|------------|-------------|-------|----",
         "-".repeat(name_width)
     );
 
     // Rows
     for (i, r) in rankings.iter().enumerate() {
         let name = &names[r.item as usize];
-        let games = games_played[r.item as usize];
+        let edges = edge_counts[r.item as usize];
         println!(
-            "{:>2} | {:<name_width$} | {:>7.4} | {:>10.2} | {:>11.2} | {:>11} | {:>2}",
+            "{:>2} | {:<name_width$} | {:>7.4} | {:>10.2} | {:>11.2} | {:>5} | {:>2}",
             i + 1,
             name,
             r.score,
             r.lower_bound,
             r.upper_bound,
-            games,
+            edges,
             r.item,
         );
     }
 
     println!(
-        "\n{} items ranked across {} rounds ({} comparisons)",
+        "\n{} items ranked across {} rounds ({} judgements)",
         rankings.len(),
         rounds,
-        total_comparisons,
+        total_judgements,
     );
 
     // Print per-judge analytics
@@ -166,7 +166,7 @@ fn print_judge_panel_analytics(
     // Header
     let mut header = format!(
         "  {:<name_width$}   {:>11}   {:>15}",
-        "Judge", "Comparisons", "Bias (->item1)"
+        "Judge", "Edges", "Bias (->item1)"
     );
     let mut separator = format!(
         "  {:<name_width$}   {:>11}   {:>15}",
@@ -204,7 +204,7 @@ fn print_judge_panel_analytics(
         let mut line = format!(
             "  {:<name_width$}   {:>11}   {:>15}",
             name,
-            format_count(ja.num_comparisons),
+            format_count(ja.num_edges),
             bias_str,
         );
 
@@ -235,7 +235,7 @@ pub fn print_live_table(
     rankings: &[RankedItem],
     names: &[String],
     round: usize,
-    total_comparisons: usize,
+    total_judgements: usize,
     limit: usize,
 ) {
     let show = if limit == 0 || limit >= rankings.len() {
@@ -251,7 +251,7 @@ pub fn print_live_table(
         .unwrap_or(4)
         .max(4);
 
-    eprintln!("\n── Round {} ({} comparisons) ──", round, total_comparisons);
+    eprintln!("\n── Round {} ({} judgements) ──", round, total_judgements);
     for (i, r) in show.iter().enumerate() {
         eprintln!(
             " {:>2}. {:<name_width$}  {:>7.4}  [{:.2}, {:.2}]",
@@ -296,9 +296,9 @@ fn format_count(n: usize) -> String {
 fn build_json(
     rankings: &[RankedItem],
     names: &[String],
-    games_played: &[usize],
+    edge_counts: &[usize],
     rounds: usize,
-    total_comparisons: usize,
+    total_judgements: usize,
     judge_analytics: &[JudgeAnalytics],
     panel_positional_bias: f64,
     panel_positional_bias_ci: (f64, f64),
@@ -314,7 +314,7 @@ fn build_json(
             score: r.score,
             lower_bound: r.lower_bound,
             upper_bound: r.upper_bound,
-            comparisons: games_played[r.item as usize],
+            edges: edge_counts[r.item as usize],
         })
         .collect();
 
@@ -325,15 +325,15 @@ fn build_json(
             positional_bias: ja.positional_bias,
             positional_bias_ci_low: ja.positional_bias_ci.0,
             positional_bias_ci_high: ja.positional_bias_ci.1,
-            num_comparisons: ja.num_comparisons,
+            num_edges: ja.num_edges,
         })
         .collect();
 
     let round_rankings_json = round_rankings.map(|rounds| {
         rounds
             .iter()
-            .map(|(comparisons, order)| JsonRoundRanking {
-                comparisons: *comparisons,
+            .map(|(judgements, order)| JsonRoundRanking {
+                judgements: *judgements,
                 order: order.clone(),
             })
             .collect()
@@ -341,7 +341,7 @@ fn build_json(
 
     let output = JsonOutput {
         items,
-        total_comparisons,
+        total_judgements,
         rounds,
         positional_bias: panel_positional_bias,
         positional_bias_ci_low: panel_positional_bias_ci.0,
@@ -358,9 +358,9 @@ fn build_json(
 pub fn print_json(
     rankings: &[RankedItem],
     names: &[String],
-    games_played: &[usize],
+    edge_counts: &[usize],
     rounds: usize,
-    total_comparisons: usize,
+    total_judgements: usize,
     judge_analytics: &[JudgeAnalytics],
     panel_positional_bias: f64,
     panel_positional_bias_ci: (f64, f64),
@@ -371,9 +371,9 @@ pub fn print_json(
         build_json(
             rankings,
             names,
-            games_played,
+            edge_counts,
             rounds,
-            total_comparisons,
+            total_judgements,
             judge_analytics,
             panel_positional_bias,
             panel_positional_bias_ci,
@@ -420,7 +420,7 @@ mod tests {
             judge_id: 42,
             positional_bias: 0.523,
             positional_bias_ci: (0.481, 0.567),
-            num_comparisons: 30,
+            num_edges: 30,
         }]
     }
 
@@ -431,7 +431,7 @@ mod tests {
         let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
 
         assert_eq!(parsed["rounds"], 10);
-        assert_eq!(parsed["total_comparisons"], 30);
+        assert_eq!(parsed["total_judgements"], 30);
         assert_eq!(parsed["positional_bias"], 0.523);
         assert_eq!(parsed["positional_bias_ci_low"], 0.481);
         assert_eq!(parsed["positional_bias_ci_high"], 0.567);
@@ -452,7 +452,7 @@ mod tests {
         assert_eq!(items[0]["score"], 1.58);
         assert_eq!(items[0]["lower_bound"], 1.20);
         assert_eq!(items[0]["upper_bound"], 1.97);
-        assert_eq!(items[0]["comparisons"], 33); // item id 2 -> games_played[2]
+        assert_eq!(items[0]["edges"], 33); // item id 2 -> edge_counts[2]
 
         assert_eq!(items[2]["rank"], 3);
         assert_eq!(items[2]["name"], "Banana");

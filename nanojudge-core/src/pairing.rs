@@ -1,4 +1,4 @@
-/// Comparison distributions for pairwise comparison tournaments.
+/// Judgement distributions for ranking tournaments.
 ///
 /// Public functions accept `item_ids: &[i64]` and return `Pair` (i64, i64).
 /// Internal functions use `usize` indices for efficient array indexing.
@@ -8,12 +8,12 @@ use rand::seq::SliceRandom;
 
 use crate::constants::OPPONENT_WINDOW_SIZE;
 use crate::seed::make_rng;
-use crate::types::{IndexedPair, IndexedTriple, Pair};
+use crate::types::{IndexedPair, IndexedLineup, Pair};
 
-/// Comparison distribution enum.
+/// Judgement distribution enum.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
-pub enum ComparisonDistribution {
+pub enum JudgementDistribution {
     Uniform,
     TopHeavy,
 }
@@ -73,42 +73,42 @@ fn window_info_gain(
 /// degrading gracefully to a fair coin flip. The +1 / +2 smoothing damps
 /// extreme ratios from small samples.
 fn position_probability(
-    first_count_a: usize, games_a: usize,
-    first_count_b: usize, games_b: usize,
+    first_count_a: usize, edges_a: usize,
+    first_count_b: usize, edges_b: usize,
 ) -> f64 {
-    let ratio_a = (first_count_a as f64 + 1.0) / (games_a as f64 + 2.0);
-    let ratio_b = (first_count_b as f64 + 1.0) / (games_b as f64 + 2.0);
+    let ratio_a = (first_count_a as f64 + 1.0) / (edges_a as f64 + 2.0);
+    let ratio_b = (first_count_b as f64 + 1.0) / (edges_b as f64 + 2.0);
     ratio_b / (ratio_a + ratio_b)
 }
 
-/// Determine the effective comparison distribution to use for this round.
+/// Determine the effective judgement distribution to use for this round.
 ///
 /// Two stages:
-///   Stage 1 (Uniform): uniform pairing until every item has >= min_uniform_games.
+///   Stage 1 (Uniform): uniform pairing until every item has >= min_uniform_edges.
 ///   Stage 2 (Top-heavy): top-heavy pairing thereafter.
 ///
 /// # Panics
 ///
-/// Panics if `games_played` has fewer than `num_items` entries.
-pub fn get_effective_comparison_distribution(
-    user_comparison_distribution: ComparisonDistribution,
+/// Panics if `edge_counts` has fewer than `num_items` entries.
+pub fn get_effective_judgement_distribution(
+    user_judgement_distribution: JudgementDistribution,
     num_items: usize,
-    games_played: &[usize],
-    min_uniform_games: usize,
-) -> ComparisonDistribution {
-    if user_comparison_distribution == ComparisonDistribution::Uniform {
-        return ComparisonDistribution::Uniform;
+    edge_counts: &[usize],
+    min_uniform_edges: usize,
+) -> JudgementDistribution {
+    if user_judgement_distribution == JudgementDistribution::Uniform {
+        return JudgementDistribution::Uniform;
     }
 
-    // Stage 1: uniform until every item has >= min_uniform_games.
-    for &games in games_played.iter().take(num_items) {
-        if games < min_uniform_games {
-            return ComparisonDistribution::Uniform;
+    // Stage 1: uniform until every item has >= min_uniform_edges.
+    for &edges in edge_counts.iter().take(num_items) {
+        if edges < min_uniform_edges {
+            return JudgementDistribution::Uniform;
         }
     }
 
     // Stage 2: top-heavy.
-    ComparisonDistribution::TopHeavy
+    JudgementDistribution::TopHeavy
 }
 
 // ---------------------------------------------------------------------------
@@ -117,14 +117,14 @@ pub fn get_effective_comparison_distribution(
 
 /// Generate uniform pairings for a round.
 ///
-/// `current_ratings[i]`, `first_position_counts[i]` and `games_played[i]` all
+/// `current_ratings[i]`, `item1_edge_counts[i]` and `edge_counts[i]` all
 /// correspond to `item_ids[i]`. Returns pairs of item IDs.
 ///
-/// `games_played` determines the matchmaking stage: with a maximum of 0 games
-/// (round 1) items are paired at random; at 1 game (round 2) nearest-rating
-/// neighbours are paired; from 2 games (round 3+) opponents are drawn from a
+/// `edge_counts` determines the matchmaking stage: with a maximum of 0 edges
+/// (round 1) items are paired at random; at 1 edge (round 2) nearest-rating
+/// neighbours are paired; from 2 edges (round 3+) opponents are drawn from a
 /// rating window weighted by info gain (`sharpness` is the info-gain
-/// exponent). `first_position_counts` balances which item of each pair is
+/// exponent). `item1_edge_counts` balances which item of each pair is
 /// listed first. Callers must pass their real cumulative counts — zeros mean
 /// "round 1" and produce purely random pairs.
 ///
@@ -135,7 +135,7 @@ pub fn get_effective_comparison_distribution(
 /// # Panics
 ///
 /// Panics if `current_ratings`, `current_stds` (when supplied),
-/// `first_position_counts` or `games_played` length does not equal `item_ids`
+/// `item1_edge_counts` or `edge_counts` length does not equal `item_ids`
 /// length.
 pub fn generate_uniform_pairings(
     item_ids: &[i64],
@@ -143,16 +143,16 @@ pub fn generate_uniform_pairings(
     current_ratings: &[f64],
     current_stds: Option<&[f64]>,
     sharpness: f64,
-    first_position_counts: &[usize],
-    games_played: &[usize],
+    item1_edge_counts: &[usize],
+    edge_counts: &[usize],
 ) -> Vec<Pair> {
     let n = item_ids.len();
     assert_eq!(current_ratings.len(), n, "current_ratings length mismatch");
     if let Some(stds) = current_stds {
         assert_eq!(stds.len(), n, "current_stds length mismatch");
     }
-    assert_eq!(first_position_counts.len(), n, "first_position_counts length mismatch");
-    assert_eq!(games_played.len(), n, "games_played length mismatch");
+    assert_eq!(item1_edge_counts.len(), n, "item1_edge_counts length mismatch");
+    assert_eq!(edge_counts.len(), n, "edge_counts length mismatch");
     let mut rng = make_rng(None, crate::seed::SUBSYSTEM_PAIRING);
     let index_pairs = generate_uniform_pairings_indexed(
         n,
@@ -160,8 +160,8 @@ pub fn generate_uniform_pairings(
         current_ratings,
         current_stds,
         sharpness,
-        first_position_counts,
-        games_played,
+        item1_edge_counts,
+        edge_counts,
         &mut rng,
     );
     index_pairs.into_iter().map(|(a, b)| (item_ids[a], item_ids[b])).collect()
@@ -171,10 +171,10 @@ pub fn generate_uniform_pairings(
 ///
 /// item1 of every pair is sampled from the per-item selection weights
 /// `selection_weights[i]` (corresponding to `item_ids[i]`), concentrating
-/// comparisons on the contenders. The opponent (item2) is then chosen by
+/// judgements on the contenders. The opponent (item2) is then chosen by
 /// info-gain matchmaking from a rating window around item1 (using
 /// `current_ratings` and `matchmaking_sharpness`), exactly as uniform pairing
-/// selects opponents. `first_position_counts[i]` and `games_played[i]`
+/// selects opponents. `item1_edge_counts[i]` and `edge_counts[i]`
 /// (cumulative counts for `item_ids[i]`) balance which item of each pair is
 /// listed first. Returns pairs of item IDs.
 ///
@@ -185,7 +185,7 @@ pub fn generate_uniform_pairings(
 /// # Panics
 ///
 /// Panics if `selection_weights`, `current_ratings`, `current_stds` (when
-/// supplied), `first_position_counts` or `games_played` length does not equal
+/// supplied), `item1_edge_counts` or `edge_counts` length does not equal
 /// `item_ids` length, or if the total selection weight is not positive.
 #[allow(clippy::too_many_arguments)]
 pub fn generate_top_heavy_pairings(
@@ -195,12 +195,12 @@ pub fn generate_top_heavy_pairings(
     current_ratings: &[f64],
     current_stds: Option<&[f64]>,
     matchmaking_sharpness: f64,
-    first_position_counts: &[usize],
-    games_played: &[usize],
+    item1_edge_counts: &[usize],
+    edge_counts: &[usize],
 ) -> Vec<Pair> {
     let n = item_ids.len();
-    assert_eq!(first_position_counts.len(), n, "first_position_counts length mismatch");
-    assert_eq!(games_played.len(), n, "games_played length mismatch");
+    assert_eq!(item1_edge_counts.len(), n, "item1_edge_counts length mismatch");
+    assert_eq!(edge_counts.len(), n, "edge_counts length mismatch");
     let mut rng = make_rng(None, crate::seed::SUBSYSTEM_PAIRING);
     let index_pairs = generate_top_heavy_pairings_indexed(
         n,
@@ -209,8 +209,8 @@ pub fn generate_top_heavy_pairings(
         current_ratings,
         current_stds,
         matchmaking_sharpness,
-        first_position_counts,
-        games_played,
+        item1_edge_counts,
+        edge_counts,
         &mut rng,
     );
     index_pairs.into_iter().map(|(a, b)| (item_ids[a], item_ids[b])).collect()
@@ -227,8 +227,8 @@ pub(crate) fn generate_uniform_pairings_indexed(
     current_ratings: &[f64],
     current_stds: Option<&[f64]>,
     sharpness: f64,
-    first_position_counts: &[usize],
-    games_played: &[usize],
+    item1_edge_counts: &[usize],
+    edge_counts: &[usize],
     rng: &mut StdRng,
 ) -> Vec<IndexedPair> {
     let mut pairings: Vec<IndexedPair> = Vec::with_capacity(pairs_count);
@@ -240,13 +240,13 @@ pub(crate) fn generate_uniform_pairings_indexed(
     // Local mutable copies of caller-provided counters. Updated optimistically
     // as positions are assigned within this call so later pairs balance against
     // earlier ones. Discarded at function return — caller state is never mutated.
-    let mut local_first_counts: Vec<usize> = first_position_counts.to_vec();
-    let mut local_games: Vec<usize> = games_played.to_vec();
+    let mut local_first_counts: Vec<usize> = item1_edge_counts.to_vec();
+    let mut local_edge_counts: Vec<usize> = edge_counts.to_vec();
 
     generate_uniform_iteration(
         num_items, current_ratings, current_stds, sharpness, pairs_count,
         &mut pairings, rng,
-        &mut local_first_counts, &mut local_games,
+        &mut local_first_counts, &mut local_edge_counts,
     );
 
     pairings
@@ -262,10 +262,10 @@ fn generate_uniform_iteration(
     pairings: &mut Vec<IndexedPair>,
     rng: &mut impl Rng,
     first_counts: &mut [usize],
-    total_games: &mut [usize],
+    total_edge_counts: &mut [usize],
 ) {
-    // Uniform pairing gives every item one game per round, so the maximum
-    // games-played count equals the number of rounds already completed. That
+    // Uniform pairing gives every item one edge per round, so the maximum
+    // edges-accumulated count equals the number of rounds already completed. That
     // determines how much rating information exists, and therefore which
     // matchmaking strategy makes sense this round:
     //
@@ -276,7 +276,7 @@ fn generate_uniform_iteration(
     //   2+ rounds done (round 3+): richer ratings — info-gain matchmaking, drawing
     //                            each opponent from a rating window weighted toward
     //                            closely-matched (more informative) pairs.
-    let rounds_completed = total_games.iter().copied().max().unwrap_or(0);
+    let rounds_completed = total_edge_counts.iter().copied().max().unwrap_or(0);
     let unoriented: Vec<(usize, usize)> = if rounds_completed == 0 {
         random_pairs(num_items, max_pairs, rng)
     } else if rounds_completed == 1 {
@@ -289,8 +289,8 @@ fn generate_uniform_iteration(
     // first-position counts, then record it.
     for (item1, item2) in unoriented {
         let p = position_probability(
-            first_counts[item1], total_games[item1],
-            first_counts[item2], total_games[item2],
+            first_counts[item1], total_edge_counts[item1],
+            first_counts[item2], total_edge_counts[item2],
         );
         if rng.random::<f64>() < p {
             pairings.push((item1, item2));
@@ -299,8 +299,8 @@ fn generate_uniform_iteration(
             pairings.push((item2, item1));
             first_counts[item2] += 1;
         }
-        total_games[item1] += 1;
-        total_games[item2] += 1;
+        total_edge_counts[item1] += 1;
+        total_edge_counts[item2] += 1;
     }
 }
 
@@ -517,7 +517,7 @@ fn collect_live_window_candidates(
 
     // The fixed window is normally sufficient. In the rare exhausted case,
     // choose the closest remaining rating-order neighbour on either side and
-    // stop as soon as the comparison can be completed.
+    // stop as soon as the judgement can be completed.
     while candidates.len() < minimum {
         let take_left = match (left, right) {
             (Some(left_pos), Some(right_pos)) => {
@@ -553,8 +553,8 @@ pub(crate) fn generate_top_heavy_pairings_indexed(
     current_ratings: &[f64],
     current_stds: Option<&[f64]>,
     matchmaking_sharpness: f64,
-    first_position_counts: &[usize],
-    games_played: &[usize],
+    item1_edge_counts: &[usize],
+    edge_counts: &[usize],
     rng: &mut StdRng,
 ) -> Vec<IndexedPair> {
     if num_items < 2 {
@@ -594,14 +594,14 @@ pub(crate) fn generate_top_heavy_pairings_indexed(
     // Local mutable copies of caller-provided counters. Updated optimistically
     // as positions are assigned within this call so later pairs balance against
     // earlier ones. Discarded at function return — caller state is never mutated.
-    let mut local_first_counts: Vec<usize> = first_position_counts.to_vec();
-    let mut local_games: Vec<usize> = games_played.to_vec();
+    let mut local_first_counts: Vec<usize> = item1_edge_counts.to_vec();
+    let mut local_edge_counts: Vec<usize> = edge_counts.to_vec();
 
     let mut pairs: Vec<IndexedPair> = Vec::with_capacity(pairs_target);
 
     for _ in 0..pairs_target {
         // item1: sampled from the global selection weights, concentrating
-        // comparisons on the contenders.
+        // judgements on the contenders.
         let item1 = weighted_random_select(selection_weights, total_weight, rng);
         let item1_rating = current_ratings[item1];
         let pos1 = sorted_position[item1];
@@ -636,8 +636,8 @@ pub(crate) fn generate_top_heavy_pairings_indexed(
         let item2 = candidates[selected];
 
         let p = position_probability(
-            local_first_counts[item1], local_games[item1],
-            local_first_counts[item2], local_games[item2],
+            local_first_counts[item1], local_edge_counts[item1],
+            local_first_counts[item2], local_edge_counts[item2],
         );
         if rng.random::<f64>() < p {
             pairs.push((item1, item2));
@@ -646,95 +646,95 @@ pub(crate) fn generate_top_heavy_pairings_indexed(
             pairs.push((item2, item1));
             local_first_counts[item2] += 1;
         }
-        local_games[item1] += 1;
-        local_games[item2] += 1;
+        local_edge_counts[item1] += 1;
+        local_edge_counts[item2] += 1;
     }
 
     pairs
 }
 
 // ---------------------------------------------------------------------------
-// Triple generation (3-way comparisons)
+// Three-item lineup generation
 // ---------------------------------------------------------------------------
 //
-// A 3-way comparison shows the judge three items at once. Triple selection
+// A three-item judgement shows the judge one lineup at a time. Lineup selection
 // mirrors pair selection stage-for-stage — random, then nearest-neighbour, then
-// info-gain matchmaking — but groups items in threes. No position orientation
+// info-gain matchmaking — but places items into three-item lineups. No position orientation
 // is assigned here: 3-slot positional bias is not modelled in this version, and
 // the caller randomizes each folded edge's orientation instead.
 
-/// Number of triples in one full round: every item gets compared roughly once
+/// Number of lineups in one full round: every item gets compared roughly once
 /// (integer division drops the 1–2 leftover items, same as `num_items / 2` for
 /// pairs).
-pub fn calculate_triples_for_round(num_items: usize) -> usize {
+pub fn calculate_lineups_for_round(num_items: usize) -> usize {
     num_items / 3
 }
 
-/// Generate uniform triples for a round. Mirrors
-/// `generate_uniform_pairings_indexed`: round 1 (0 games) random triples;
-/// round 2 (1 game) rating-adjacent triples; round 3+ info-gain triples.
-pub(crate) fn generate_uniform_triples_indexed(
+/// Generate uniform lineups for a round. Mirrors
+/// `generate_uniform_pairings_indexed`: round 1 (0 edges) random lineups;
+/// round 2 (1 edge) rating-adjacent lineups; round 3+ info-gain lineups.
+pub(crate) fn generate_uniform_lineups_indexed(
     num_items: usize,
-    triples_count: usize,
+    lineups_count: usize,
     current_ratings: &[f64],
     current_stds: Option<&[f64]>,
     sharpness: f64,
-    games_played: &[usize],
+    edge_counts: &[usize],
     rng: &mut StdRng,
-) -> Vec<IndexedTriple> {
+) -> Vec<IndexedLineup> {
     if num_items < 3 {
         return Vec::new();
     }
-    let rounds_completed = games_played.iter().copied().max().unwrap_or(0);
+    let rounds_completed = edge_counts.iter().copied().max().unwrap_or(0);
     if rounds_completed == 0 {
-        random_triples(num_items, triples_count, rng)
+        random_lineups(num_items, lineups_count, rng)
     } else if rounds_completed == 1 {
-        nearest_neighbour_triples(num_items, current_ratings, triples_count, rng)
+        nearest_neighbour_lineups(num_items, current_ratings, lineups_count, rng)
     } else {
-        info_gain_triples(num_items, current_ratings, current_stds, sharpness, triples_count, rng)
+        info_gain_lineups(num_items, current_ratings, current_stds, sharpness, lineups_count, rng)
     }
 }
 
-/// Round 1: no ratings yet — group items into random triples.
-fn random_triples(num_items: usize, max_triples: usize, rng: &mut impl Rng) -> Vec<IndexedTriple> {
+/// Round 1: no ratings yet — place items into random lineups.
+fn random_lineups(num_items: usize, max_lineups: usize, rng: &mut impl Rng) -> Vec<IndexedLineup> {
     let mut order: Vec<usize> = (0..num_items).collect();
     order.shuffle(rng);
     order
         .chunks_exact(3)
-        .take(max_triples)
+        .take(max_lineups)
         .map(|c| (c[0], c[1], c[2]))
         .collect()
 }
 
-/// Round 2: sort by rating and group adjacent rating-neighbours into triples.
+/// Round 2: sort by rating and place adjacent rating-neighbours into lineups.
 /// Shuffle before the stable sort so equal-rated items order randomly.
-fn nearest_neighbour_triples(
+fn nearest_neighbour_lineups(
     num_items: usize,
     current_ratings: &[f64],
-    max_triples: usize,
+    max_lineups: usize,
     rng: &mut impl Rng,
-) -> Vec<IndexedTriple> {
+) -> Vec<IndexedLineup> {
     let mut pool: Vec<(usize, f64)> = (0..num_items).map(|i| (i, current_ratings[i])).collect();
     pool.shuffle(rng);
     pool.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
     pool.chunks_exact(3)
-        .take(max_triples)
+        .take(max_lineups)
         .map(|c| (c[0].0, c[1].0, c[2].0))
         .collect()
 }
 
-/// Round 3+: info-gain triples. Pick a random unpaired item1, then draw two
+/// Round 3+: info-gain lineups. Pick a random unpaired item1, then draw two
 /// distinct opponents from the rating window around it, each weighted by info
 /// gain so closely-matched (more informative) trios are favoured. All three are
-/// removed once grouped. Mirrors `info_gain_pairs` with two opponent draws.
-fn info_gain_triples(
+/// removed once placed. Mirrors `info_gain_pairs` with two opponent draws.
+fn info_gain_lineups(
     num_items: usize,
     current_ratings: &[f64],
     current_stds: Option<&[f64]>,
     sharpness: f64,
-    max_triples: usize,
+    max_lineups: usize,
     rng: &mut impl Rng,
-) -> Vec<IndexedTriple> {
+) -> Vec<IndexedLineup> {
     let mut sorted_pool: Vec<(usize, f64)> = (0..num_items)
         .map(|i| (i, current_ratings[i]))
         .collect();
@@ -747,9 +747,9 @@ fn info_gain_triples(
     let mut candidates: Vec<usize> = Vec::with_capacity(OPPONENT_WINDOW_SIZE + 2);
     let mut weights: Vec<f64> = Vec::with_capacity(OPPONENT_WINDOW_SIZE + 2);
 
-    let mut triples: Vec<IndexedTriple> = Vec::with_capacity(max_triples);
+    let mut lineups: Vec<IndexedLineup> = Vec::with_capacity(max_lineups);
 
-    for _ in 0..max_triples {
+    for _ in 0..max_lineups {
         if live_positions.len() < 3 {
             break;
         }
@@ -767,7 +767,7 @@ fn info_gain_triples(
 
         // Gather both opponents before selecting either one. The ordinary
         // fixed window is unchanged; only an exhausted window expands far
-        // enough through live rating neighbours to make the triple possible.
+        // enough through live rating neighbours to make the lineup possible.
         collect_live_window_candidates(
             pos1,
             left,
@@ -810,25 +810,25 @@ fn info_gain_triples(
             );
             *picked_pos = pos;
         }
-        triples.push((item1, sorted_pool[picked[0]].0, sorted_pool[picked[1]].0));
+        lineups.push((item1, sorted_pool[picked[0]].0, sorted_pool[picked[1]].0));
     }
 
-    triples
+    lineups
 }
 
-/// Generate top-heavy triples. item1 is sampled from the selection weights
+/// Generate top-heavy lineups. item1 is sampled from the selection weights
 /// (concentrating on contenders); item2 and item3 are two distinct info-gain
 /// opponents from the rating window around item1. Mirrors
 /// `generate_top_heavy_pairings_indexed` with a second opponent draw.
-pub(crate) fn generate_top_heavy_triples_indexed(
+pub(crate) fn generate_top_heavy_lineups_indexed(
     num_items: usize,
-    triples_count: usize,
+    lineups_count: usize,
     selection_weights: &[f64],
     current_ratings: &[f64],
     current_stds: Option<&[f64]>,
     matchmaking_sharpness: f64,
     rng: &mut StdRng,
-) -> Vec<IndexedTriple> {
+) -> Vec<IndexedLineup> {
     if num_items < 3 {
         return Vec::new();
     }
@@ -841,7 +841,7 @@ pub(crate) fn generate_top_heavy_triples_indexed(
     let total_weight: f64 = selection_weights.iter().sum();
     assert!(
         total_weight > 0.0,
-        "top-heavy triple selection requires positive total item-selection weight"
+        "top-heavy lineup selection requires positive total item-selection weight"
     );
 
     let mut sorted_pool: Vec<(usize, f64)> = (0..num_items)
@@ -856,17 +856,17 @@ pub(crate) fn generate_top_heavy_triples_indexed(
     let half_w = OPPONENT_WINDOW_SIZE / 2;
     let n = num_items;
 
-    let mut triples: Vec<IndexedTriple> = Vec::with_capacity(triples_count);
+    let mut lineups: Vec<IndexedLineup> = Vec::with_capacity(lineups_count);
 
-    for _ in 0..triples_count {
+    for _ in 0..lineups_count {
         let item1 = weighted_random_select(selection_weights, total_weight, rng);
         let item1_rating = current_ratings[item1];
         let pos1 = sorted_position[item1];
 
         // Two distinct opponents from the window around item1. `chosen` marks
         // item1 and any already-picked opponent as unavailable within this
-        // triple (sampling item1 is with-replacement across triples, so no
-        // global alive array — exclusion is per-triple).
+        // lineup (sampling item1 is with-replacement across lineups, so no
+        // global alive array — exclusion is per-lineup).
         let mut chosen = vec![false; n];
         chosen[pos1] = true;
         let mut opponents: Vec<usize> = Vec::with_capacity(2);
@@ -884,7 +884,7 @@ pub(crate) fn generate_top_heavy_triples_indexed(
                 }
             }
             // For num_items >= 3 the window always holds two other items.
-            debug_assert!(!candidates.is_empty(), "top-heavy triple window was empty");
+            debug_assert!(!candidates.is_empty(), "top-heavy lineup window was empty");
             let total_candidate_weight: f64 = weights.iter().sum();
             let selected = if total_candidate_weight == 0.0 {
                 rng.random_range(0..candidates.len())
@@ -895,10 +895,10 @@ pub(crate) fn generate_top_heavy_triples_indexed(
             chosen[pos] = true;
             opponents.push(sorted_pool[pos].0);
         }
-        triples.push((item1, opponents[0], opponents[1]));
+        lineups.push((item1, opponents[0], opponents[1]));
     }
 
-    triples
+    lineups
 }
 
 /// Sample an index proportionally to `weights` (non-negative, summing to
@@ -991,24 +991,24 @@ mod tests {
     }
 
     #[test]
-    fn test_effective_comparison_distribution_uniform_user_choice() {
-        let games = vec![10, 10];
-        let result = get_effective_comparison_distribution(ComparisonDistribution::Uniform, 2, &games, 3);
-        assert_eq!(result, ComparisonDistribution::Uniform);
+    fn test_effective_judgement_distribution_uniform_user_choice() {
+        let edges = vec![10, 10];
+        let result = get_effective_judgement_distribution(JudgementDistribution::Uniform, 2, &edges, 3);
+        assert_eq!(result, JudgementDistribution::Uniform);
     }
 
     #[test]
-    fn test_effective_comparison_distribution_uniform_stage() {
-        let games = vec![1, 10]; // Item 0 below minimum
-        let result = get_effective_comparison_distribution(ComparisonDistribution::TopHeavy, 2, &games, 3);
-        assert_eq!(result, ComparisonDistribution::Uniform);
+    fn test_effective_judgement_distribution_uniform_stage() {
+        let edges = vec![1, 10]; // Item 0 below minimum
+        let result = get_effective_judgement_distribution(JudgementDistribution::TopHeavy, 2, &edges, 3);
+        assert_eq!(result, JudgementDistribution::Uniform);
     }
 
     #[test]
-    fn test_effective_comparison_distribution_main_phase() {
-        let games = vec![10, 10];
-        let result = get_effective_comparison_distribution(ComparisonDistribution::TopHeavy, 2, &games, 3);
-        assert_eq!(result, ComparisonDistribution::TopHeavy);
+    fn test_effective_judgement_distribution_main_phase() {
+        let edges = vec![10, 10];
+        let result = get_effective_judgement_distribution(JudgementDistribution::TopHeavy, 2, &edges, 3);
+        assert_eq!(result, JudgementDistribution::TopHeavy);
     }
 
     #[test]
@@ -1124,21 +1124,21 @@ mod tests {
 
     #[test]
     fn test_round_two_pairs_tied_items_randomly() {
-        // Round 2 (every item has exactly 1 game) sorts by rating and pairs
+        // Round 2 (every item has exactly 1 edge) sorts by rating and pairs
         // adjacent neighbours. When ratings are all equal — the binary case
         // where every winner ties and every loser ties — the pairing among the
         // tied items must be random, not a fixed index-order fallback.
         let num_items = 8;
         let ratings = vec![1.0; num_items]; // all tied
         let first_counts = vec![0usize; num_items];
-        let games = vec![1usize; num_items]; // 1 game each => round-2 phase
+        let edges = vec![1usize; num_items]; // 1 edge each => round-2 phase
 
         // Unordered partnerships (sorted pair) for a given seed, so we test who
         // is matched with whom, independent of the separate orientation flip.
         let partnerships = |s: u64| -> Vec<(usize, usize)> {
             let mut rng = make_rng(Some(s), crate::seed::SUBSYSTEM_PAIRING);
             let pairs = generate_uniform_pairings_indexed(
-                num_items, num_items / 2, &ratings, None, 1.0, &first_counts, &games, &mut rng,
+                num_items, num_items / 2, &ratings, None, 1.0, &first_counts, &edges, &mut rng,
             );
             let mut ps: Vec<(usize, usize)> = pairs
                 .into_iter()
@@ -1167,20 +1167,20 @@ mod tests {
 
     #[test]
     fn test_public_uniform_pairings_use_ratings_after_uniform_stage() {
-        // With every item at 2+ games the public wrapper must run info-gain
+        // With every item at 2+ edges the public wrapper must run info-gain
         // matchmaking on the supplied ratings, pairing rating-neighbours.
-        // Regression test for the wrapper hardcoding games_played to zeros,
+        // Regression test for the wrapper hardcoding edge_counts to zeros,
         // which forced the round-1 random branch and made `current_ratings`
         // and `sharpness` dead parameters.
         let item_ids: Vec<i64> = (0..10).collect();
         let ratings: Vec<f64> = (0..10).map(|i| i as f64 * 2.0).collect();
         let first = vec![1usize; 10];
-        let games = vec![2usize; 10];
+        let edges = vec![2usize; 10];
 
         let mut total_gap = 0.0;
         let mut count = 0usize;
         for _ in 0..200 {
-            let pairs = generate_uniform_pairings(&item_ids, 5, &ratings, None, 1.0, &first, &games);
+            let pairs = generate_uniform_pairings(&item_ids, 5, &ratings, None, 1.0, &first, &edges);
             for (a, b) in pairs {
                 total_gap += (ratings[a as usize] - ratings[b as usize]).abs();
                 count += 1;
@@ -1220,7 +1220,7 @@ mod tests {
 
     #[test]
     fn test_position_probability_smoothing_damps_small_samples() {
-        // A has played 1 game and went first. Without smoothing this would be
+        // A has accumulated 1 edge and went first. Without smoothing this would be
         // ratio 1.0; with Laplace smoothing it is 2/3, far from extreme.
         let p = position_probability(1, 1, 0, 0);
         // ratio_A = 2/3, ratio_B = 1/2 → P(A) = (1/2) / (2/3 + 1/2) = 3/7.
@@ -1359,63 +1359,63 @@ mod tests {
         );
     }
 
-    // --- Triple generation tests ---
+    // --- Lineup generation tests ---
 
     #[test]
-    fn test_calculate_triples_for_round() {
-        assert_eq!(calculate_triples_for_round(9), 3);
-        assert_eq!(calculate_triples_for_round(10), 3);
-        assert_eq!(calculate_triples_for_round(3), 1);
-        assert_eq!(calculate_triples_for_round(2), 0);
+    fn test_calculate_lineups_for_round() {
+        assert_eq!(calculate_lineups_for_round(9), 3);
+        assert_eq!(calculate_lineups_for_round(10), 3);
+        assert_eq!(calculate_lineups_for_round(3), 1);
+        assert_eq!(calculate_lineups_for_round(2), 0);
     }
 
-    /// All three members of every triple are distinct.
-    fn assert_triples_distinct(triples: &[IndexedTriple]) {
-        for &(a, b, c) in triples {
-            assert!(a != b && a != c && b != c, "triple ({a},{b},{c}) has a repeat");
+    /// All three members of every lineup are distinct.
+    fn assert_lineups_distinct(lineups: &[IndexedLineup]) {
+        for &(a, b, c) in lineups {
+            assert!(a != b && a != c && b != c, "lineup ({a},{b},{c}) has a repeat");
         }
     }
 
     #[test]
-    fn test_uniform_triples_round1_random_distinct() {
+    fn test_uniform_lineups_round1_random_distinct() {
         let ratings = vec![1.0; 12];
-        let games = vec![0usize; 12]; // round 1
+        let edges = vec![0usize; 12]; // round 1
         let mut rng = make_rng(Some(1), crate::seed::SUBSYSTEM_PAIRING);
-        let triples = generate_uniform_triples_indexed(12, 4, &ratings, None, 1.0, &games, &mut rng);
-        assert_eq!(triples.len(), 4);
-        assert_triples_distinct(&triples);
+        let lineups = generate_uniform_lineups_indexed(12, 4, &ratings, None, 1.0, &edges, &mut rng);
+        assert_eq!(lineups.len(), 4);
+        assert_lineups_distinct(&lineups);
     }
 
     #[test]
-    fn test_uniform_triples_info_gain_stage_distinct() {
+    fn test_uniform_lineups_info_gain_stage_distinct() {
         let ratings: Vec<f64> = (0..12).map(|i| i as f64).collect();
-        let games = vec![2usize; 12]; // round 3+ info-gain stage
+        let edges = vec![2usize; 12]; // round 3+ info-gain stage
         let mut rng = make_rng(Some(2), crate::seed::SUBSYSTEM_PAIRING);
-        let triples = generate_uniform_triples_indexed(12, 4, &ratings, None, 1.0, &games, &mut rng);
-        assert_eq!(triples.len(), 4);
-        assert_triples_distinct(&triples);
+        let lineups = generate_uniform_lineups_indexed(12, 4, &ratings, None, 1.0, &edges, &mut rng);
+        assert_eq!(lineups.len(), 4);
+        assert_lineups_distinct(&lineups);
     }
 
     #[test]
-    fn test_uniform_info_gain_triples_fill_large_rounds() {
+    fn test_uniform_info_gain_lineups_fill_large_rounds() {
         let num_items = 500;
         let ratings: Vec<f64> = (0..num_items).map(|i| i as f64 * 0.01).collect();
 
         for seed in 0..128 {
             let mut rng = make_rng(Some(seed), crate::seed::SUBSYSTEM_PAIRING);
-            let triples =
-                info_gain_triples(num_items, &ratings, None, 1.0, num_items / 3, &mut rng);
+            let lineups =
+                info_gain_lineups(num_items, &ratings, None, 1.0, num_items / 3, &mut rng);
             assert_eq!(
-                triples.len(),
+                lineups.len(),
                 num_items / 3,
-                "short triple round for seed {seed}"
+                "short lineup round for seed {seed}"
             );
 
             let mut seen = vec![false; num_items];
-            for (a, b, c) in triples {
-                assert!(!seen[a], "item {a} was grouped twice for seed {seed}");
-                assert!(!seen[b], "item {b} was grouped twice for seed {seed}");
-                assert!(!seen[c], "item {c} was grouped twice for seed {seed}");
+            for (a, b, c) in lineups {
+                assert!(!seen[a], "item {a} appeared in two lineups for seed {seed}");
+                assert!(!seen[b], "item {b} appeared in two lineups for seed {seed}");
+                assert!(!seen[c], "item {c} appeared in two lineups for seed {seed}");
                 seen[a] = true;
                 seen[b] = true;
                 seen[c] = true;
@@ -1424,27 +1424,27 @@ mod tests {
     }
 
     #[test]
-    fn test_top_heavy_triples_distinct_and_sized() {
+    fn test_top_heavy_lineups_distinct_and_sized() {
         let selection_weights: Vec<f64> = (0..10).map(|i| if i < 3 { 0.8 } else { 0.05 }).collect();
         let ratings: Vec<f64> = (0..10).map(|i| i as f64).collect();
         let mut rng = make_rng(Some(3), crate::seed::SUBSYSTEM_PAIRING);
-        let triples = generate_top_heavy_triples_indexed(10, 5, &selection_weights, &ratings, None, 1.0, &mut rng);
-        assert_eq!(triples.len(), 5);
-        assert_triples_distinct(&triples);
+        let lineups = generate_top_heavy_lineups_indexed(10, 5, &selection_weights, &ratings, None, 1.0, &mut rng);
+        assert_eq!(lineups.len(), 5);
+        assert_lineups_distinct(&lineups);
     }
 
     #[test]
-    fn test_top_heavy_triples_concentrate_on_contenders() {
+    fn test_top_heavy_lineups_concentrate_on_contenders() {
         // Items 0,1,2 hold the weight and share a high rating; the rest are near
-        // zero. Every triple's item1 is a contender, and its info-gain opponents
+        // zero. Every lineup's item1 is a contender, and its info-gain opponents
         // are the nearest in rating (also contenders), so the top three vastly
         // out-appear the tail.
         let selection_weights: Vec<f64> = (0..12).map(|i| if i < 3 { 1.0 } else { 0.0001 }).collect();
         let ratings: Vec<f64> = (0..12).map(|i| if i < 3 { 5.0 } else { 0.0 }).collect();
         let mut rng = make_rng(Some(4), crate::seed::SUBSYSTEM_PAIRING);
-        let triples = generate_top_heavy_triples_indexed(12, 200, &selection_weights, &ratings, None, 1.0, &mut rng);
+        let lineups = generate_top_heavy_lineups_indexed(12, 200, &selection_weights, &ratings, None, 1.0, &mut rng);
         let mut appearances = [0usize; 12];
-        for &(a, b, c) in &triples {
+        for &(a, b, c) in &lineups {
             appearances[a] += 1;
             appearances[b] += 1;
             appearances[c] += 1;
@@ -1455,13 +1455,13 @@ mod tests {
     }
 
     #[test]
-    fn test_triples_empty_below_three_items() {
+    fn test_lineups_empty_below_three_items() {
         let ratings = vec![1.0; 2];
-        let games = vec![0usize; 2];
+        let edges = vec![0usize; 2];
         let mut rng = make_rng(Some(5), crate::seed::SUBSYSTEM_PAIRING);
-        assert!(generate_uniform_triples_indexed(2, 4, &ratings, None, 1.0, &games, &mut rng).is_empty());
+        assert!(generate_uniform_lineups_indexed(2, 4, &ratings, None, 1.0, &edges, &mut rng).is_empty());
         let weights = vec![1.0; 2];
-        assert!(generate_top_heavy_triples_indexed(2, 4, &weights, &ratings, None, 1.0, &mut rng).is_empty());
+        assert!(generate_top_heavy_lineups_indexed(2, 4, &weights, &ratings, None, 1.0, &mut rng).is_empty());
     }
 
     #[test]

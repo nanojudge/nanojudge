@@ -21,7 +21,7 @@ struct Args {
     #[arg(short = 'n', long)]
     items: usize,
 
-    /// Comparison rounds per trial.
+    /// Judgement rounds per trial.
     #[arg(short, long)]
     rounds: usize,
 
@@ -50,9 +50,9 @@ struct Args {
     #[arg(long)]
     seed: Option<u64>,
 
-    /// Comparison distribution: "uniform" or "top-heavy".
+    /// Judgement distribution: "uniform" or "top-heavy".
     #[arg(long)]
-    comparison_distribution: String,
+    judgement_distribution: String,
 
     /// Top-heavy selection sharpness forwarded to the CLI. Omit to use the CLI's
     /// default (0.7).
@@ -74,10 +74,10 @@ struct Args {
     #[arg(long)]
     coverage: Option<f64>,
 
-    /// Target-blend prior pseudo-games forwarded to the CLI. Omit to use the
+    /// Target-blend prior pseudo-edges forwarded to the CLI. Omit to use the
     /// CLI's default (5; 0 disables the blend).
     #[arg(long)]
-    target_prior_games: Option<f64>,
+    target_prior_edges: Option<f64>,
 
     /// Early-stop confidence forwarded to the CLI: end a top-heavy run once
     /// the probability that every item sits on its side of the anchor (the
@@ -87,10 +87,10 @@ struct Args {
     #[arg(long)]
     stop_confidence: Option<f64>,
 
-    /// Minimum uniform-stage games per item forwarded to the CLI, before
+    /// Minimum uniform-stage edges per item forwarded to the CLI, before
     /// top-heavy concentration engages. Omit to use the CLI's default (2).
     #[arg(long)]
-    min_uniform_games: Option<usize>,
+    min_uniform_edges: Option<usize>,
 
     /// Scoring refits per round forwarded to the CLI. 1 (default) refits once
     /// per round; higher values subdivide each top-heavy round into that many
@@ -100,17 +100,17 @@ struct Args {
     refits_per_round: Option<usize>,
 
     /// Number of independent samples used to estimate each verdict-token
-    /// distribution. One comparison still counts as one comparison regardless
-    /// of this value. Default: 1 (a hard judgment).
+    /// distribution. One judgement still counts as one judgement regardless
+    /// of this value. Default: 1 (a hard judgement).
     #[arg(long, default_value_t = 1)]
-    samples_per_comparison: usize,
+    samples_per_judgement: usize,
 
-    /// How many items each judgment compares at once: 2 (pairwise, default) or 3.
-    /// With 3, each LLM call ranks three items; `comparisons` then counts LLM
-    /// calls, so the accuracy-per-comparison curve is directly comparable to
+    /// How many items each judgement compares at once: 2 (pairwise, default) or 3.
+    /// With 3, each LLM call ranks three items; `judgements` then counts LLM
+    /// calls, so the accuracy-per-judgement curve is directly comparable to
     /// pairwise.
     #[arg(long, default_value_t = 2)]
-    items_per_comparison: usize,
+    lineup_size: usize,
 
     /// Path to the nanojudge binary (auto-detected from sibling binary if omitted).
     #[arg(long)]
@@ -196,17 +196,17 @@ struct SharedTrialConfig {
     rounds: usize,
     actual_tau2: f64,
     prior_tau2: Option<f64>,
-    samples_per_comparison: usize,
-    distribution: String,
+    samples_per_judgement: usize,
+    judgement_distribution: String,
     selection_sharpness: Option<f64>,
     anchor_index: Option<f64>,
     cutoff: Option<f64>,
     coverage: Option<f64>,
-    target_prior_games: Option<f64>,
+    target_prior_edges: Option<f64>,
     stop_confidence: Option<f64>,
-    min_uniform_games: Option<usize>,
+    min_uniform_edges: Option<usize>,
     refits_per_round: Option<usize>,
-    items_per_comparison: usize,
+    lineup_size: usize,
     nanojudge_bin: PathBuf,
 }
 
@@ -214,15 +214,15 @@ struct SharedTrialConfig {
 async fn main() {
     let args = Args::parse();
 
-    if args.items_per_comparison != 2 && args.items_per_comparison != 3 {
-        eprintln!("Error: --items-per-comparison must be 2 or 3");
+    if args.lineup_size != 2 && args.lineup_size != 3 {
+        eprintln!("Error: --lineup-size must be 2 or 3");
         std::process::exit(1);
     }
-    if args.samples_per_comparison == 0 {
-        eprintln!("Error: --samples-per-comparison must be at least 1");
+    if args.samples_per_judgement == 0 {
+        eprintln!("Error: --samples-per-judgement must be at least 1");
         std::process::exit(1);
     }
-    let min_items = if args.items_per_comparison == 3 { 3 } else { 2 };
+    let min_items = if args.lineup_size == 3 { 3 } else { 2 };
     if args.items < min_items {
         eprintln!("Error: need at least {min_items} items");
         std::process::exit(1);
@@ -239,8 +239,8 @@ async fn main() {
         eprintln!("Error: --actual-tau2 must be a positive finite number");
         std::process::exit(1);
     }
-    if args.comparison_distribution != "uniform" && args.comparison_distribution != "top-heavy" {
-        eprintln!("Error: --comparison-distribution must be \"uniform\" or \"top-heavy\"");
+    if args.judgement_distribution != "uniform" && args.judgement_distribution != "top-heavy" {
+        eprintln!("Error: --judgement-distribution must be \"uniform\" or \"top-heavy\"");
         std::process::exit(1);
     }
 
@@ -261,7 +261,7 @@ async fn main() {
         std::process::exit(1);
     }
 
-    let comparisons_per_trial = if args.items_per_comparison == 3 {
+    let judgements_per_trial = if args.lineup_size == 3 {
         (args.items / 3) * args.rounds
     } else {
         (args.items / 2) * args.rounds
@@ -271,7 +271,7 @@ async fn main() {
     eprintln!("  Items: {}", args.items);
     eprintln!("  Rounds: {}", args.rounds);
     eprintln!("  Trials: {}", args.trials);
-    eprintln!("  Comparisons per trial: {}", comparisons_per_trial);
+    eprintln!("  Judgements per trial: {}", judgements_per_trial);
     eprintln!("  Actual tau2: {:.3}", args.actual_tau2);
     eprintln!(
         "  Prior tau2: {}",
@@ -280,13 +280,13 @@ async fn main() {
             None => "CLI default (10)".to_string(),
         }
     );
-    eprintln!("  Samples per comparison: {}", args.samples_per_comparison);
-    eprintln!("  Items per comparison: {}", args.items_per_comparison);
+    eprintln!("  Samples per judgement: {}", args.samples_per_judgement);
+    eprintln!("  Items per judgement: {}", args.lineup_size);
     eprintln!("  Report top-K: {}", top_k);
-    eprintln!("  Distribution: {}", args.comparison_distribution);
+    eprintln!("  Distribution: {}", args.judgement_distribution);
     eprintln!(
-        "  Min uniform games: {}",
-        match args.min_uniform_games {
+        "  Min uniform edges: {}",
+        match args.min_uniform_edges {
             Some(n) => n.to_string(),
             None => "CLI default (2)".to_string(),
         }
@@ -309,17 +309,17 @@ async fn main() {
         rounds: args.rounds,
         actual_tau2: args.actual_tau2,
         prior_tau2: args.prior_tau2,
-        samples_per_comparison: args.samples_per_comparison,
-        distribution: args.comparison_distribution.clone(),
+        samples_per_judgement: args.samples_per_judgement,
+        judgement_distribution: args.judgement_distribution.clone(),
         selection_sharpness: args.selection_sharpness,
         anchor_index: args.anchor_index,
         cutoff: args.cutoff,
         coverage: args.coverage,
-        target_prior_games: args.target_prior_games,
+        target_prior_edges: args.target_prior_edges,
         stop_confidence: args.stop_confidence,
-        min_uniform_games: args.min_uniform_games,
+        min_uniform_edges: args.min_uniform_edges,
         refits_per_round: args.refits_per_round,
-        items_per_comparison: args.items_per_comparison,
+        lineup_size: args.lineup_size,
         nanojudge_bin: nanojudge_bin.clone(),
     });
 
@@ -346,17 +346,17 @@ async fn main() {
                 rounds: shared.rounds,
                 actual_tau2: shared.actual_tau2,
                 prior_tau2: shared.prior_tau2,
-                samples_per_comparison: shared.samples_per_comparison,
-                distribution: &shared.distribution,
+                samples_per_judgement: shared.samples_per_judgement,
+                judgement_distribution: &shared.judgement_distribution,
                 selection_sharpness: shared.selection_sharpness,
                 anchor_index: shared.anchor_index,
                 cutoff: shared.cutoff,
                 coverage: shared.coverage,
-                target_prior_games: shared.target_prior_games,
+                target_prior_edges: shared.target_prior_edges,
                 stop_confidence: shared.stop_confidence,
-                min_uniform_games: shared.min_uniform_games,
+                min_uniform_edges: shared.min_uniform_edges,
                 refits_per_round: shared.refits_per_round,
-                items_per_comparison: shared.items_per_comparison,
+                lineup_size: shared.lineup_size,
                 nanojudge_bin: &shared.nanojudge_bin,
             };
             let res = trial::run(&config, trial_seed, top_k, capture_example).await;
@@ -377,7 +377,7 @@ async fn main() {
             Ok(result) => {
                 if args.verbose {
                     eprintln!(
-                        "{}  Trial {:>4}/{}: rho={:.4}  top1-off={:.1}  top{}-off={:.2}  comparisons={}  {:.1}s",
+                        "{}  Trial {:>4}/{}: rho={:.4}  top1-off={:.1}  top{}-off={:.2}  judgements={}  {:.1}s",
                         utc_timestamp(),
                         t + 1,
                         args.trials,
@@ -385,7 +385,7 @@ async fn main() {
                         result.top_1_displacement,
                         top_k,
                         result.top_k_displacement,
-                        result.comparisons,
+                        result.judgements,
                         result.duration.as_secs_f64(),
                     );
                 } else {
@@ -429,7 +429,7 @@ async fn main() {
 // ---------------------------------------------------------------------------
 
 /// Print the mean accuracy metrics after each round, showing how the ranking
-/// converges as comparisons accumulate. Each cell is averaged across all trials.
+/// converges as judgements accumulate. Each cell is averaged across all trials.
 fn print_round_convergence(results: &[trial::TrialResult], top_k: usize) {
     // All trials run the same number of rounds; take the min defensively so a
     // short result can never index out of bounds.
@@ -447,7 +447,7 @@ fn print_round_convergence(results: &[trial::TrialResult], top_k: usize) {
     println!(
         "  {:>5} {:>12} {:>10} {:>10} {:>10}",
         "Round",
-        "Comparisons",
+        "Judgements",
         "rho",
         "Top-1",
         format!("Top-{top_k}"),
@@ -457,14 +457,14 @@ fn print_round_convergence(results: &[trial::TrialResult], top_k: usize) {
         "-----", "-----------", "---", "-----", "-----"
     );
     for r in 0..num_rounds {
-        let comps: Vec<f64> = results.iter().map(|res| res.per_round[r].comparisons as f64).collect();
+        let judgements: Vec<f64> = results.iter().map(|res| res.per_round[r].judgements as f64).collect();
         let rhos: Vec<f64> = results.iter().map(|res| res.per_round[r].spearman_rho).collect();
         let top1: Vec<f64> = results.iter().map(|res| res.per_round[r].top_1_displacement).collect();
         let topk: Vec<f64> = results.iter().map(|res| res.per_round[r].top_k_displacement).collect();
         println!(
             "  {:>5} {:>12} {:>10.6} {:>10.4} {:>10.4}",
             r + 1,
-            mean(&comps) as usize,
+            mean(&judgements) as usize,
             mean(&rhos),
             mean(&top1),
             mean(&topk),

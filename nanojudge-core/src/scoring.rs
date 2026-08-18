@@ -6,7 +6,7 @@ use std::collections::HashMap;
 
 use crate::laplace_bt;
 use crate::types::{
-    ComparisonInput, IdMap, IndexedComparison, JudgeAnalytics, JudgeInfo,
+    Edge, IdMap, IndexedEdge, JudgeAnalytics, JudgeInfo,
     RankedItem, ScoringOptions, ScoringResult,
 };
 
@@ -58,18 +58,18 @@ struct SelectionWeightsOutput {
 /// posterior means sorted descending; fractional values interpolate between
 /// the two adjacent ranks); the anchor itself sits at ratio 1 once the target
 /// blend has converged to the observed anchor (early on, while
-/// `target_prior_games` still pulls the target toward the prior prediction,
+/// `target_prior_edges` still pulls the target toward the prior prediction,
 /// even the anchor can sit below 1). Items whose
 /// ratio is below `selection_cutoff` are dropped to 0, except the two
 /// highest-ratio items, which are always kept so the pairing layer can always
 /// draw two distinct contenders.
 ///
-/// The base weight is then divided by `games_played^selection_coverage` — a
-/// proportional-fair coverage pull that drives each item's cumulative comparison
+/// The base weight is then divided by `edge_counts^selection_coverage` — a
+/// proportional-fair coverage pull that drives each item's cumulative edge
 /// count toward its ratio-implied share (`selection_coverage = 0` disables it, `1`
-/// is standard proportional-fair). `games_played` uses the current cumulative
+/// is standard proportional-fair). `edge_counts` uses the current cumulative
 /// counts, so a resolved item (ratio → 0) sheds its weight rather than carrying
-/// stale "owed" comparisons.
+/// stale "owed" edges.
 ///
 /// Weights are returned unnormalized; the pairing layer normalizes by its
 /// running total.
@@ -77,13 +77,13 @@ struct SelectionWeightsOutput {
 fn compute_selection_weights(
     means: &[f64],
     stds: &[f64],
-    games_played: &[usize],
+    edge_counts: &[usize],
     selection_sharpness: f64,
     anchor_index: f64,
     selection_cutoff: f64,
     selection_coverage: f64,
     prior_tau2: f64,
-    target_prior_games: f64,
+    target_prior_edges: f64,
 ) -> SelectionWeightsOutput {
     let n = means.len();
     if n == 0 {
@@ -97,7 +97,7 @@ fn compute_selection_weights(
 
     // The anchor: the item at rank `anchor_index` when posterior means are
     // sorted descending. Fractional indices interpolate linearly between the
-    // two adjacent ranks — for the anchor's mean, variance, and game count.
+    // two adjacent ranks — for the anchor's mean, variance, and edge count.
     let mut by_mean: Vec<usize> = (0..n).collect();
     by_mean.sort_by(|&a, &b| means[b].partial_cmp(&means[a]).unwrap_or(std::cmp::Ordering::Equal));
     let lo_rank = anchor_index.floor() as usize;
@@ -112,18 +112,18 @@ fn compute_selection_weights(
     };
 
     // The selection target: the reference strength each item's uncertainty
-    // ratio is measured against. The observed anchor is unreliable early — it has few games and,
+    // ratio is measured against. The observed anchor is unreliable early — it has few edges and,
     // in binary mode, wins never pin its magnitude — so blend it with a
     // prior-predicted anchor via a pseudo-count. The prediction is worth
-    // `target_prior_games` games against the anchor's actual game count `g`:
+    // `target_prior_edges` edges against the anchor's actual edge count `g`:
     //   `target = (g·observed_anchor + K·predicted_anchor) / (g + K)`.
-    // `target_prior_games = 0` falls straight back to the observed anchor.
-    let target = if target_prior_games > 0.0 {
+    // `target_prior_edges = 0` falls straight back to the observed anchor.
+    let target = if target_prior_edges > 0.0 {
         let predicted_anchor = predicted_rank_strength(means, prior_tau2, anchor_index);
-        let g_lo = games_played[lo_idx] as f64;
-        let g_hi = games_played[hi_idx] as f64;
+        let g_lo = edge_counts[lo_idx] as f64;
+        let g_hi = edge_counts[hi_idx] as f64;
         let g = g_lo + frac * (g_hi - g_lo);
-        (g * observed_anchor + target_prior_games * predicted_anchor) / (g + target_prior_games)
+        (g * observed_anchor + target_prior_edges * predicted_anchor) / (g + target_prior_edges)
     } else {
         observed_anchor
     };
@@ -131,7 +131,7 @@ fn compute_selection_weights(
     // Uncertainty ratio per item: A = P(item above the anchor) under the
     // difference of the two independent Gaussian summaries — the anchor's own
     // variance widens the split, so a still-uncertain anchor keeps nearby items
-    // in play; the correction fades as the anchor plays games. The ratio
+    // in play; the correction fades as the anchor accumulates edges. The ratio
     // min/max is 1 when the item straddles the anchor and decays toward 0 once
     // it is confidently on either side. max(A, 1−A) >= 0.5, so the division is
     // always safe.
@@ -172,11 +172,11 @@ fn compute_selection_weights(
             } else {
                 0.0
             };
-            // Proportional-fair coverage: divide by games-played^selection_coverage. Guard
-            // the denominator at 1 so an item not yet played doesn't blow up
-            // (the uniform stage guarantees >= min_uniform_games before these
+            // Proportional-fair coverage: divide by edge_count^selection_coverage. Guard
+            // the denominator at 1 so an item with no edges does not blow up
+            // (the uniform stage guarantees >= min_uniform_edges before these
             // weights are actually used for pairing).
-            let served = (games_played[i] as f64).max(1.0);
+            let served = (edge_counts[i] as f64).max(1.0);
             base / served.powf(selection_coverage)
         })
         .collect();
@@ -240,7 +240,7 @@ fn compute_selection_weights(
     SelectionWeightsOutput { weights, partition_log_confidence }
 }
 
-/// Run Laplace Bradley-Terry scoring on pairwise comparison data.
+/// Run Laplace Bradley-Terry scoring on edge data.
 ///
 /// `item_ids` is the full list of item IDs being ranked. The returned
 /// `selection_weights` (when requested) is in the same order as `item_ids`.
@@ -250,13 +250,13 @@ fn compute_selection_weights(
 /// Panics if caller-supplied data violates the input contract:
 /// - `judge_info.judge_ids` is empty (a tournament needs at least one judge)
 /// - `item_ids` contains a duplicate ID
-/// - a comparison references an item ID not present in `item_ids`
-/// - a comparison's `judge_id` is not present in `judge_info.judge_ids`
+/// - an edge references an item ID not present in `item_ids`
+/// - an edge's `judge_id` is not present in `judge_info.judge_ids`
 /// - `options.selection_sharpness` is set and `options.anchor_index` is not
 ///   finite or lies outside `[0, item_ids.len() - 1]`
 pub fn run_scoring(
     item_ids: &[i64],
-    comparisons: &[ComparisonInput],
+    edges: &[Edge],
     options: &ScoringOptions,
     judge_info: &JudgeInfo,
 ) -> ScoringResult {
@@ -274,7 +274,7 @@ pub fn run_scoring(
         judge_id_to_idx.insert(id, idx);
     }
 
-    let indexed = id_map.convert_comparisons(comparisons, &judge_id_to_idx);
+    let indexed = id_map.convert_edges(edges, &judge_id_to_idx);
 
     build_scoring_result(&id_map, num_items, &indexed, options, judge_info)
 }
@@ -347,7 +347,7 @@ fn sigmoid_scalar(x: f64) -> f64 {
 fn build_scoring_result(
     id_map: &IdMap,
     num_items: usize,
-    indexed: &[IndexedComparison],
+    indexed: &[IndexedEdge],
     options: &ScoringOptions,
     judge_info: &JudgeInfo,
 ) -> ScoringResult {
@@ -380,13 +380,13 @@ fn build_scoring_result(
         .collect();
     rankings.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
 
-    // Per-item and per-judge comparison counts.
-    let mut games_per_item = vec![0usize; num_items];
-    let mut comparisons_per_judge = vec![0usize; num_judges];
+    // Per-item and per-judge edge counts.
+    let mut edges_per_item = vec![0usize; num_items];
+    let mut edges_per_judge = vec![0usize; num_judges];
     for &(i, j, _, k, _, _, _) in indexed {
-        games_per_item[i] += 1;
-        games_per_item[j] += 1;
-        comparisons_per_judge[k] += 1;
+        edges_per_item[i] += 1;
+        edges_per_item[j] += 1;
+        edges_per_judge[k] += 1;
     }
 
     // Selection weights reuse the shared Gaussian-area helper on (mean, std).
@@ -394,13 +394,13 @@ fn build_scoring_result(
         compute_selection_weights(
             &fit.means,
             &fit.stds,
-            &games_per_item,
+            &edges_per_item,
             sharpness,
             options.anchor_index,
             options.selection_cutoff,
             options.selection_coverage,
             options.prior_tau2,
-            options.target_prior_games,
+            options.target_prior_edges,
         )
     });
     let (selection_weights, partition_log_confidence) = match selection {
@@ -417,25 +417,25 @@ fn build_scoring_result(
                 judge_id: judge_info.judge_ids[k],
                 positional_bias: sigmoid_scalar(b),
                 positional_bias_ci: (sigmoid_scalar(b - z * s), sigmoid_scalar(b + z * s)),
-                num_comparisons: comparisons_per_judge[k],
+                num_edges: edges_per_judge[k],
             }
         })
         .collect();
 
-    // Panel bias: comparison-count-weighted average of the judges' bias
-    // probabilities (equal weights when there are no comparisons), with the CI
+    // Panel bias: edge-count-weighted average of the judges' bias
+    // probabilities (equal weights when there are no edges), with the CI
     // propagated from the per-judge bias variances via the delta method.
-    let total_comparisons: usize = comparisons_per_judge.iter().sum();
+    let total_edges: usize = edges_per_judge.iter().sum();
     let (panel_positional_bias, panel_var) = if num_judges == 0 {
         (0.5, 0.0)
     } else {
         let mut mean = 0.0;
         let mut var = 0.0;
         for k in 0..num_judges {
-            let w = if total_comparisons == 0 {
+            let w = if total_edges == 0 {
                 1.0 / num_judges as f64
             } else {
-                comparisons_per_judge[k] as f64 / total_comparisons as f64
+                edges_per_judge[k] as f64 / total_edges as f64
             };
             let p = sigmoid_scalar(fit.bias_means[k]);
             mean += w * p;
@@ -484,10 +484,10 @@ mod tests {
 
     /// Returns both position orders for a matchup. In production, the pairing
     /// code's 50/50 coin flip achieves this naturally.
-    fn make_pair(id1: i64, id2: i64, prob: f64) -> [ComparisonInput; 2] {
+    fn make_pair(id1: i64, id2: i64, prob: f64) -> [Edge; 2] {
         [
-            ComparisonInput { slot1: 0, slot2: 1, item1: id1, item2: id2, category_probs: dist(prob), judge_id: 42, weight: 1.0 },
-            ComparisonInput { slot1: 0, slot2: 1, item1: id2, item2: id1, category_probs: dist(1.0 - prob), judge_id: 42, weight: 1.0 },
+            Edge { slot1: 0, slot2: 1, item1: id1, item2: id2, category_probs: dist(prob), judge_id: 42, weight: 1.0 },
+            Edge { slot1: 0, slot2: 1, item1: id2, item2: id1, category_probs: dist(1.0 - prob), judge_id: 42, weight: 1.0 },
         ]
     }
 
@@ -498,7 +498,7 @@ mod tests {
             anchor_index: 0.0,
             selection_cutoff: 0.05,
             selection_coverage: 0.0,
-            target_prior_games: 10.0,
+            target_prior_edges: 10.0,
             regularization_strength: 0.01,
             prior_tau2: 10.0,
             bias_prior_tau2: 2.0,
@@ -509,15 +509,15 @@ mod tests {
     #[test]
     fn test_clear_data_produces_expected_ordering_and_intervals() {
         let item_ids = vec![10, 20, 30];
-        let mut comparisons: Vec<ComparisonInput> = Vec::new();
+        let mut edges: Vec<Edge> = Vec::new();
         for _ in 0..10 {
-            comparisons.extend(make_pair(10, 20, 0.9));
-            comparisons.extend(make_pair(20, 30, 0.9));
-            comparisons.extend(make_pair(10, 30, 0.95));
+            edges.extend(make_pair(10, 20, 0.9));
+            edges.extend(make_pair(20, 30, 0.9));
+            edges.extend(make_pair(10, 30, 0.95));
         }
         let ji = single_judge_info();
 
-        let result = run_scoring(&item_ids, &comparisons, &default_scoring_options(), &ji);
+        let result = run_scoring(&item_ids, &edges, &default_scoring_options(), &ji);
         let order: Vec<i64> = result.rankings.iter().map(|r| r.item).collect();
         assert_eq!(order, vec![10, 20, 30]);
         for r in &result.rankings {
@@ -533,15 +533,15 @@ mod tests {
         // ranked score must equal the item_means entry for that item, and every
         // std must be a usable (finite, positive) value.
         let item_ids = vec![10, 20, 30];
-        let mut comparisons: Vec<ComparisonInput> = Vec::new();
+        let mut edges: Vec<Edge> = Vec::new();
         for _ in 0..10 {
-            comparisons.extend(make_pair(10, 20, 0.9));
-            comparisons.extend(make_pair(20, 30, 0.9));
-            comparisons.extend(make_pair(10, 30, 0.95));
+            edges.extend(make_pair(10, 20, 0.9));
+            edges.extend(make_pair(20, 30, 0.9));
+            edges.extend(make_pair(10, 30, 0.95));
         }
         let ji = single_judge_info();
 
-        let result = run_scoring(&item_ids, &comparisons, &default_scoring_options(), &ji);
+        let result = run_scoring(&item_ids, &edges, &default_scoring_options(), &ji);
         assert_eq!(result.item_means.len(), item_ids.len());
         assert_eq!(result.item_stds.len(), item_ids.len());
         for r in &result.rankings {
@@ -556,7 +556,7 @@ mod tests {
     #[test]
     fn test_bias_prior_direction() {
         // bias_prior > 0.5 means "judges favor the first-listed item". With NO
-        // comparisons the posterior equals the prior, so the reported
+        // edges the posterior equals the prior, so the reported
         // positional bias must land on the same side of 0.5 as the prior.
         // Regression test for a sign flip where the prior was installed as the
         // cutpoint center without negation, inverting its direction.
@@ -576,14 +576,14 @@ mod tests {
     fn test_scoring() {
         let item_ids = vec![100, 200, 300];
         // Clear wins for item 100 (0.95 -> category A).
-        let comparisons: Vec<ComparisonInput> = [
+        let edges: Vec<Edge> = [
             make_pair(100, 200, 0.95),
             make_pair(100, 300, 0.95),
             make_pair(200, 300, 0.7),
         ].into_iter().flatten().collect();
 
         let ji = single_judge_info();
-        let result = run_scoring(&item_ids, &comparisons, &default_scoring_options(), &ji);
+        let result = run_scoring(&item_ids, &edges, &default_scoring_options(), &ji);
 
         assert_eq!(result.rankings.len(), 3);
         assert_eq!(result.rankings[0].item, 100);
@@ -596,7 +596,7 @@ mod tests {
     #[test]
     fn test_scoring_with_selection_weights() {
         let item_ids = vec![1, 2, 3, 4];
-        let comparisons: Vec<ComparisonInput> = [
+        let edges: Vec<Edge> = [
             make_pair(1, 2, 0.9),
             make_pair(1, 3, 0.85),
             make_pair(1, 4, 0.9),
@@ -609,7 +609,7 @@ mod tests {
         let mut opts = default_scoring_options();
         opts.selection_sharpness = Some(0.5);
 
-        let result = run_scoring(&item_ids, &comparisons, &opts, &ji);
+        let result = run_scoring(&item_ids, &edges, &opts, &ji);
 
         let weights = result.selection_weights.expect("selection weights requested");
         assert_eq!(weights.len(), 4);
@@ -636,7 +636,7 @@ mod tests {
         // the whole field, but the top-2 floor must keep two positive weights so
         // a pair can still be drawn.
         let item_ids = vec![1, 2, 3, 4, 5];
-        let comparisons: Vec<ComparisonInput> = [
+        let edges: Vec<Edge> = [
             make_pair(1, 2, 0.99),
             make_pair(1, 3, 0.99),
             make_pair(1, 4, 0.99),
@@ -650,7 +650,7 @@ mod tests {
         opts.selection_sharpness = Some(0.5);
         opts.selection_cutoff = 0.5; // aggressive: only the leader clears it on area
 
-        let result = run_scoring(&item_ids, &comparisons, &opts, &ji);
+        let result = run_scoring(&item_ids, &edges, &opts, &ji);
         let weights = result.selection_weights.unwrap();
         let positive = weights.iter().filter(|&&w| w > 0.0).count();
         assert!(positive >= 2, "expected at least two positive weights, got {positive}");
@@ -659,13 +659,13 @@ mod tests {
     #[test]
     fn test_scoring_with_arbitrary_ids() {
         let item_ids = vec![999, 42, 7777];
-        let comparisons: Vec<ComparisonInput> = [
+        let edges: Vec<Edge> = [
             make_pair(999, 42, 0.8),
             make_pair(42, 7777, 0.7),
         ].into_iter().flatten().collect();
 
         let ji = single_judge_info();
-        let result = run_scoring(&item_ids, &comparisons, &default_scoring_options(), &ji);
+        let result = run_scoring(&item_ids, &edges, &default_scoring_options(), &ji);
 
         let ranked_ids: Vec<i64> = result.rankings.iter().map(|r| r.item).collect();
         assert!(ranked_ids.contains(&999));
@@ -677,12 +677,12 @@ mod tests {
     #[should_panic(expected = "Unknown item ID")]
     fn test_scoring_unknown_id_panics() {
         let item_ids = vec![1, 2, 3];
-        let comparisons = vec![
-            ComparisonInput { slot1: 0, slot2: 1, item1: 1, item2: 99, category_probs: dist(0.8), judge_id: 42, weight: 1.0 },
+        let edges = vec![
+            Edge { slot1: 0, slot2: 1, item1: 1, item2: 99, category_probs: dist(0.8), judge_id: 42, weight: 1.0 },
         ];
 
         let ji = single_judge_info();
-        run_scoring(&item_ids, &comparisons, &default_scoring_options(), &ji);
+        run_scoring(&item_ids, &edges, &default_scoring_options(), &ji);
     }
 
     #[test]
@@ -709,13 +709,13 @@ mod tests {
         let judge_a = 111;
         let judge_b = 222;
 
-        let comparisons = vec![
-            ComparisonInput { slot1: 0, slot2: 1, item1: 100, item2: 200, category_probs: dist(0.9), judge_id: judge_a, weight: 1.0 },
-            ComparisonInput { slot1: 0, slot2: 1, item1: 200, item2: 100, category_probs: dist(0.1), judge_id: judge_a, weight: 1.0 },
-            ComparisonInput { slot1: 0, slot2: 1, item1: 100, item2: 300, category_probs: dist(0.8), judge_id: judge_b, weight: 1.0 },
-            ComparisonInput { slot1: 0, slot2: 1, item1: 300, item2: 100, category_probs: dist(0.2), judge_id: judge_b, weight: 1.0 },
-            ComparisonInput { slot1: 0, slot2: 1, item1: 200, item2: 300, category_probs: dist(0.7), judge_id: judge_a, weight: 1.0 },
-            ComparisonInput { slot1: 0, slot2: 1, item1: 300, item2: 200, category_probs: dist(0.3), judge_id: judge_b, weight: 1.0 },
+        let edges = vec![
+            Edge { slot1: 0, slot2: 1, item1: 100, item2: 200, category_probs: dist(0.9), judge_id: judge_a, weight: 1.0 },
+            Edge { slot1: 0, slot2: 1, item1: 200, item2: 100, category_probs: dist(0.1), judge_id: judge_a, weight: 1.0 },
+            Edge { slot1: 0, slot2: 1, item1: 100, item2: 300, category_probs: dist(0.8), judge_id: judge_b, weight: 1.0 },
+            Edge { slot1: 0, slot2: 1, item1: 300, item2: 100, category_probs: dist(0.2), judge_id: judge_b, weight: 1.0 },
+            Edge { slot1: 0, slot2: 1, item1: 200, item2: 300, category_probs: dist(0.7), judge_id: judge_a, weight: 1.0 },
+            Edge { slot1: 0, slot2: 1, item1: 300, item2: 200, category_probs: dist(0.3), judge_id: judge_b, weight: 1.0 },
         ];
 
         let ji = JudgeInfo {
@@ -723,13 +723,13 @@ mod tests {
             logprobs_mode: true,
         };
 
-        let result = run_scoring(&item_ids, &comparisons, &default_scoring_options(), &ji);
+        let result = run_scoring(&item_ids, &edges, &default_scoring_options(), &ji);
 
         assert_eq!(result.rankings.len(), 3);
         assert_eq!(result.judge_analytics.len(), 2);
         assert_eq!(result.judge_analytics[0].judge_id, judge_a);
         assert_eq!(result.judge_analytics[1].judge_id, judge_b);
-        assert_eq!(result.judge_analytics[0].num_comparisons + result.judge_analytics[1].num_comparisons, 6);
+        assert_eq!(result.judge_analytics[0].num_edges + result.judge_analytics[1].num_edges, 6);
     }
 
     #[test]
@@ -737,13 +737,13 @@ mod tests {
         // With one judge the panel aggregate is exactly that judge's estimate
         // and transformed-Gaussian interval.
         let item_ids = vec![100, 200, 300];
-        let comparisons: Vec<ComparisonInput> = [
+        let edges: Vec<Edge> = [
             make_pair(100, 200, 0.9),
             make_pair(200, 300, 0.7),
         ].into_iter().flatten().collect();
 
         let ji = single_judge_info();
-        let result = run_scoring(&item_ids, &comparisons, &default_scoring_options(), &ji);
+        let result = run_scoring(&item_ids, &edges, &default_scoring_options(), &ji);
 
         let ja = &result.judge_analytics[0];
         assert!((result.panel_positional_bias - ja.positional_bias).abs() < 1e-12);
@@ -756,11 +756,11 @@ mod tests {
         let judge_a = 111;
         let judge_b = 222;
 
-        let comparisons = vec![
-            ComparisonInput { slot1: 0, slot2: 1, item1: 100, item2: 200, category_probs: dist(0.9), judge_id: judge_a, weight: 1.0 },
-            ComparisonInput { slot1: 0, slot2: 1, item1: 200, item2: 100, category_probs: dist(0.1), judge_id: judge_a, weight: 1.0 },
-            ComparisonInput { slot1: 0, slot2: 1, item1: 100, item2: 300, category_probs: dist(0.8), judge_id: judge_b, weight: 1.0 },
-            ComparisonInput { slot1: 0, slot2: 1, item1: 300, item2: 100, category_probs: dist(0.2), judge_id: judge_b, weight: 1.0 },
+        let edges = vec![
+            Edge { slot1: 0, slot2: 1, item1: 100, item2: 200, category_probs: dist(0.9), judge_id: judge_a, weight: 1.0 },
+            Edge { slot1: 0, slot2: 1, item1: 200, item2: 100, category_probs: dist(0.1), judge_id: judge_a, weight: 1.0 },
+            Edge { slot1: 0, slot2: 1, item1: 100, item2: 300, category_probs: dist(0.8), judge_id: judge_b, weight: 1.0 },
+            Edge { slot1: 0, slot2: 1, item1: 300, item2: 100, category_probs: dist(0.2), judge_id: judge_b, weight: 1.0 },
         ];
 
         let ji = JudgeInfo {
@@ -768,7 +768,7 @@ mod tests {
             logprobs_mode: true,
         };
 
-        let result = run_scoring(&item_ids, &comparisons, &default_scoring_options(), &ji);
+        let result = run_scoring(&item_ids, &edges, &default_scoring_options(), &ji);
 
         let (lo, hi) = result.panel_positional_bias_ci;
         assert!(lo <= result.panel_positional_bias && result.panel_positional_bias <= hi);
@@ -799,9 +799,9 @@ mod tests {
         // with distance below the leader.
         let means = vec![2.0, 1.5, 1.0, 0.0];
         let stds = vec![0.5, 0.5, 0.5, 0.5];
-        let games = vec![10, 10, 10, 10];
+        let edges = vec![10, 10, 10, 10];
         // sharpness 1, no cutoff, no coverage pull → pure ratio.
-        let w = compute_selection_weights(&means, &stds, &games, 1.0, 0.0, 0.0, 0.0, 10.0, 0.0).weights;
+        let w = compute_selection_weights(&means, &stds, &edges, 1.0, 0.0, 0.0, 0.0, 10.0, 0.0).weights;
         assert!((w[0] - 1.0).abs() < 1e-6, "leader ratio should be 1, got {}", w[0]);
         assert!(w[0] > w[1] && w[1] > w[2] && w[2] > w[3]);
     }
@@ -813,10 +813,10 @@ mod tests {
         // rounds all uncertainty ratios to zero. Selection must remain defined.
         let means = vec![100.0, 0.0, -100.0];
         let stds = vec![0.01, 0.01, 0.01];
-        let games = vec![10, 10, 10];
+        let edges = vec![10, 10, 10];
 
         let out = compute_selection_weights(
-            &means, &stds, &games, 1.0, 0.5, 0.0, 0.0, 10.0, 0.0,
+            &means, &stds, &edges, 1.0, 0.5, 0.0, 0.0, 10.0, 0.0,
         );
 
         assert_eq!(out.weights, vec![1.0, 1.0, 1.0]);
@@ -826,8 +826,8 @@ mod tests {
     fn test_target_blend_pulls_toward_prediction_early_then_observed() {
         // 50 items whose observed top (0.5) is modest, but the strength prior
         // (tau2 = 10 → σ₀ ≈ 3.16) predicts a much higher top over 50 draws. When
-        // the leader has few games the prediction dominates the target, so even
-        // the leader sits confidently below it (ratio ≪ 1). As the leader's game
+        // the leader has few edges the prediction dominates the target, so even
+        // the leader sits confidently below it (ratio ≪ 1). As the leader's edge
         // count grows the observed top takes over, the leader straddles the
         // target again, and its ratio returns toward 1.
         let n = 50;
@@ -836,21 +836,21 @@ mod tests {
         let stds = vec![1.0; n];
         let prior_tau2 = 10.0;
 
-        // Few games on the leader → prediction-dominated target → ratio ≪ 1.
-        let mut games_few = vec![10usize; n];
-        games_few[0] = 2;
-        let w_early = compute_selection_weights(&means, &stds, &games_few, 1.0, 0.0, 0.0, 0.0, prior_tau2, 10.0).weights;
+        // Few edges on the leader → prediction-dominated target → ratio ≪ 1.
+        let mut edges_few = vec![10usize; n];
+        edges_few[0] = 2;
+        let w_early = compute_selection_weights(&means, &stds, &edges_few, 1.0, 0.0, 0.0, 0.0, prior_tau2, 10.0).weights;
         assert!(w_early[0] < 0.45, "early: leader ratio should be pulled well below 1, got {}", w_early[0]);
 
-        // Many games on the leader → observed-dominated target → ratio near 1.
-        let mut games_many = vec![10usize; n];
-        games_many[0] = 1000;
-        let w_late = compute_selection_weights(&means, &stds, &games_many, 1.0, 0.0, 0.0, 0.0, prior_tau2, 10.0).weights;
+        // Many edges on the leader → observed-dominated target → ratio near 1.
+        let mut edges_many = vec![10usize; n];
+        edges_many[0] = 1000;
+        let w_late = compute_selection_weights(&means, &stds, &edges_many, 1.0, 0.0, 0.0, 0.0, prior_tau2, 10.0).weights;
         assert!(w_late[0] > 0.8, "late: leader ratio should approach 1, got {}", w_late[0]);
         assert!(w_late[0] > w_early[0]);
 
-        // Blend disabled (prior games = 0) → leader exactly at ratio 1 regardless of games.
-        let w_off = compute_selection_weights(&means, &stds, &games_few, 1.0, 0.0, 0.0, 0.0, prior_tau2, 0.0).weights;
+        // Blend disabled (prior edges = 0) → leader exactly at ratio 1 regardless of edges.
+        let w_off = compute_selection_weights(&means, &stds, &edges_few, 1.0, 0.0, 0.0, 0.0, prior_tau2, 0.0).weights;
         assert!((w_off[0] - 1.0).abs() < 1e-8, "blend off: leader ratio should be 1, got {}", w_off[0]);
     }
 
@@ -863,8 +863,8 @@ mod tests {
         // is the pure observed anchor.
         let means = vec![2.0, 1.5, 1.0, 0.0];
         let stds = vec![0.5, 0.5, 0.5, 0.5];
-        let games = vec![10, 10, 10, 10];
-        let w = compute_selection_weights(&means, &stds, &games, 1.0, 1.0, 0.0, 0.0, 10.0, 0.0).weights;
+        let edges = vec![10, 10, 10, 10];
+        let w = compute_selection_weights(&means, &stds, &edges, 1.0, 1.0, 0.0, 0.0, 10.0, 0.0).weights;
         assert!((w[1] - 1.0).abs() < 1e-6, "anchor (rank 1) ratio should be 1, got {}", w[1]);
         assert!(w[1] > w[0], "anchor should outweigh the confident leader");
         assert!(
@@ -884,15 +884,15 @@ mod tests {
         // every weight lies strictly between its anchor-0 and anchor-1 weights.
         let means = vec![2.0, 1.0, 1.5, 0.0];
         let stds = vec![0.5, 0.5, 0.5, 0.5];
-        let games = vec![10, 10, 10, 10];
-        let w_mid = compute_selection_weights(&means, &stds, &games, 1.0, 0.5, 0.0, 0.0, 10.0, 0.0).weights;
+        let edges = vec![10, 10, 10, 10];
+        let w_mid = compute_selection_weights(&means, &stds, &edges, 1.0, 0.5, 0.0, 0.0, 10.0, 0.0).weights;
         let z = 0.25 / 0.5_f64.sqrt();
         let expected = normal_cdf(-z) / normal_cdf(z);
         assert!((w_mid[0] - expected).abs() < 1e-6, "leader ratio should be Φ(−z)/Φ(z), got {}", w_mid[0]);
         assert!((w_mid[2] - expected).abs() < 1e-6, "rank-1 ratio should be Φ(−z)/Φ(z), got {}", w_mid[2]);
 
-        let w0 = compute_selection_weights(&means, &stds, &games, 1.0, 0.0, 0.0, 0.0, 10.0, 0.0).weights;
-        let w1 = compute_selection_weights(&means, &stds, &games, 1.0, 1.0, 0.0, 0.0, 10.0, 0.0).weights;
+        let w0 = compute_selection_weights(&means, &stds, &edges, 1.0, 0.0, 0.0, 0.0, 10.0, 0.0).weights;
+        let w1 = compute_selection_weights(&means, &stds, &edges, 1.0, 1.0, 0.0, 0.0, 10.0, 0.0).weights;
         for i in 0..means.len() {
             assert!(
                 w_mid[i] > w0[i].min(w1[i]) && w_mid[i] < w0[i].max(w1[i]),
@@ -908,8 +908,8 @@ mod tests {
         // split Φ((mean − target)/std) — the pre-integration formula.
         let means = vec![2.0, 1.0, 0.0];
         let stds = vec![0.0, 0.8, 0.4]; // anchor (rank 0) is a point mass
-        let games = vec![10, 10, 10];
-        let w = compute_selection_weights(&means, &stds, &games, 1.0, 0.0, 0.0, 0.0, 10.0, 0.0).weights;
+        let edges = vec![10, 10, 10];
+        let w = compute_selection_weights(&means, &stds, &edges, 1.0, 0.0, 0.0, 0.0, 10.0, 0.0).weights;
         assert!((w[0] - 1.0).abs() < 1e-12, "anchor ratio should be 1, got {}", w[0]);
         for i in 1..3 {
             let a = normal_cdf((means[i] - means[0]) / stds[i]);
@@ -929,12 +929,12 @@ mod tests {
         // one, so its ratio must rise with the anchor's std — and anneal back
         // as the anchor tightens. The anchor itself stays at ratio 1.
         let means = vec![2.0, 0.5, 0.0];
-        let games = vec![10, 10, 10];
+        let edges = vec![10, 10, 10];
         let tight = compute_selection_weights(
-            &means, &[0.1, 0.5, 0.5], &games, 1.0, 0.0, 0.0, 0.0, 10.0, 0.0,
+            &means, &[0.1, 0.5, 0.5], &edges, 1.0, 0.0, 0.0, 0.0, 10.0, 0.0,
         ).weights;
         let loose = compute_selection_weights(
-            &means, &[1.5, 0.5, 0.5], &games, 1.0, 0.0, 0.0, 0.0, 10.0, 0.0,
+            &means, &[1.5, 0.5, 0.5], &edges, 1.0, 0.0, 0.0, 0.0, 10.0, 0.0,
         ).weights;
         assert!((tight[0] - 1.0).abs() < 1e-6, "tight anchor ratio should be 1, got {}", tight[0]);
         assert!((loose[0] - 1.0).abs() < 1e-6, "loose anchor ratio should be 1, got {}", loose[0]);
@@ -952,8 +952,8 @@ mod tests {
         // the other items. Blend disabled so the target is the anchor mean.
         let means = vec![2.0, 1.0, 0.0];
         let stds = vec![0.5, 0.5, 0.5];
-        let games = vec![10, 10, 10];
-        let out = compute_selection_weights(&means, &stds, &games, 1.0, 0.0, 0.0, 0.0, 10.0, 0.0);
+        let edges = vec![10, 10, 10];
+        let out = compute_selection_weights(&means, &stds, &edges, 1.0, 0.0, 0.0, 0.0, 10.0, 0.0);
         let spread = (0.25_f64 + 0.25).sqrt();
         let p1 = normal_cdf((2.0 - 1.0) / spread); // item 1's favored-side mass
         let p2 = normal_cdf((2.0 - 0.0) / spread); // item 2's favored-side mass
@@ -979,8 +979,8 @@ mod tests {
         // statistic and keep the stop from firing.
         let means = vec![2.0, 1.5, -3.0];
         let stds = vec![0.5, 0.5, 0.5];
-        let games = vec![10, 10, 10];
-        let out = compute_selection_weights(&means, &stds, &games, 1.0, 0.5, 0.0, 0.0, 10.0, 0.0);
+        let edges = vec![10, 10, 10];
+        let out = compute_selection_weights(&means, &stds, &edges, 1.0, 0.5, 0.0, 0.0, 10.0, 0.0);
         let target = 1.75; // midpoint of the two anchor-rank means
         let spread = (0.25_f64 + 0.25).sqrt();
         let p_neighbour = normal_cdf(0.25 / spread); // each neighbour, ±0.25 from the midpoint
@@ -1005,8 +1005,8 @@ mod tests {
         // midpoint boundary.
         let means = vec![1.0, 0.0];
         let stds = vec![0.5, 0.5];
-        let games = vec![10, 10];
-        let out = compute_selection_weights(&means, &stds, &games, 1.0, 0.5, 0.0, 0.0, 10.0, 0.0);
+        let edges = vec![10, 10];
+        let out = compute_selection_weights(&means, &stds, &edges, 1.0, 0.5, 0.0, 0.0, 10.0, 0.0);
         let spread = (0.25_f64 + 0.25).sqrt();
         let p = normal_cdf(0.5 / spread); // each item, ±0.5 from the midpoint
         let expected = 2.0 * p.ln();
@@ -1033,9 +1033,9 @@ mod tests {
         let mut means = vec![0.0; n];
         means[0] = 0.5; // modest observed leader, far below the predicted max
         let stds = vec![1.0; n];
-        let mut games = vec![10usize; n];
-        games[0] = 2; // few anchor games → blend dominated by the prediction
-        let out = compute_selection_weights(&means, &stds, &games, 1.0, 0.0, 0.0, 0.0, 10.0, 10.0);
+        let mut edges = vec![10usize; n];
+        edges[0] = 2; // few anchor edges → blend dominated by the prediction
+        let out = compute_selection_weights(&means, &stds, &edges, 1.0, 0.0, 0.0, 0.0, 10.0, 10.0);
         // Selection sees everyone (leader included) below the blended target.
         assert!(out.weights[0] < 0.45, "sanity: blend should crush the leader's weight, got {}", out.weights[0]);
         // The stopper sees items 1..n straddling the observed anchor (gap 0.5,
@@ -1070,8 +1070,8 @@ mod tests {
     fn test_anchor_index_beyond_last_item_panics() {
         let means = vec![1.0, 0.0];
         let stds = vec![0.5, 0.5];
-        let games = vec![10, 10];
-        compute_selection_weights(&means, &stds, &games, 1.0, 1.5, 0.0, 0.0, 10.0, 0.0);
+        let edges = vec![10, 10];
+        compute_selection_weights(&means, &stds, &edges, 1.0, 1.5, 0.0, 0.0, 10.0, 0.0);
     }
 
     #[test]
@@ -1079,9 +1079,9 @@ mod tests {
         // Lower sharpness compresses the leader-to-tail ratio.
         let means = vec![2.0, 1.0];
         let stds = vec![1.0, 1.0];
-        let games = vec![10, 10];
-        let sharp = compute_selection_weights(&means, &stds, &games, 1.0, 0.0, 0.0, 0.0, 10.0, 0.0).weights;
-        let soft = compute_selection_weights(&means, &stds, &games, 0.5, 0.0, 0.0, 0.0, 10.0, 0.0).weights;
+        let edges = vec![10, 10];
+        let sharp = compute_selection_weights(&means, &stds, &edges, 1.0, 0.0, 0.0, 0.0, 10.0, 0.0).weights;
+        let soft = compute_selection_weights(&means, &stds, &edges, 0.5, 0.0, 0.0, 0.0, 10.0, 0.0).weights;
         let ratio_sharp = sharp[0] / sharp[1];
         let ratio_soft = soft[0] / soft[1];
         assert!(ratio_soft < ratio_sharp, "lower sharpness should flatten the ratio");
@@ -1090,22 +1090,22 @@ mod tests {
     #[test]
     fn test_compute_selection_weights_coverage_pull() {
         // Two items with identical posteriors (so identical area), but one has
-        // been played far more. With coverage = 0 their weights match; with
-        // coverage > 0 the under-played item is boosted above the over-played one.
+        // been accumulated far more. With coverage = 0 their weights match; with
+        // coverage > 0 the under-accumulated item is boosted above the over-accumulated one.
         let means = vec![1.0, 1.0];
         let stds = vec![1.0, 1.0];
-        let games = vec![2, 50]; // item 0 under-served, item 1 over-served
+        let edges = vec![2, 50]; // item 0 under-served, item 1 over-served
 
-        let no_pull = compute_selection_weights(&means, &stds, &games, 1.0, 0.0, 0.0, 0.0, 10.0, 0.0).weights;
-        assert!((no_pull[0] - no_pull[1]).abs() < 1e-12, "coverage 0 should ignore games");
+        let no_pull = compute_selection_weights(&means, &stds, &edges, 1.0, 0.0, 0.0, 0.0, 10.0, 0.0).weights;
+        assert!((no_pull[0] - no_pull[1]).abs() < 1e-12, "coverage 0 should ignore edges");
 
-        let pull = compute_selection_weights(&means, &stds, &games, 1.0, 0.0, 0.0, 1.0, 10.0, 0.0).weights;
+        let pull = compute_selection_weights(&means, &stds, &edges, 1.0, 0.0, 0.0, 1.0, 10.0, 0.0).weights;
         assert!(
             pull[0] > pull[1],
             "under-served item should outweigh over-served one under coverage pull: {} vs {}",
             pull[0], pull[1]
         );
-        // Proportional-fair (coverage 1): weight ratio should be the inverse game
+        // Proportional-fair (coverage 1): weight ratio should be the inverse edge
         // ratio, i.e. 50/2 = 25.
         assert!(((pull[0] / pull[1]) - 25.0).abs() < 1e-6);
     }
@@ -1113,7 +1113,7 @@ mod tests {
     #[test]
     fn test_no_logprobs_scoring() {
         let item_ids = vec![100, 200, 300];
-        let comparisons: Vec<ComparisonInput> = [
+        let edges: Vec<Edge> = [
             make_pair(100, 200, 0.9),
             make_pair(200, 300, 0.7),
         ].into_iter().flatten().collect();
@@ -1123,7 +1123,7 @@ mod tests {
             logprobs_mode: false,
         };
 
-        let result = run_scoring(&item_ids, &comparisons, &default_scoring_options(), &ji);
+        let result = run_scoring(&item_ids, &edges, &default_scoring_options(), &ji);
 
         assert_eq!(result.rankings.len(), 3);
         assert_eq!(result.judge_analytics.len(), 1);

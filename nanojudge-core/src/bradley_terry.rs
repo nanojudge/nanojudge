@@ -20,7 +20,7 @@ pub struct BradleyTerry {
 }
 
 impl BradleyTerry {
-    /// Build the wins table from `(item1_idx, item2_idx, item1_win_probability)` triples.
+    /// Build the wins table from `(item1_idx, item2_idx, item1_win_probability)` lineups.
     ///
     /// # Panics
     ///
@@ -98,10 +98,10 @@ impl BradleyTerry {
 
                 let score_j = self.scores[j];
                 let wins_j_to_i = self.get_wins(j, i);
-                let total_games = wins_i_to_j + wins_j_to_i;
+                let total_outcomes = wins_i_to_j + wins_j_to_i;
 
-                if total_games > 0.0 && (score_i + score_j) > 0.0 {
-                    denominator += total_games / (score_i + score_j);
+                if total_outcomes > 0.0 && (score_i + score_j) > 0.0 {
+                    denominator += total_outcomes / (score_i + score_j);
                 }
             }
 
@@ -182,7 +182,7 @@ impl BradleyTerry {
 mod tests {
     use super::*;
 
-    fn make_comp(i1: usize, i2: usize, prob: f64) -> (usize, usize, f64) {
+    fn make_edge(i1: usize, i2: usize, prob: f64) -> (usize, usize, f64) {
         (i1, i2, prob)
     }
 
@@ -190,9 +190,9 @@ mod tests {
     fn test_basic_ranking() {
         // 3 items: 0=A, 1=B, 2=C
         let results = vec![
-            make_comp(0, 1, 0.9), // A strongly beats B
-            make_comp(0, 2, 0.8), // A beats C
-            make_comp(1, 2, 0.7), // B beats C
+            make_edge(0, 1, 0.9), // A strongly beats B
+            make_edge(0, 2, 0.8), // A beats C
+            make_edge(1, 2, 0.7), // B beats C
         ];
 
         let mut bt = BradleyTerry::new(3, &results, 0.01);
@@ -205,7 +205,7 @@ mod tests {
     }
 
     #[test]
-    fn test_no_comparisons_equal_scores() {
+    fn test_no_edges_equal_scores() {
         let results: Vec<(usize, usize, f64)> = vec![];
 
         let mut bt = BradleyTerry::new(2, &results, 0.01);
@@ -213,12 +213,12 @@ mod tests {
 
         let scores = bt.real_scores();
         let diff = (scores[0] - scores[1]).abs();
-        assert!(diff < 0.01, "Scores should be nearly equal with no comparisons");
+        assert!(diff < 0.01, "Scores should be nearly equal with no edges");
     }
 
     #[test]
     fn test_geometric_mean_normalization() {
-        let results = vec![make_comp(0, 1, 0.7)];
+        let results = vec![make_edge(0, 1, 0.7)];
 
         let mut bt = BradleyTerry::new(2, &results, 0.01);
         bt.calculate_scores(30);

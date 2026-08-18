@@ -2,7 +2,7 @@
 
 NanoJudge quantifies the relative strengths of arbitrary items under a criterion you define, using LLMs as judges. Provide the criterion (e.g., "Which is healthier?") and your item list of any length (e.g., "Eggs", "Butter", "Spinach", ...), and get a ranking with confidence intervals.
 
-Instead of overwhelming an LLM with one massive prompt, NanoJudge breaks the task down into a series of head-to-head matchups. Operating like an intelligent matchmaking league, it adaptively pairs items of similar strength against each other as the results come in to efficiently produce an accurate leaderboard. These individual wins and losses are fed into an Elo-style rating system, producing a transparent ranking, all backed by AI explanations.
+Instead of overwhelming an LLM with one massive prompt, NanoJudge breaks the task down into a series of small lineup judgements. Operating like an intelligent matchmaking league, it adaptively places similarly strong items into lineups as results come in, efficiently producing an accurate leaderboard. The resulting edges are fed into an Elo-style rating system, producing a transparent ranking, all backed by AI explanations.
 
 Works with any OpenAI-compatible API endpoint.
 
@@ -45,7 +45,7 @@ temperature = 1.0
 concurrency = 5
 ```
 
-Each `[[judge]]` block defines a judge in the panel. Comparisons are distributed across judges according to their `weight`. All judges share the same `logprobs` mode.
+Each `[[judge]]` block defines a judge in the panel. Judgements are distributed across judges according to their `weight`. All judges share the same `logprobs` mode.
 
 Then run:
 
@@ -75,42 +75,42 @@ CLI flags like `--rounds` override config file values.
 Output with criterion "Which of these fruits is healthiest?":
 
 ```
- # | Item          |   Score | 95% CI Low | 95% CI High | Comparisons | ID
----|---------------|---------|------------|-------------|-------------|----
- 1 | guava         |  6.0797 |       5.54 |        6.73 |          13 | 11
- 2 | raspberries   |  5.3125 |       4.73 |        5.91 |          13 | 14
- 3 | blueberries   |  5.2954 |       4.72 |        5.85 |          11 |  1
- 4 | kiwi          |  3.5773 |       3.02 |        4.15 |          13 |  4
- 5 | pomegranate   |  2.9892 |       2.41 |        3.51 |          13 |  5
- 6 | passion fruit |  2.4649 |       1.90 |        2.99 |          13 |  8
- 7 | mango         |  1.2804 |       0.67 |        1.90 |          12 |  0
- 8 | persimmon     |  0.7152 |       0.17 |        1.21 |          14 | 15
- 9 | pineapple     | -0.0699 |      -0.67 |        0.50 |          13 | 18
-10 | figs          | -0.8494 |      -1.42 |       -0.29 |          13 |  7
-11 | dragon fruit  | -1.2148 |      -1.74 |       -0.65 |          14 |  9
-12 | tangerines    | -1.4400 |      -1.95 |       -0.93 |          13 | 17
-13 | bananas       | -1.7869 |      -2.41 |       -1.21 |          12 | 13
-14 | cherimoya     | -1.9670 |      -2.45 |       -1.43 |          14 | 19
-15 | watermelon    | -2.0843 |      -2.63 |       -1.54 |          13 |  3
-16 | durian        | -2.3493 |      -2.91 |       -1.72 |          14 |  2
-17 | peaches       | -3.2823 |      -3.90 |       -2.65 |          11 | 10
-18 | lychees       | -3.9726 |      -4.51 |       -3.43 |          14 |  6
-19 | coconut       | -4.2377 |      -4.77 |       -3.73 |          14 | 16
-20 | starfruit     | -4.4602 |      -5.00 |       -3.85 |          13 | 12
+ # | Item          |   Score | 95% CI Low | 95% CI High | Edges | ID
+---|---------------|---------|------------|-------------|-------|----
+ 1 | guava         |  6.0797 |       5.54 |        6.73 |    13 | 11
+ 2 | raspberries   |  5.3125 |       4.73 |        5.91 |    13 | 14
+ 3 | blueberries   |  5.2954 |       4.72 |        5.85 |    11 |  1
+ 4 | kiwi          |  3.5773 |       3.02 |        4.15 |    13 |  4
+ 5 | pomegranate   |  2.9892 |       2.41 |        3.51 |    13 |  5
+ 6 | passion fruit |  2.4649 |       1.90 |        2.99 |    13 |  8
+ 7 | mango         |  1.2804 |       0.67 |        1.90 |    12 |  0
+ 8 | persimmon     |  0.7152 |       0.17 |        1.21 |    14 | 15
+ 9 | pineapple     | -0.0699 |      -0.67 |        0.50 |    13 | 18
+10 | figs          | -0.8494 |      -1.42 |       -0.29 |    13 |  7
+11 | dragon fruit  | -1.2148 |      -1.74 |       -0.65 |    14 |  9
+12 | tangerines    | -1.4400 |      -1.95 |       -0.93 |    13 | 17
+13 | bananas       | -1.7869 |      -2.41 |       -1.21 |    12 | 13
+14 | cherimoya     | -1.9670 |      -2.45 |       -1.43 |    14 | 19
+15 | watermelon    | -2.0843 |      -2.63 |       -1.54 |    13 |  3
+16 | durian        | -2.3493 |      -2.91 |       -1.72 |    14 |  2
+17 | peaches       | -3.2823 |      -3.90 |       -2.65 |    11 | 10
+18 | lychees       | -3.9726 |      -4.51 |       -3.43 |    14 |  6
+19 | coconut       | -4.2377 |      -4.77 |       -3.73 |    14 | 16
+20 | starfruit     | -4.4602 |      -5.00 |       -3.85 |    13 | 12
 ```
 
 Add `--output-format json` for machine-readable output. Add `-v` for progress during execution.
 
-### Saving comparisons for inspection
+### Saving judgements for inspection
 
 Save all LLM responses to a JSONL file for spot-checking or live monitoring with `tail -f`:
 
 ```bash
-# Save to comparisons-{timestamp}.jsonl in the current directory
-nanojudge rank ... --save-comparisons
+# Save to judgements-{timestamp}.jsonl in the current directory
+nanojudge rank ... --save-judgements
 
 # Save to a specific file
-nanojudge rank ... --save-comparisons results.jsonl
+nanojudge rank ... --save-judgements results.jsonl
 ```
 
 Each line is a JSON object with `round`, `item1`, `item2`, `category_probs`, `judge_model`, `judge_endpoint`, and `response` (the raw LLM text). Lines are flushed immediately so you can `tail -f` during a run.
@@ -123,12 +123,13 @@ Key settings:
 
 | Setting | Description |
 |---|---|
-| `rounds` | Number of comparison rounds |
+| `rounds` | Number of judgement rounds |
+| `lineup_size` | Items in each judgement: `2` (default) or `3`. |
 | `logprobs` | `true` to extract logprobs for continuous confidence (requires endpoint support, e.g. vLLM). `false` for text-based verdict parsing (works everywhere, but needs more rounds). |
-| `comparison_distribution` | `"uniform"` (default) or `"top-heavy"`. Top-heavy concentrates comparisons on the contenders for the top spots. |
-| `selection_sharpness` / `cutoff` | Top-heavy tuning. Each item's pairing weight is its uncertainty ratio around the anchor — min/max of the probability of sitting above vs below the anchor, integrated over both the item's and the anchor's posterior uncertainty: `1` when the item straddles the anchor, near `0` once it's confidently on either side — raised to `selection_sharpness` (lower = flatter = more exploration; default `0.7`). `cutoff` drops items whose ratio is below it, keeping the two highest regardless (`[0,1)`, default `0` — no cutoff; sharpness does the shaping). The first item of each comparison is drawn from these weights; its opponent is then picked by info-gain matchmaking from a rating window around it, with the win probability integrated over both items' posterior uncertainty so matchups that *might* be close also score well — so the contested boundary gets the comparisons. |
-| `anchor_index` | Which rank anchors top-heavy selection, 0-based into the ranking sorted best-first (default `0` — the current leader). `9` anchors on the 10th-best: right for "find the top ten, order within them doesn't matter", since comparisons concentrate on the boundary around rank 10 while items confidently inside or outside the top ten shed weight. Fractional values interpolate between adjacent ranks (`0.5` targets the midpoint of the 1st and 2nd items). Must be at most the number of items minus 1. |
-| `stop_confidence` | Early stop for top-heavy runs. After each interim fit, the run ends early once the probability that every item sits on its side of the anchor — the product of the per-item side probabilities — reaches this value; final scoring then runs on the comparisons collected so far. Items far from the anchor contribute ~1 to the product, so the criterion is governed by the few stragglers at the boundary. In `(0.5, 1.0)`, e.g. `0.95`. No default: when unset, the run always uses its full round budget. The rounds/comparisons budget stays the hard cap — a boundary too crowded to ever resolve simply runs to the cap. Rejected with the uniform distribution (no anchor to measure against). |
+| `judgement_distribution` | `"uniform"` (default) or `"top-heavy"`. Top-heavy concentrates judgements on the contenders for the top spots. |
+| `selection_sharpness` / `cutoff` | Top-heavy tuning. Each item's pairing weight is its uncertainty ratio around the anchor — min/max of the probability of sitting above vs below the anchor, integrated over both the item's and the anchor's posterior uncertainty: `1` when the item straddles the anchor, near `0` once it's confidently on either side — raised to `selection_sharpness` (lower = flatter = more exploration; default `0.7`). `cutoff` drops items whose ratio is below it, keeping the two highest regardless (`[0,1)`, default `0` — no cutoff; sharpness does the shaping). The first item of each judgement is drawn from these weights; its opponent is then picked by info-gain matchmaking from a rating window around it, with the win probability integrated over both items' posterior uncertainty so matchups that *might* be close also score well — so the contested boundary gets the judgements. |
+| `anchor_index` | Which rank anchors top-heavy selection, 0-based into the ranking sorted best-first (default `0` — the current leader). `9` anchors on the 10th-best: right for "find the top ten, order within them doesn't matter", since judgements concentrate on the boundary around rank 10 while items confidently inside or outside the top ten shed weight. Fractional values interpolate between adjacent ranks (`0.5` targets the midpoint of the 1st and 2nd items). Must be at most the number of items minus 1. |
+| `stop_confidence` | Early stop for top-heavy runs. After each interim fit, the run ends early once the probability that every item sits on its side of the anchor — the product of the per-item side probabilities — reaches this value; final scoring then runs on the judgements collected so far. Items far from the anchor contribute ~1 to the product, so the criterion is governed by the few stragglers at the boundary. In `(0.5, 1.0)`, e.g. `0.95`. No default: when unset, the run always uses its full round budget. The rounds/judgements budget stays the hard cap — a boundary too crowded to ever resolve simply runs to the cap. Rejected with the uniform distribution (no anchor to measure against). |
 
 Per-judge settings (in `[[judge]]` blocks):
 
@@ -147,13 +148,13 @@ Per-judge settings (in `[[judge]]` blocks):
 
 ## How it works
 
-1. **Pairwise comparisons** — each round, the engine picks which pairs to compare. Each judge in the panel evaluates its assigned pairs. With `logprobs = true`, token logprobs give continuous confidence. With `logprobs = false`, verdicts are parsed from the response text.
+1. **Lineup judgements** — each round, the engine selects which lineups to present. A lineup currently contains two or three items. Each judge in the panel evaluates its assigned lineups. With `logprobs = true`, token logprobs give continuous confidence. With `logprobs = false`, verdicts are parsed from the response text.
 
-2. **Bradley-Terry scoring** — all pairwise probabilities are combined into global scores using deterministic Laplace inference. Newton-CG finds the posterior mode, while matrix-free inverse-Hessian probes estimate correlation-aware credible intervals without dense O(n²) matrices.
+2. **Bradley-Terry scoring** — all edge probabilities are combined into global scores using deterministic Laplace inference. Newton-CG finds the posterior mode, while matrix-free inverse-Hessian probes estimate correlation-aware credible intervals without dense O(n²) matrices.
 
-3. **Adaptive pairing** — the engine uses the results of previous comparisons to decide what to compare next, maximizing information gain. Two comparison distributions:
-   - **Uniform**: every item gets equal comparison time (good for full rankings)
-   - **Top-heavy**: focuses comparisons on top contenders (good for large lists where you mainly want the best items)
+3. **Adaptive pairing** — the engine uses previous judgements to select the next lineups, maximizing information gain. Two judgement distributions:
+   - **Uniform**: every item gets equal judgement time (good for full rankings)
+   - **Top-heavy**: focuses judgements on top contenders (good for large lists where you mainly want the best items)
 
 4. **Positional bias correction** — LLMs tend to favor whichever option is shown first. The Bradley-Terry fit jointly estimates this bias and corrects for it automatically.
 
@@ -184,13 +185,13 @@ Computer science already has sorting algorithms for numerical data (e.g. QuickSo
 
 What we've been missing is an engine for subjective criteria - a way to programmatically sort lists by "which is more rewatchable," "which aged the best," or "which code is cleaner."
 
-NanoJudge is **LLM-Sort**. It takes the chaotic, inherently subjective opinions of small, cheap LLMs, runs optimized pairwise comparisons, and uses Bayesian inference. It is a general-purpose algorithm that turns fuzzy "vibes" into statistically rigorous rankings.
+NanoJudge is **LLM-Sort**. It takes the chaotic, inherently subjective opinions of small, cheap LLMs, runs optimized two-item judgements, and uses Bayesian inference. It is a general-purpose algorithm that turns fuzzy "vibes" into statistically rigorous rankings.
 
 ### A coprocessor for agentic systems
 
 This is a fundamental building block for AI architectures. When a large LLM needs to choose between 100+ options, stuffing them into a massive context window is expensive, slow, and prone to "lost in the middle" failures.
 
-Instead, the main LLM can act as the orchestrator: it fetches the candidates, passes the list and the subjective criteria to NanoJudge, uses a much smaller efficient LLM to do the pairwise comparisons, and gets back a mathematically grounded ranking.
+Instead, the main LLM can act as the orchestrator: it fetches the candidates, passes the list and the subjective criteria to NanoJudge, uses a much smaller efficient LLM to judge the lineups, and gets back a mathematically grounded ranking.
 
 Every time an AI agent makes a decision, a travel app recommends an itinerary, or a feed ranks content, it is solving a subjective ranking problem. NanoJudge makes that universal process mathematically explicit and can scale to hundreds of thousands of options without running into context length limits.
 

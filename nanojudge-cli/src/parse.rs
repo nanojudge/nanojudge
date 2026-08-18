@@ -1,4 +1,4 @@
-/// Verdict extraction for pairwise comparisons.
+/// Verdict extraction for LLM judgements.
 ///
 /// The verdict line is "Verdict: Option 1" or "Verdict: Option 2". Two
 /// separate parsing modes:
@@ -9,7 +9,7 @@ use serde::Deserialize;
 
 /// Default minimum fraction of option-digit probability mass the top-logprobs
 /// must cover before the logprob-derived distribution is trusted. Below this,
-/// the comparison parse fails (returns None).
+/// the judgement parse fails (returns None).
 pub const DEFAULT_MIN_LOGPROB_COVERAGE: f64 = 0.95;
 
 /// One-hot verdict distribution for a single chosen option index.
@@ -33,7 +33,7 @@ pub struct LogprobContent {
     pub top_logprobs: Option<Vec<TopLogprob>>,
 }
 
-/// Result of parsing a comparison response.
+/// Result of parsing a judgement response.
 pub struct ParseResult {
     /// Verdict distribution `[P(Option 1 wins), P(Option 2 wins)]` — item1 is
     /// shown as Option 1. None if extraction failed.
@@ -115,7 +115,7 @@ fn extract_pairwise_probabilities(logprobs: &[LogprobContent], min_logprob_cover
     // anchor and a clean, high-coverage digit token follow it.
     let verdict_starts = marker_scan_starts(&tokens, "verdict", false);
     // The "Option" anchors, word-boundary-required so prose "options"/"optional"
-    // don't count (same rule as the three-way parser).
+    // don't count (same rule as the three-item lineup parser).
     let option_starts = marker_scan_starts(&tokens, "option", true);
 
     let mut result = None;
@@ -198,7 +198,7 @@ fn extract_digit_after(
     None
 }
 
-/// Parse a comparison response into the judge's verdict distribution.
+/// Parse a judgement response into the judge's verdict distribution.
 ///
 /// Logprobs only — no text fallback. Returns None if logprob extraction fails.
 pub fn parse_response(logprobs: &[LogprobContent], min_logprob_coverage: f64) -> ParseResult {
@@ -208,14 +208,14 @@ pub fn parse_response(logprobs: &[LogprobContent], min_logprob_coverage: f64) ->
 }
 
 // ---------------------------------------------------------------------------
-// Three-way (3-item) parsing
+// Three-item lineup (3-item) parsing
 // ---------------------------------------------------------------------------
 
-/// The three option letters of a 3-way comparison, in order (A, B, C).
-const THREE_WAY_LETTERS: [char; 3] = ['A', 'B', 'C'];
+/// The three option letters of a three-item lineup judgement, in order (A, B, C).
+const LINEUP_LETTERS: [char; 3] = ['A', 'B', 'C'];
 
-fn three_way_letter_to_index(c: char) -> Option<usize> {
-    THREE_WAY_LETTERS.iter().position(|&l| l == c.to_ascii_uppercase())
+fn lineup_letter_to_index(c: char) -> Option<usize> {
+    LINEUP_LETTERS.iter().position(|&l| l == c.to_ascii_uppercase())
 }
 
 /// A single rank slot's extracted distribution over the three option letters
@@ -243,7 +243,7 @@ fn extract_rank_slot(
             continue;
         }
         let first_char = tok.chars().next().unwrap();
-        let idx = match three_way_letter_to_index(first_char) {
+        let idx = match lineup_letter_to_index(first_char) {
             Some(idx) => idx,
             None => continue,
         };
@@ -263,7 +263,7 @@ fn extract_rank_slot(
         for tlp in top_logprobs {
             let clean = tlp.token.trim().trim_end_matches([':', '.']);
             if clean.len() == 1
-                && let Some(tidx) = three_way_letter_to_index(clean.chars().next().unwrap())
+                && let Some(tidx) = lineup_letter_to_index(clean.chars().next().unwrap())
             {
                 dist[tidx] += tlp.logprob.exp();
             }
@@ -280,7 +280,7 @@ fn extract_rank_slot(
     None
 }
 
-/// Extract the 1st- and 2nd-rank slots from a three-way response's logprobs.
+/// Extract the 1st- and 2nd-rank slots from a three-item lineup response's logprobs.
 ///
 /// The ranking block is written as three "Option <letter>" lines at the end
 /// (with or without "Nth:" prefixes). We collect every "Option <letter>" whose
@@ -288,9 +288,9 @@ fn extract_rank_slot(
 /// "Option X" mentions in the analysis prose are ignored. Those three emitted
 /// letters must be a full 1-2-3 ranking (a permutation of A/B/C). If we can't get
 /// three clean results, or they aren't all distinct (e.g. the model repeated an
-/// option), the whole comparison is thrown out rather than filled in. Returns
+/// option), the whole judgement is thrown out rather than filled in. Returns
 /// `(first_slot, second_slot)`.
-fn extract_three_way_slots(
+fn extract_lineup_slots(
     logprobs: &[LogprobContent],
     min_logprob_coverage: f64,
 ) -> Option<(RankSlot, RankSlot)> {
@@ -328,15 +328,15 @@ fn extract_three_way_slots(
     Some((first, second))
 }
 
-/// Fold a three-way response's logprobs into a winner-distribution
+/// Fold a three-item lineup response's logprobs into a winner-distribution
 /// `[q_A, q_B, q_C]` — the probability each option is the best of the three.
 ///
 /// Keeps the 1st-place probability of the emitted winner, then splits the
 /// residual between the other two by the *2nd-place* ratio (the focused
 /// discrimination), discarding the noisy 1st-place tail between them. Returns
 /// None if either rank slot fails to parse or clear the coverage threshold.
-pub fn parse_three_way(logprobs: &[LogprobContent], min_logprob_coverage: f64) -> Option<[f64; 3]> {
-    let (first, second) = extract_three_way_slots(logprobs, min_logprob_coverage)?;
+pub fn parse_lineup(logprobs: &[LogprobContent], min_logprob_coverage: f64) -> Option<[f64; 3]> {
+    let (first, second) = extract_lineup_slots(logprobs, min_logprob_coverage)?;
 
     let winner = first.letter;
     let q_winner = first.dist[winner];
@@ -350,7 +350,7 @@ pub fn parse_three_way(logprobs: &[LogprobContent], min_logprob_coverage: f64) -
     let denom = sx + sy;
     if denom <= 0.0 {
         // The 2nd-place slot put no mass on either non-winner — no way to split
-        // the residual. Treat as an unparseable comparison rather than guessing.
+        // the residual. Treat as an unparseable judgement rather than guessing.
         return None;
     }
 
@@ -361,14 +361,14 @@ pub fn parse_three_way(logprobs: &[LogprobContent], min_logprob_coverage: f64) -
     Some(q)
 }
 
-/// Parse a three-way ranking from response text (--no-logprobs mode).
+/// Parse a three-item lineup ranking from response text (--no-logprobs mode).
 ///
 /// Same rule as the logprob path: take the LAST three "Option <letter>" mentions
 /// (the trailing ranking block), require them to be a distinct 1-2-3 ranking, and
 /// return a one-hot winner-distribution on the 1st. Without logprobs there is no
 /// soft information, so the 2nd-vs-3rd ordering is dropped — only the winner is
 /// kept. Returns None if three distinct results can't be read (throw it out).
-pub fn parse_three_way_text(text: &str) -> Option<[f64; 3]> {
+pub fn parse_lineup_text(text: &str) -> Option<[f64; 3]> {
     let lower = text.to_ascii_lowercase();
     let bytes = text.as_bytes();
 
@@ -381,7 +381,7 @@ pub fn parse_three_way_text(text: &str) -> Option<[f64; 3]> {
             pos += 1;
         }
         if let Some(c) = text[pos..].chars().next()
-            && let Some(idx) = three_way_letter_to_index(c)
+            && let Some(idx) = lineup_letter_to_index(c)
             && c.is_ascii_uppercase()
         {
             // Must stand alone: next char is not alphanumeric (so "Options" is not O/A).
@@ -785,7 +785,7 @@ mod tests {
         }
     }
 
-    // --- Three-way parsing tests ---
+    // --- Three-item lineup parsing tests ---
 
     /// Build a logprob token with no top_logprobs (a structural/marker token).
     fn plain(tok: &str) -> LogprobContent {
@@ -822,9 +822,9 @@ mod tests {
         LogprobContent { token: tok.to_string(), top_logprobs: Some(tlps) }
     }
 
-    /// A full three-way ranking block: 1st=A (0.9/0.03/0.07), 2nd=B over the
+    /// A full three-item lineup ranking block: 1st=A (0.9/0.03/0.07), 2nd=B over the
     /// non-winners (B 0.8, C 0.2).
-    fn three_way_logprobs() -> Vec<LogprobContent> {
+    fn lineup_logprobs() -> Vec<LogprobContent> {
         vec![
             plain("1st"), plain(":"), plain(" Option"),
             letter_tok(" A", 0.9, 0.03, 0.07),
@@ -838,8 +838,8 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_three_way_folds_winner_distribution() {
-        let q = parse_three_way(&three_way_logprobs(), 0.95).expect("should parse");
+    fn test_parse_lineup_folds_winner_distribution() {
+        let q = parse_lineup(&lineup_logprobs(), 0.95).expect("should parse");
         // Winner A keeps its 1st-place prob; residual 0.10 split 0.8:0.2 → 0.08, 0.02.
         assert!((q[0] - 0.9).abs() < 1e-9, "q_A = {}", q[0]);
         assert!((q[1] - 0.08).abs() < 1e-9, "q_B = {}", q[1]);
@@ -848,7 +848,7 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_three_way_split_ordinal_tokens() {
+    fn test_parse_lineup_split_ordinal_tokens() {
         // Gemma-style tokenization: "1st" → "1" + "st". The parser must still
         // find the markers and read the letter that follows.
         let lp = vec![
@@ -861,14 +861,14 @@ mod tests {
             plain("3"), plain("rd"), plain(":"), plain(" Option"),
             letter_tok(" C", 0.0, 0.0, 1.0),
         ];
-        let q = parse_three_way(&lp, 0.95).expect("split-ordinal tokens should parse");
+        let q = parse_lineup(&lp, 0.95).expect("split-ordinal tokens should parse");
         assert!((q[0] - 0.9).abs() < 1e-9, "q_A = {}", q[0]);
         assert!((q[1] - 0.08).abs() < 1e-9, "q_B = {}", q[1]);
         assert!((q[2] - 0.02).abs() < 1e-9, "q_C = {}", q[2]);
     }
 
     #[test]
-    fn test_parse_three_way_split_option_marker() {
+    fn test_parse_lineup_split_option_marker() {
         // DeepSeek-style tokenizer split of the "Option" anchor word itself.
         let lp = vec![
             plain("1st"), plain(":"), plain(" O"), plain("ption"),
@@ -880,25 +880,25 @@ mod tests {
             plain("3rd"), plain(":"), plain(" Op"), plain("t"), plain("ion"),
             letter_tok(" C", 0.0, 0.0, 1.0),
         ];
-        let q = parse_three_way(&lp, 0.95).expect("split Option anchors should parse");
+        let q = parse_lineup(&lp, 0.95).expect("split Option anchors should parse");
         assert!((q[0] - 0.9).abs() < 1e-9, "q_A = {}", q[0]);
         assert!((q[1] - 0.08).abs() < 1e-9, "q_B = {}", q[1]);
         assert!((q[2] - 0.02).abs() < 1e-9, "q_C = {}", q[2]);
     }
 
     #[test]
-    fn test_parse_three_way_prose_options_word_is_not_an_anchor() {
+    fn test_parse_lineup_prose_options_word_is_not_an_anchor() {
         // Trailing prose containing "options" followed by a letter-like token
         // must not register as a fourth anchor and shift the ranking block.
-        let mut lp = three_way_logprobs();
+        let mut lp = lineup_logprobs();
         lp.extend([plain("\n"), plain("Best"), plain(" of"), plain(" the"), plain(" options")]);
         lp.push(letter_tok(" A", 0.9, 0.05, 0.05));
-        let q = parse_three_way(&lp, 0.95).expect("block before the prose must parse");
+        let q = parse_lineup(&lp, 0.95).expect("block before the prose must parse");
         assert!((q[0] - 0.9).abs() < 1e-9, "q_A = {} — prose 'options' shifted the block", q[0]);
     }
 
     #[test]
-    fn test_parse_three_way_any_tokenization_of_markers() {
+    fn test_parse_lineup_any_tokenization_of_markers() {
         // Same arbitrary-chunking guarantee as the pairwise parser: any
         // tokenization of the structural text must parse, with the option
         // letters standalone (hard requirement of logprobs mode).
@@ -909,41 +909,41 @@ mod tests {
             lp.push(letter_tok(" B", 0.0001, 0.8, 0.2));
             lp.extend(chunk_plain("\n3rd: Option", seed ^ 2));
             lp.push(letter_tok(" C", 0.0, 0.0, 1.0));
-            let q = parse_three_way(&lp, 0.95)
+            let q = parse_lineup(&lp, 0.95)
                 .unwrap_or_else(|| panic!("seed {seed}: chunked tokenization must parse"));
             assert!((q[0] - 0.9).abs() < 1e-9, "seed {seed}: q_A = {}", q[0]);
         }
     }
 
     #[test]
-    fn test_parse_three_way_rejects_repeated_option() {
+    fn test_parse_lineup_rejects_repeated_option() {
         // Model repeated the same option ("Option B" x3) instead of ranking — not
-        // a distinct 1-2-3 ranking, so the whole comparison is thrown out.
+        // a distinct 1-2-3 ranking, so the whole judgement is thrown out.
         let lp = vec![
             plain(" Option"), letter_tok(" B", 0.02, 0.97, 0.01), plain("\n"),
             plain(" Option"), letter_tok(" B", 0.02, 0.97, 0.01), plain("\n"),
             plain(" Option"), letter_tok(" B", 0.02, 0.97, 0.01),
         ];
-        assert!(parse_three_way(&lp, 0.95).is_none());
+        assert!(parse_lineup(&lp, 0.95).is_none());
     }
 
     #[test]
-    fn test_parse_three_way_text_rejects_repeated_option() {
-        assert!(parse_three_way_text("analysis\n\nOption B\nOption B\nOption B").is_none());
+    fn test_parse_lineup_text_rejects_repeated_option() {
+        assert!(parse_lineup_text("analysis\n\nOption B\nOption B\nOption B").is_none());
     }
 
     #[test]
-    fn test_parse_three_way_rejects_fewer_than_three() {
+    fn test_parse_lineup_rejects_fewer_than_three() {
         // Only two clean results → cannot form a full ranking → throw out.
         let lp = vec![
             plain(" Option"), letter_tok(" A", 0.9, 0.05, 0.05), plain("\n"),
             plain(" Option"), letter_tok(" B", 0.05, 0.9, 0.05),
         ];
-        assert!(parse_three_way(&lp, 0.95).is_none());
+        assert!(parse_lineup(&lp, 0.95).is_none());
     }
 
     #[test]
-    fn test_parse_three_way_bare_option_lines() {
+    fn test_parse_lineup_bare_option_lines() {
         // Model dropped the "Nth:" prefixes and ended with bare "Option X" lines.
         // An earlier prose "Option C" mention must be ignored (last three win).
         let lp = vec![
@@ -955,24 +955,24 @@ mod tests {
             plain("\n"),
             plain(" Option"), letter_tok(" C", 0.0, 0.0, 1.0),
         ];
-        let q = parse_three_way(&lp, 0.95).expect("bare Option lines should parse");
+        let q = parse_lineup(&lp, 0.95).expect("bare Option lines should parse");
         assert!((q[0] - 0.9).abs() < 1e-9, "q_A = {}", q[0]);
         assert!((q[1] - 0.08).abs() < 1e-9, "q_B = {}", q[1]);
         assert!((q[2] - 0.02).abs() < 1e-9, "q_C = {}", q[2]);
     }
 
     #[test]
-    fn test_parse_three_way_ignores_prose_place_before_block() {
+    fn test_parse_lineup_ignores_prose_place_before_block() {
         // "in the first place" style prose (an earlier "first" ordinal) must not
         // derail the block — the LAST "1st"/"first" marker wins.
         let mut lp = vec![plain("in"), plain(" the"), plain(" first"), plain(" place"), plain(".")];
-        lp.extend(three_way_logprobs());
-        let q = parse_three_way(&lp, 0.95).expect("should still find the final block");
+        lp.extend(lineup_logprobs());
+        let q = parse_lineup(&lp, 0.95).expect("should still find the final block");
         assert!((q[0] - 0.9).abs() < 1e-9);
     }
 
     #[test]
-    fn test_parse_three_way_low_coverage_fails() {
+    fn test_parse_lineup_low_coverage_fails() {
         // 1st-place letter puts only 0.5 mass on A-C (rest on a stray token).
         let lp = vec![
             plain("1st"), plain(":"), plain(" Option"),
@@ -986,33 +986,33 @@ mod tests {
             plain("2nd"), plain(":"), plain(" Option"),
             letter_tok(" B", 0.0, 0.8, 0.2),
         ];
-        assert!(parse_three_way(&lp, 0.95).is_none());
+        assert!(parse_lineup(&lp, 0.95).is_none());
     }
 
     #[test]
-    fn test_parse_three_way_missing_second_place_fails() {
+    fn test_parse_lineup_missing_second_place_fails() {
         let lp = vec![
             plain("1st"), plain(":"), plain(" Option"),
             letter_tok(" A", 0.9, 0.05, 0.05),
         ];
-        assert!(parse_three_way(&lp, 0.95).is_none());
+        assert!(parse_lineup(&lp, 0.95).is_none());
     }
 
     #[test]
-    fn test_parse_three_way_text_one_hot_on_winner() {
+    fn test_parse_lineup_text_one_hot_on_winner() {
         let text = "Analysis here.\n\n1st: Option B\n2nd: Option A\n3rd: Option C";
-        assert_eq!(parse_three_way_text(text), Some([0.0, 1.0, 0.0]));
+        assert_eq!(parse_lineup_text(text), Some([0.0, 1.0, 0.0]));
     }
 
     #[test]
-    fn test_parse_three_way_text_uses_last_block() {
+    fn test_parse_lineup_text_uses_last_block() {
         let text = "I'd put it in first normally.\n\n1st: Option C\n2nd: Option A\n3rd: Option B";
-        assert_eq!(parse_three_way_text(text), Some([0.0, 0.0, 1.0]));
+        assert_eq!(parse_lineup_text(text), Some([0.0, 0.0, 1.0]));
     }
 
     #[test]
-    fn test_parse_three_way_text_no_marker_returns_none() {
-        assert!(parse_three_way_text("no ranking here").is_none());
+    fn test_parse_lineup_text_no_marker_returns_none() {
+        assert!(parse_lineup_text("no ranking here").is_none());
     }
 
     #[test]

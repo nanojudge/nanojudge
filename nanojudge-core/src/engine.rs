@@ -1,19 +1,19 @@
 /// Ranking engine orchestrator.
 ///
 /// Adapted for a pure computation crate — no async, no HTTP, no IO.
-/// The caller performs comparisons externally, then feeds results back.
+/// The caller obtains judgements externally, then feeds their edges back.
 ///
 /// Items are identified by caller-provided `i64` IDs.
 use crate::bradley_terry::BradleyTerry;
 use crate::constants::INITIAL_BRADLEY_TERRY_RATING;
 use crate::pairing::{
-    calculate_triples_for_round, generate_uniform_pairings_indexed,
-    generate_top_heavy_pairings_indexed, generate_uniform_triples_indexed,
-    generate_top_heavy_triples_indexed, get_effective_comparison_distribution,
-    ComparisonDistribution,
+    calculate_lineups_for_round, generate_uniform_pairings_indexed,
+    generate_top_heavy_pairings_indexed, generate_uniform_lineups_indexed,
+    generate_top_heavy_lineups_indexed, get_effective_judgement_distribution,
+    JudgementDistribution,
 };
 use crate::seed::make_rng;
-use crate::types::{ComparisonInput, IdMap, Pair, Triple};
+use crate::types::{Edge, IdMap, Pair, Lineup};
 use rand::rngs::StdRng;
 
 /// P(item1 wins) from a verdict distribution, for the Bradley-Terry
@@ -26,9 +26,9 @@ fn matchmaking_win_prob(probs: &[f64; 2]) -> f64 {
 #[derive(Debug, Clone)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct EngineConfig {
-    pub comparison_distribution: ComparisonDistribution,
+    pub judgement_distribution: JudgementDistribution,
     pub matchmaking_sharpness: f64,
-    pub min_uniform_games: usize,
+    pub min_uniform_edges: usize,
     pub seed: Option<u64>,
 }
 
@@ -36,14 +36,14 @@ pub struct RankingEngine {
     /// Maps between caller i64 IDs and internal 0..N indices.
     id_map: IdMap,
 
-    /// All successful comparisons (stored with caller IDs).
-    pub completed_comparisons: Vec<ComparisonInput>,
-    /// Games played per item (indexed internally 0..num_items).
-    pub games_played: Vec<usize>,
-    /// Number of times each item was placed in position 1 of a comparison
-    /// prompt (indexed internally 0..num_items). Used by the pairing layer
-    /// to balance position assignments across rounds.
-    pub first_position_count: Vec<usize>,
+    /// All successful edges (stored with caller IDs).
+    pub completed_edges: Vec<Edge>,
+    /// Incident edge count per item (indexed internally 0..num_items).
+    pub edge_counts: Vec<usize>,
+    /// Number of edges on which each item was `item1` (indexed internally
+    /// 0..num_items). Used by the pairing layer to balance position assignments
+    /// across rounds.
+    pub item1_edge_counts: Vec<usize>,
 
     /// Current BT ratings (indexed internally 0..num_items).
     current_ratings: Vec<f64>,
@@ -81,9 +81,9 @@ impl RankingEngine {
 
         RankingEngine {
             id_map,
-            completed_comparisons: Vec::new(),
-            games_played: vec![0; num_items],
-            first_position_count: vec![0; num_items],
+            completed_edges: Vec::new(),
+            edge_counts: vec![0; num_items],
+            item1_edge_counts: vec![0; num_items],
             current_ratings: vec![INITIAL_BRADLEY_TERRY_RATING; num_items],
             current_stds: None,
             selection_weights: None,
@@ -103,8 +103,8 @@ impl RankingEngine {
     ///
     /// Panics if the round's effective distribution is top-heavy and the
     /// posterior summary is missing or malformed. The effective distribution is top-heavy
-    /// when the engine is configured with `ComparisonDistribution::TopHeavy`
-    /// and every item has reached `min_uniform_games` (the uniform stage needs
+    /// when the engine is configured with `JudgementDistribution::TopHeavy`
+    /// and every item has reached `min_uniform_edges` (the uniform stage needs
     /// no posterior summary). In a top-heavy round `selection_weights` must be set, with
     /// one entry per item.
     pub fn generate_pairs_for_round(&mut self, _round_index: usize) -> Vec<Pair> {
@@ -112,18 +112,18 @@ impl RankingEngine {
         self.generate_pairs(pairs_count)
     }
 
-    /// The comparison distribution the next generated batch will use, given the
-    /// games played so far. Top-heavy only once every item has reached
-    /// `min_uniform_games` (otherwise uniform pairing). Round subdivision into
+    /// The judgement distribution the next generated batch will use, given the
+    /// edge counts so far. Top-heavy only once every item has reached
+    /// `min_uniform_edges` (otherwise uniform pairing). Round subdivision into
     /// refit chunks derives from this via `round_chunk_sizes()`: only top-heavy
     /// batches are safe to split, since the uniform stage pairs every item
     /// exactly once per full round.
-    pub fn effective_distribution(&self) -> ComparisonDistribution {
-        get_effective_comparison_distribution(
-            self.config.comparison_distribution,
+    pub fn effective_distribution(&self) -> JudgementDistribution {
+        get_effective_judgement_distribution(
+            self.config.judgement_distribution,
             self.id_map.len(),
-            &self.games_played,
-            self.config.min_uniform_games,
+            &self.edge_counts,
+            self.config.min_uniform_edges,
         )
     }
 
@@ -145,7 +145,7 @@ impl RankingEngine {
         assert!(refits_per_round >= 1, "refits_per_round must be at least 1");
         let pairs_per_round = calculate_pairs_for_round(self.id_map.len());
         if refits_per_round > 1
-            && self.effective_distribution() == ComparisonDistribution::TopHeavy
+            && self.effective_distribution() == JudgementDistribution::TopHeavy
         {
             split_round_into_chunks(pairs_per_round, refits_per_round)
         } else {
@@ -153,23 +153,23 @@ impl RankingEngine {
         }
     }
 
-    /// The three-way analogue of `round_chunk_sizes`: chunk sizes in triples that
-    /// sum to one full round (`calculate_triples_for_round(num_items)`). Same
+    /// The three-item lineup analogue of `round_chunk_sizes`: chunk sizes in lineups that
+    /// sum to one full round (`calculate_lineups_for_round(num_items)`). Same
     /// policy — only top-heavy rounds subdivide (for mid-round refits); the
     /// uniform stage always returns a single full-round chunk.
     ///
     /// # Panics
     ///
     /// Panics if `refits_per_round` is 0.
-    pub fn round_chunk_sizes_triples(&self, refits_per_round: usize) -> Vec<usize> {
+    pub fn round_chunk_sizes_lineups(&self, refits_per_round: usize) -> Vec<usize> {
         assert!(refits_per_round >= 1, "refits_per_round must be at least 1");
-        let triples_per_round = calculate_triples_for_round(self.id_map.len());
+        let lineups_per_round = calculate_lineups_for_round(self.id_map.len());
         if refits_per_round > 1
-            && self.effective_distribution() == ComparisonDistribution::TopHeavy
+            && self.effective_distribution() == JudgementDistribution::TopHeavy
         {
-            split_round_into_chunks(triples_per_round, refits_per_round)
+            split_round_into_chunks(lineups_per_round, refits_per_round)
         } else {
-            vec![triples_per_round]
+            vec![lineups_per_round]
         }
     }
 
@@ -180,20 +180,20 @@ impl RankingEngine {
     pub fn generate_pairs(&mut self, pairs_count: usize) -> Vec<Pair> {
         let num_items = self.id_map.len();
 
-        let effective_comparison_distribution = self.effective_distribution();
+        let effective_judgement_distribution = self.effective_distribution();
 
-        let index_pairs = match effective_comparison_distribution {
-            ComparisonDistribution::Uniform => generate_uniform_pairings_indexed(
+        let index_pairs = match effective_judgement_distribution {
+            JudgementDistribution::Uniform => generate_uniform_pairings_indexed(
                 num_items,
                 pairs_count,
                 &self.current_ratings,
                 self.current_stds.as_deref(),
                 self.config.matchmaking_sharpness,
-                &self.first_position_count,
-                &self.games_played,
+                &self.item1_edge_counts,
+                &self.edge_counts,
                 &mut self.rng,
             ),
-            ComparisonDistribution::TopHeavy => {
+            JudgementDistribution::TopHeavy => {
                 let selection_weights = self.selection_weights.as_ref()
                     .expect("TopHeavy distribution requires selection_weights to be set before generating pairs");
 
@@ -204,8 +204,8 @@ impl RankingEngine {
                     &self.current_ratings,
                     self.current_stds.as_deref(),
                     self.config.matchmaking_sharpness,
-                    &self.first_position_count,
-                    &self.games_played,
+                    &self.item1_edge_counts,
+                    &self.edge_counts,
                     &mut self.rng,
                 )
             }
@@ -217,39 +217,39 @@ impl RankingEngine {
         }).collect()
     }
 
-    /// Generate a batch of `triples_count` triples (3-way comparisons) using the
-    /// current effective distribution. The 3-way analogue of `generate_pairs`: a
-    /// full round is `calculate_triples_for_round(num_items)` triples. Each triple
-    /// is meant to be judged in one 3-way comparison, then folded into pairwise
-    /// edges by the caller via `three_way::winner_dist_to_edges` before being fed
-    /// back through `record_results`.
+    /// Generate a batch of `lineups_count` three-item lineups using the
+    /// current effective distribution. The three-item lineup analogue of `generate_pairs`: a
+    /// full round is `calculate_lineups_for_round(num_items)` lineups. Each lineup
+    /// receives one judgement, then is folded into edges by the caller via
+    /// `lineup::winner_dist_to_edges` before being fed
+    /// back through `record_edges`.
     ///
     /// # Panics
     ///
     /// Panics under the same conditions as `generate_pairs`: a top-heavy round
     /// with `selection_weights` unset or malformed.
-    pub fn generate_triples(&mut self, triples_count: usize) -> Vec<Triple> {
+    pub fn generate_lineups(&mut self, lineups_count: usize) -> Vec<Lineup> {
         let num_items = self.id_map.len();
 
-        let effective_comparison_distribution = self.effective_distribution();
+        let effective_judgement_distribution = self.effective_distribution();
 
-        let index_triples = match effective_comparison_distribution {
-            ComparisonDistribution::Uniform => generate_uniform_triples_indexed(
+        let index_lineups = match effective_judgement_distribution {
+            JudgementDistribution::Uniform => generate_uniform_lineups_indexed(
                 num_items,
-                triples_count,
+                lineups_count,
                 &self.current_ratings,
                 self.current_stds.as_deref(),
                 self.config.matchmaking_sharpness,
-                &self.games_played,
+                &self.edge_counts,
                 &mut self.rng,
             ),
-            ComparisonDistribution::TopHeavy => {
+            JudgementDistribution::TopHeavy => {
                 let selection_weights = self.selection_weights.as_ref()
-                    .expect("TopHeavy distribution requires selection_weights to be set before generating triples");
+                    .expect("TopHeavy distribution requires selection_weights to be set before generating lineups");
 
-                generate_top_heavy_triples_indexed(
+                generate_top_heavy_lineups_indexed(
                     num_items,
-                    triples_count,
+                    lineups_count,
                     selection_weights,
                     &self.current_ratings,
                     self.current_stds.as_deref(),
@@ -259,38 +259,39 @@ impl RankingEngine {
             }
         };
 
-        // Convert index triples to ID triples.
-        index_triples.into_iter().map(|(a, b, c)| {
+        // Convert index lineups to ID lineups.
+        index_lineups.into_iter().map(|(a, b, c)| {
             (self.id_map.to_id(a), self.id_map.to_id(b), self.id_map.to_id(c))
         }).collect()
     }
 
-    /// Record comparison results from a round.
+    /// Record edges from a round.
     ///
     /// # Panics
     ///
     /// Panics if a result references an item ID that was not in the
     /// `item_ids` the engine was created with.
-    pub fn record_results(&mut self, results: &[ComparisonInput]) {
+    pub fn record_edges(&mut self, results: &[Edge]) {
         for result in results {
-            self.completed_comparisons.push(*result);
+            self.completed_edges.push(*result);
             let idx1 = self.id_map.to_idx(result.item1);
             let idx2 = self.id_map.to_idx(result.item2);
-            self.games_played[idx1] += 1;
-            self.games_played[idx2] += 1;
-            self.first_position_count[idx1] += 1;
+            self.edge_counts[idx1] += 1;
+            self.edge_counts[idx2] += 1;
+            self.item1_edge_counts[idx1] += 1;
         }
     }
 
     /// Update current rating estimates using Bradley-Terry MLE.
-    /// BT MLE is judge-agnostic — it just wants (item1, item2, probability) triples.
+    /// BT MLE is judge-agnostic — it consumes edges as
+    /// `(item1, item2, probability)` tuples.
     pub fn update_current_ratings(&mut self) {
-        if self.completed_comparisons.is_empty() {
+        if self.completed_edges.is_empty() {
             return;
         }
 
         let num_items = self.id_map.len();
-        let indexed: Vec<(usize, usize, f64)> = self.completed_comparisons.iter().map(|c| {
+        let indexed: Vec<(usize, usize, f64)> = self.completed_edges.iter().map(|c| {
             (self.id_map.to_idx(c.item1), self.id_map.to_idx(c.item2), matchmaking_win_prob(&c.category_probs))
         }).collect();
         let mut bt = BradleyTerry::new(num_items, &indexed, 0.01);
@@ -330,8 +331,8 @@ impl RankingEngine {
         self.current_stds.as_deref()
     }
 
-    pub fn completed_comparison_count(&self) -> usize {
-        self.completed_comparisons.len()
+    pub fn completed_edge_count(&self) -> usize {
+        self.completed_edges.len()
     }
 }
 
@@ -340,8 +341,8 @@ pub fn calculate_pairs_for_round(num_items: usize) -> usize {
     num_items / 2
 }
 
-/// Calculate total expected comparisons across all rounds.
-pub fn calculate_total_expected_comparisons(num_items: usize, number_of_rounds: usize) -> usize {
+/// Calculate total expected two-item judgements across all rounds.
+pub fn calculate_total_expected_judgements(num_items: usize, number_of_rounds: usize) -> usize {
     calculate_pairs_for_round(num_items) * number_of_rounds
 }
 
@@ -361,13 +362,13 @@ pub fn split_round_into_chunks(total: usize, parts: usize) -> Vec<usize> {
         .collect()
 }
 
-/// Calculate rounds needed to reach target comparisons.
-pub fn calculate_rounds_for_target_comparisons(num_items: usize, target_comparisons: usize) -> usize {
+/// Calculate rounds needed to reach a target number of two-item judgements.
+pub fn calculate_rounds_for_target_judgements(num_items: usize, target_judgements: usize) -> usize {
     let pairs_per_round = calculate_pairs_for_round(num_items);
-    if pairs_per_round == 0 || target_comparisons == 0 {
+    if pairs_per_round == 0 || target_judgements == 0 {
         return 0;
     }
-    target_comparisons.div_ceil(pairs_per_round)
+    target_judgements.div_ceil(pairs_per_round)
 }
 
 #[cfg(test)]
@@ -384,18 +385,18 @@ mod tests {
     }
 
     #[test]
-    fn test_calculate_total_expected_comparisons() {
-        assert_eq!(calculate_total_expected_comparisons(10, 5), 25);
-        assert_eq!(calculate_total_expected_comparisons(78, 10), 390);
-        assert_eq!(calculate_total_expected_comparisons(1000, 3), 1500);
+    fn test_calculate_total_expected_judgements() {
+        assert_eq!(calculate_total_expected_judgements(10, 5), 25);
+        assert_eq!(calculate_total_expected_judgements(78, 10), 390);
+        assert_eq!(calculate_total_expected_judgements(1000, 3), 1500);
     }
 
     #[test]
     fn test_calculate_rounds_for_target() {
-        assert_eq!(calculate_rounds_for_target_comparisons(100, 500), 10);
-        assert_eq!(calculate_rounds_for_target_comparisons(100, 501), 11);
-        assert_eq!(calculate_rounds_for_target_comparisons(100, 0), 0);
-        assert_eq!(calculate_rounds_for_target_comparisons(1, 100), 0);
+        assert_eq!(calculate_rounds_for_target_judgements(100, 500), 10);
+        assert_eq!(calculate_rounds_for_target_judgements(100, 501), 11);
+        assert_eq!(calculate_rounds_for_target_judgements(100, 0), 0);
+        assert_eq!(calculate_rounds_for_target_judgements(1, 100), 0);
     }
 
     #[test]
@@ -424,16 +425,16 @@ mod tests {
     fn top_heavy_engine(num_items: usize) -> RankingEngine {
         let item_ids: Vec<i64> = (0..num_items as i64).collect();
         RankingEngine::new(&item_ids, EngineConfig {
-            comparison_distribution: ComparisonDistribution::TopHeavy,
+            judgement_distribution: JudgementDistribution::TopHeavy,
             matchmaking_sharpness: 1.0,
-            min_uniform_games: 3,
+            min_uniform_edges: 3,
             seed: Some(1),
         })
     }
 
     #[test]
     fn test_round_chunk_sizes_uniform_stage_never_subdivides() {
-        // Fresh engine: nobody has reached min_uniform_games, so the effective
+        // Fresh engine: nobody has reached min_uniform_edges, so the effective
         // distribution is uniform and the round stays whole despite refits > 1.
         let engine = top_heavy_engine(10);
         assert_eq!(engine.round_chunk_sizes(4), vec![5]);
@@ -442,7 +443,7 @@ mod tests {
     #[test]
     fn test_round_chunk_sizes_top_heavy_subdivides() {
         let mut engine = top_heavy_engine(10);
-        engine.games_played = vec![3; 10]; // uniform stage complete
+        engine.edge_counts = vec![3; 10]; // uniform stage complete
         assert_eq!(engine.round_chunk_sizes(4), vec![2, 1, 1, 1]);
         assert_eq!(engine.round_chunk_sizes(1), vec![5]);
     }
@@ -451,12 +452,12 @@ mod tests {
     fn test_round_chunk_sizes_uniform_config_never_subdivides() {
         let item_ids: Vec<i64> = (0..10).collect();
         let mut engine = RankingEngine::new(&item_ids, EngineConfig {
-            comparison_distribution: ComparisonDistribution::Uniform,
+            judgement_distribution: JudgementDistribution::Uniform,
             matchmaking_sharpness: 1.0,
-            min_uniform_games: 3,
+            min_uniform_edges: 3,
             seed: Some(1),
         });
-        engine.games_played = vec![10; 10];
+        engine.edge_counts = vec![10; 10];
         assert_eq!(engine.round_chunk_sizes(4), vec![5]);
     }
 
@@ -466,18 +467,18 @@ mod tests {
         top_heavy_engine(10).round_chunk_sizes(0);
     }
 
-    fn make_input(id1: i64, id2: i64, prob: f64) -> ComparisonInput {
+    fn make_input(id1: i64, id2: i64, prob: f64) -> Edge {
         let category_probs = if prob > 0.5 { [1.0, 0.0] } else { [0.0, 1.0] };
-        ComparisonInput { slot1: 0, slot2: 1, item1: id1, item2: id2, category_probs, judge_id: 0, weight: 1.0 }
+        Edge { slot1: 0, slot2: 1, item1: id1, item2: id2, category_probs, judge_id: 0, weight: 1.0 }
     }
 
     #[test]
     fn test_engine_basic_workflow() {
         let item_ids = vec![10, 20, 30, 40];
         let config = EngineConfig {
-            comparison_distribution: ComparisonDistribution::Uniform,
+            judgement_distribution: JudgementDistribution::Uniform,
             matchmaking_sharpness: 1.0,
-            min_uniform_games: 3,
+            min_uniform_edges: 3,
             seed: None,
         };
 
@@ -492,23 +493,23 @@ mod tests {
             assert!(item_ids.contains(b), "ID {} not in item_ids", b);
         }
 
-        let results: Vec<ComparisonInput> = pairs.iter()
+        let results: Vec<Edge> = pairs.iter()
             .map(|(a, b)| make_input(*a, *b, 0.7))
             .collect();
 
-        engine.record_results(&results);
+        engine.record_edges(&results);
         engine.update_current_ratings();
 
-        assert_eq!(engine.completed_comparison_count(), pairs.len());
+        assert_eq!(engine.completed_edge_count(), pairs.len());
     }
 
     #[test]
     fn test_set_current_posterior_and_mle_refit_clears_stds() {
         let item_ids: Vec<i64> = vec![10, 20, 30];
         let config = EngineConfig {
-            comparison_distribution: ComparisonDistribution::Uniform,
+            judgement_distribution: JudgementDistribution::Uniform,
             matchmaking_sharpness: 1.0,
-            min_uniform_games: 3,
+            min_uniform_edges: 3,
             seed: None,
         };
         let mut engine = RankingEngine::new(&item_ids, config);
@@ -521,7 +522,7 @@ mod tests {
 
         // An MLE refit replaces the ratings, so the posterior stds must not
         // survive it — stale stds against fresh point estimates would be wrong.
-        engine.record_results(&[make_input(10, 20, 0.7)]);
+        engine.record_edges(&[make_input(10, 20, 0.7)]);
         engine.update_current_ratings();
         assert!(engine.current_stds().is_none());
     }
@@ -530,9 +531,9 @@ mod tests {
     #[should_panic(expected = "stds length mismatch")]
     fn test_set_current_posterior_length_mismatch_panics() {
         let config = EngineConfig {
-            comparison_distribution: ComparisonDistribution::Uniform,
+            judgement_distribution: JudgementDistribution::Uniform,
             matchmaking_sharpness: 1.0,
-            min_uniform_games: 3,
+            min_uniform_edges: 3,
             seed: None,
         };
         let mut engine = RankingEngine::new(&[1, 2, 3], config);
@@ -543,9 +544,9 @@ mod tests {
     #[should_panic(expected = "at least two items")]
     fn test_engine_requires_two_items() {
         let config = EngineConfig {
-            comparison_distribution: ComparisonDistribution::Uniform,
+            judgement_distribution: JudgementDistribution::Uniform,
             matchmaking_sharpness: 1.0,
-            min_uniform_games: 3,
+            min_uniform_edges: 3,
             seed: None,
         };
         let _ = RankingEngine::new(&[1], config);
@@ -559,9 +560,9 @@ mod tests {
         // that would degrade balancing (e.g. accidentally stop tracking).
         let item_ids: Vec<i64> = (1..=20).collect();
         let config = EngineConfig {
-            comparison_distribution: ComparisonDistribution::Uniform,
+            judgement_distribution: JudgementDistribution::Uniform,
             matchmaking_sharpness: 1.0,
-            min_uniform_games: 3,
+            min_uniform_edges: 3,
             seed: None,
         };
 
@@ -569,22 +570,22 @@ mod tests {
 
         for round in 0..342 {
             let pairs = engine.generate_pairs_for_round(round);
-            let results: Vec<ComparisonInput> = pairs.iter()
+            let results: Vec<Edge> = pairs.iter()
                 .map(|(a, b)| make_input(*a, *b, 0.5))
                 .collect();
-            engine.record_results(&results);
+            engine.record_edges(&results);
         }
 
-        let total_comparisons: usize = engine.games_played.iter().sum::<usize>() / 2;
-        assert_eq!(total_comparisons, 3420);
+        let total_edges: usize = engine.edge_counts.iter().sum::<usize>() / 2;
+        assert_eq!(total_edges, 3420);
 
         for i in 0..engine.num_items() {
-            let games = engine.games_played[i];
-            assert!(games > 0, "item {} played zero games", i);
-            let ratio = engine.first_position_count[i] as f64 / games as f64;
+            let edges = engine.edge_counts[i];
+            assert!(edges > 0, "item {} accumulated zero edges", i);
+            let ratio = engine.item1_edge_counts[i] as f64 / edges as f64;
             assert!((ratio - 0.5).abs() < 0.10,
                 "item {} drifted: first {} / {} = {:.3}",
-                i, engine.first_position_count[i], games, ratio);
+                i, engine.item1_edge_counts[i], edges, ratio);
         }
     }
 
@@ -592,9 +593,9 @@ mod tests {
     #[should_panic(expected = "Duplicate item ID")]
     fn test_engine_rejects_duplicate_ids() {
         let config = EngineConfig {
-            comparison_distribution: ComparisonDistribution::Uniform,
+            judgement_distribution: JudgementDistribution::Uniform,
             matchmaking_sharpness: 1.0,
-            min_uniform_games: 3,
+            min_uniform_edges: 3,
             seed: None,
         };
         let _ = RankingEngine::new(&[1, 2, 1], config);

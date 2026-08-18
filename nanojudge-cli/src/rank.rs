@@ -1,7 +1,7 @@
 use nanojudge_core::{
-    ComparisonInput, EngineConfig, JudgeInfo, RankingEngine, ScoringOptions,
-    ComparisonDistribution, calculate_pairs_for_round, calculate_rounds_for_target_comparisons,
-    calculate_total_expected_comparisons, calculate_triples_for_round, run_scoring,
+    Edge, EngineConfig, JudgeInfo, RankingEngine, ScoringOptions,
+    JudgementDistribution, calculate_pairs_for_round, calculate_rounds_for_target_judgements,
+    calculate_total_expected_judgements, calculate_lineups_for_round, run_scoring,
     winner_dist_to_edges,
 };
 use nanojudge_core::seed;
@@ -17,7 +17,7 @@ use crate::args::{OutputFormat, RankArgs};
 use crate::bail;
 use crate::config;
 use crate::items::load_items;
-use crate::llm::{LlmConfig, compare_pair, compare_triple};
+use crate::llm::{LlmConfig, judge_pair, judge_lineup};
 use crate::output;
 use crate::resolve::{resolve_config, resolve_judges};
 
@@ -81,7 +81,7 @@ fn parse_criteria(content: &str) -> Vec<String> {
 /// is `cumulative_total * weight`, minus what they've already been assigned. This
 /// ensures even distribution over time rather than independent per-round allocation.
 /// Updates `cumulative_assigned` in place.
-fn assign_pairs_to_judges(
+fn assign_judgements_to_judges(
     round_pairs: usize,
     normalized_weights: &[f64],
     cumulative_assigned: &mut [usize],
@@ -125,10 +125,10 @@ pub async fn run(args: RankArgs) {
     let cfg = config::load_config(&config_path);
     let resolved = resolve_config(&args.cfg, &cfg);
 
-    // Three-item comparisons run a separate acquisition loop; the pairwise path
+    // Three-item judgements run a separate acquisition loop; the pairwise path
     // below is left untouched.
-    if resolved.items_per_comparison == 3 {
-        run_three_way(&args, &config_path, &cfg, &resolved).await;
+    if resolved.lineup_size == 3 {
+        run_lineup_judgements(&args, &config_path, &cfg, &resolved).await;
         return;
     }
 
@@ -137,7 +137,7 @@ pub async fn run(args: RankArgs) {
     let logprobs_mode = judges[0].logprobs;
 
     if !logprobs_mode {
-        eprintln!("Warning: Running without logprobs. Requires more comparisons to reach equivalent accuracy as when using logprobs.");
+        eprintln!("Warning: Running without logprobs. Requires more judgements to reach equivalent accuracy as when using logprobs.");
     }
 
     let (titles, texts) = load_items(&args);
@@ -145,7 +145,7 @@ pub async fn run(args: RankArgs) {
 
     // The anchor rank must exist: fail here, before any LLM spend, rather than
     // at the first scoring pass. Only top-heavy uses the anchor.
-    if matches!(resolved.comparison_distribution, ComparisonDistribution::TopHeavy)
+    if matches!(resolved.judgement_distribution, JudgementDistribution::TopHeavy)
         && resolved.anchor_index > (texts.len().saturating_sub(1)) as f64
     {
         bail(format!(
@@ -156,28 +156,28 @@ pub async fn run(args: RankArgs) {
         ));
     }
 
-    let rounds = if let Some(target) = resolved.comparisons {
+    let rounds = if let Some(target) = resolved.judgements {
         let pairs_per_round = calculate_pairs_for_round(texts.len());
         if pairs_per_round == 0 {
-            bail("Cannot run comparisons: need at least 2 items.");
+            bail("Cannot run judgements: need at least 2 items.");
         }
-        let r = calculate_rounds_for_target_comparisons(texts.len(), target);
+        let r = calculate_rounds_for_target_judgements(texts.len(), target);
         if r == 0 {
             bail(format!(
-                "--comparisons ({target}) is less than one round ({pairs_per_round} comparisons). Use at least {pairs_per_round}.",
+                "--judgements ({target}) is less than one round ({pairs_per_round} judgements). Use at least {pairs_per_round}.",
             ));
         }
-        let actual = calculate_total_expected_comparisons(texts.len(), r);
+        let actual = calculate_total_expected_judgements(texts.len(), r);
         if actual != target {
             eprintln!(
-                "Running {} comparisons instead of {}, to align with round boundaries ({} per round).",
+                "Running {} judgements instead of {}, to align with round boundaries ({} per round).",
                 actual, target, pairs_per_round,
             );
         }
         r
     } else {
         resolved.rounds.unwrap_or_else(|| {
-            bail(format!("No rounds or comparisons specified. Pass --rounds, --comparisons, or set it in {}", config_path.display()));
+            bail(format!("No rounds or judgements specified. Pass --rounds, --judgements, or set it in {}", config_path.display()));
         })
     };
 
@@ -247,11 +247,11 @@ pub async fn run(args: RankArgs) {
     let titles = Arc::new(titles);
     let texts = Arc::new(texts);
 
-    let total_planned = calculate_total_expected_comparisons(texts.len(), rounds);
+    let total_planned = calculate_total_expected_judgements(texts.len(), rounds);
 
     if resolved.verbose {
         eprintln!(
-            "Ranking {} items across {} rounds ({} comparisons planned)",
+            "Ranking {} items across {} rounds ({} judgements planned)",
             texts.len(),
             rounds,
             total_planned,
@@ -285,9 +285,9 @@ pub async fn run(args: RankArgs) {
         }
     }
 
-    // Set up comparison saving if requested
-    let save_file = if let Some(ref save_path) = resolved.save_comparisons {
-        let path = resolve_save_path(save_path, "comparisons");
+    // Set up judgement saving if requested
+    let save_file = if let Some(ref save_path) = resolved.save_judgements {
+        let path = resolve_save_path(save_path, "judgements");
 
         let file = std::fs::OpenOptions::new()
             .create(true)
@@ -296,7 +296,7 @@ pub async fn run(args: RankArgs) {
             .unwrap_or_else(|e| bail(format!("Failed to open {}: {e}", path.display())));
 
         if resolved.verbose {
-            eprintln!("Saving comparisons to {}", path.display());
+            eprintln!("Saving judgements to {}", path.display());
         }
 
         Some(std::sync::Mutex::new(file))
@@ -323,21 +323,21 @@ pub async fn run(args: RankArgs) {
         None
     };
 
-    let comparison_distribution = resolved.comparison_distribution;
+    let judgement_distribution = resolved.judgement_distribution;
 
     // Top-heavy selection: when active, each interim scoring pass turns the
     // posterior into per-item pairing weights (sharpened uncertainty ratio
     // around the anchor).
     // `None` for uniform, which needs no selection weights.
-    let selection_sharpness = match comparison_distribution {
-        ComparisonDistribution::TopHeavy => Some(resolved.selection_sharpness),
-        ComparisonDistribution::Uniform => None,
+    let selection_sharpness = match judgement_distribution {
+        JudgementDistribution::TopHeavy => Some(resolved.selection_sharpness),
+        JudgementDistribution::Uniform => None,
     };
 
     let engine_config = EngineConfig {
-        comparison_distribution,
+        judgement_distribution,
         matchmaking_sharpness: resolved.matchmaking_sharpness,
-        min_uniform_games: resolved.min_uniform_games,
+        min_uniform_edges: resolved.min_uniform_edges,
         seed: resolved.seed,
     };
     let mut engine = RankingEngine::new(&item_ids, engine_config);
@@ -350,7 +350,7 @@ pub async fn run(args: RankArgs) {
     let judge_models: Arc<Vec<String>> = Arc::new(judges.iter().map(|j| j.model.clone()).collect());
     let judge_endpoints: Arc<Vec<String>> = Arc::new(judges.iter().map(|j| j.endpoint.clone()).collect());
 
-    let mut total_comparisons: usize = 0;
+    let mut total_judgements: usize = 0;
     let mut total_retries: usize = 0;
     let mut failed_http: usize = 0;
     let mut failed_parse: usize = 0;
@@ -371,7 +371,7 @@ pub async fn run(args: RankArgs) {
     let mut judge_assign_rng = seed::make_rng(resolved.seed, seed::SUBSYSTEM_JUDGE_ASSIGN);
     let mut jitter_rng = seed::make_rng(resolved.seed, seed::SUBSYSTEM_TEMP_JITTER);
 
-    // When --emit-round-rankings is set, record (cumulative comparisons, ranked
+    // When --emit-round-rankings is set, record (cumulative judgements, ranked
     // names) after each round so the benchmark can plot per-round convergence.
     let mut round_rankings: Vec<(usize, Vec<String>)> = Vec::new();
     let pairs_per_round = calculate_pairs_for_round(texts.len());
@@ -411,7 +411,7 @@ pub async fn run(args: RankArgs) {
         let round_start = std::time::Instant::now();
 
         cumulative_total_pairs += pairs.len();
-        let pair_assignments = assign_pairs_to_judges(
+        let pair_assignments = assign_judgements_to_judges(
             pairs.len(),
             &normalized_weights,
             &mut cumulative_judge_pairs,
@@ -420,7 +420,7 @@ pub async fn run(args: RankArgs) {
         );
 
         let criterion_weights: Vec<f64> = vec![1.0 / criteria.len() as f64; criteria.len()];
-        let criterion_assignments = assign_pairs_to_judges(
+        let criterion_assignments = assign_judgements_to_judges(
             pairs.len(),
             &criterion_weights,
             &mut cumulative_criterion_pairs,
@@ -469,7 +469,7 @@ pub async fn run(args: RankArgs) {
             let verbose = resolved.verbose;
             let handle = tokio::spawn(async move {
                 let _permit = sem.acquire().await.unwrap();
-                let result = compare_pair(
+                let result = judge_pair(
                     &client,
                     &llm_config,
                     &template,
@@ -494,7 +494,7 @@ pub async fn run(args: RankArgs) {
         }
 
         // Collect results
-        let mut round_results: Vec<ComparisonInput> = Vec::new();
+        let mut round_results: Vec<Edge> = Vec::new();
         let mut judge_last_finish: Vec<Option<std::time::Instant>> = vec![None; judges.len()];
         let mut judge_aborted: Vec<usize> = vec![0; judges.len()];
 
@@ -546,7 +546,7 @@ pub async fn run(args: RankArgs) {
 
                         // The raw distribution is what went to the JSONL above;
                         // the tempered one is what the scoring engine sees.
-                        round_results.push(ComparisonInput::pairwise(
+                        round_results.push(Edge::new(
                             result.item1_id,
                             result.item2_id,
                             temper_verdict(category_probs, judge_verdict_temperatures[judge_idx]),
@@ -626,7 +626,7 @@ pub async fn run(args: RankArgs) {
             }
         }
 
-        total_comparisons += round_results.len();
+        total_judgements += round_results.len();
 
         let round_failed = pairs.len() - round_results.len();
         if resolved.verbose {
@@ -639,7 +639,7 @@ pub async fn run(args: RankArgs) {
 
         if round_failed == pairs.len() {
             eprintln!(
-                "Warning: all {} comparisons in round {} failed. \
+                "Warning: all {} judgements in round {} failed. \
                  If your endpoint requires an API key, ensure it is set via \
                  --api-key or api_key_env in your config.",
                 pairs.len(),
@@ -647,22 +647,22 @@ pub async fn run(args: RankArgs) {
             );
         }
 
-        engine.record_results(&round_results);
+        engine.record_edges(&round_results);
 
-        let need_interim = matches!(comparison_distribution, ComparisonDistribution::TopHeavy)
+        let need_interim = matches!(judgement_distribution, JudgementDistribution::TopHeavy)
             || resolved.live_top.is_some()
             || resolved.emit_round_rankings;
-        if need_interim && !engine.completed_comparisons.is_empty() {
+        if need_interim && !engine.completed_edges.is_empty() {
             let interim = run_scoring(
                 &item_ids,
-                &engine.completed_comparisons,
+                &engine.completed_edges,
                 &ScoringOptions {
                     confidence_level: resolved.confidence_level,
                     selection_sharpness,
                     anchor_index: resolved.anchor_index,
                     selection_cutoff: resolved.selection_cutoff,
                     selection_coverage: resolved.selection_coverage,
-                    target_prior_games: resolved.target_prior_games,
+                    target_prior_edges: resolved.target_prior_edges,
                     regularization_strength: resolved.regularization_strength,
                     prior_tau2: resolved.prior_tau2,
                     bias_prior_tau2: resolved.bias_prior_tau2,
@@ -676,9 +676,9 @@ pub async fn run(args: RankArgs) {
                     .iter()
                     .map(|r| titles[r.item as usize].clone())
                     .collect();
-                round_rankings.push((total_comparisons, order));
+                round_rankings.push((total_judgements, order));
             }
-            if matches!(comparison_distribution, ComparisonDistribution::TopHeavy) {
+            if matches!(judgement_distribution, JudgementDistribution::TopHeavy) {
                 // The interim posterior replaces the per-chunk MLE refit as the
                 // matchmaking rating source; its stds let opponent selection
                 // integrate over rating uncertainty.
@@ -691,8 +691,8 @@ pub async fn run(args: RankArgs) {
                         .expect("top-heavy interim scoring always computes selection ratios");
                     if log_conf >= c.ln() {
                         eprintln!(
-                            "Early stop: P(every item on its side of the anchor) = {:.1}% >= {:.1}% after {} comparisons.",
-                            log_conf.exp() * 100.0, c * 100.0, total_comparisons
+                            "Early stop: P(every item on its side of the anchor) = {:.1}% >= {:.1}% after {} judgements.",
+                            log_conf.exp() * 100.0, c * 100.0, total_judgements
                         );
                         early_stop = true;
                     }
@@ -709,7 +709,7 @@ pub async fn run(args: RankArgs) {
                     &interim.rankings,
                     &titles,
                     round + 1,
-                    total_comparisons,
+                    total_judgements,
                     limit,
                 );
             }
@@ -726,28 +726,28 @@ pub async fn run(args: RankArgs) {
     }
 
     if cancelled.load(Ordering::Relaxed) {
-        eprintln!("\nCancelled. {} comparisons completed before interrupt.", total_comparisons);
+        eprintln!("\nCancelled. {} judgements completed before interrupt.", total_judgements);
     }
 
-    if total_comparisons == 0 {
-        bail("All comparisons failed. No results to score.");
+    if total_judgements == 0 {
+        bail("All judgements failed. No results to score.");
     }
 
     if resolved.verbose {
-        eprintln!("Running final scoring ({total_comparisons} comparisons)...");
+        eprintln!("Running final scoring ({total_judgements} judgements)...");
     }
 
-    // Final scoring over all completed comparisons.
+    // Final scoring over all completed judgements.
     let scoring_result = run_scoring(
         &item_ids,
-        &engine.completed_comparisons,
+        &engine.completed_edges,
         &ScoringOptions {
             confidence_level: resolved.confidence_level,
             selection_sharpness: None,
             anchor_index: resolved.anchor_index,
             selection_cutoff: resolved.selection_cutoff,
             selection_coverage: resolved.selection_coverage,
-            target_prior_games: resolved.target_prior_games,
+            target_prior_edges: resolved.target_prior_edges,
             regularization_strength: resolved.regularization_strength,
             prior_tau2: resolved.prior_tau2,
             bias_prior_tau2: resolved.bias_prior_tau2,
@@ -808,9 +808,9 @@ pub async fn run(args: RankArgs) {
         OutputFormat::Json => output::print_json(
             &scoring_result.rankings,
             &titles,
-            &engine.games_played,
+            &engine.edge_counts,
             rounds_run,
-            total_comparisons,
+            total_judgements,
             &scoring_result.judge_analytics,
             scoring_result.panel_positional_bias,
             scoring_result.panel_positional_bias_ci,
@@ -823,9 +823,9 @@ pub async fn run(args: RankArgs) {
         OutputFormat::Table => output::print_table(
             &scoring_result.rankings,
             &titles,
-            &engine.games_played,
+            &engine.edge_counts,
             rounds_run,
-            total_comparisons,
+            total_judgements,
             resolved.confidence_level,
             &scoring_result.judge_analytics,
             &judge_names,
@@ -835,12 +835,12 @@ pub async fn run(args: RankArgs) {
     }
 }
 
-/// Three-way (3-item) acquisition loop. Selects triples, asks each judge to rank
-/// them, folds the winner-distribution into up to three pairwise edges, and feeds
-/// those to the same scoring engine the pairwise path uses. `total_comparisons`
-/// here counts LLM calls (triples), so accuracy-per-call is directly comparable
+/// Three-item lineup (3-item) acquisition loop. Selects lineups, asks each judge to rank
+/// them, folds the winner-distribution into up to three edges, and feeds
+/// those to the same scoring engine the pairwise path uses. `total_judgements`
+/// here counts LLM calls (lineups), so accuracy-per-call is directly comparable
 /// to pairwise; each call contributes up to three edges to the fit.
-async fn run_three_way(
+async fn run_lineup_judgements(
     args: &RankArgs,
     config_path: &Path,
     cfg: &config::NanojudgeConfig,
@@ -850,7 +850,7 @@ async fn run_three_way(
     let logprobs_mode = judges[0].logprobs;
 
     // No-reasoning mode forces max_tokens to 16 (calibrated for a single verdict
-    // line). The 3-way ranking output is three lines (~20 tokens), which 16
+    // line). The three-item lineup ranking output is three lines (~20 tokens), which 16
     // truncates — cutting off the third line so the parser discards it. Give it
     // enough room.
     if !resolved.reasoning_enabled {
@@ -860,17 +860,17 @@ async fn run_three_way(
     }
 
     if !logprobs_mode {
-        eprintln!("Warning: three-way without logprobs keeps only each triple's winner (2 edges instead of 3, dropping the 2nd-vs-3rd comparison). Enable logprobs for full information.");
+        eprintln!("Warning: three-item lineup without logprobs keeps only each lineup's winner (2 edges instead of 3, dropping the 2nd-vs-3rd judgement). Enable logprobs for full information.");
     }
 
     let (titles, texts) = load_items(args);
     let item_ids: Vec<i64> = (0..texts.len() as i64).collect();
 
     if texts.len() < 3 {
-        bail(format!("Three-way comparisons need at least 3 items; got {}.", texts.len()));
+        bail(format!("Three-item lineup judgements need at least 3 items; got {}.", texts.len()));
     }
 
-    if matches!(resolved.comparison_distribution, ComparisonDistribution::TopHeavy)
+    if matches!(resolved.judgement_distribution, JudgementDistribution::TopHeavy)
         && resolved.anchor_index > (texts.len().saturating_sub(1)) as f64
     {
         bail(format!(
@@ -881,26 +881,26 @@ async fn run_three_way(
         ));
     }
 
-    let triples_per_round = calculate_triples_for_round(texts.len());
+    let lineups_per_round = calculate_lineups_for_round(texts.len());
 
-    let rounds = if let Some(target) = resolved.comparisons {
-        let r = target.div_ceil(triples_per_round);
+    let rounds = if let Some(target) = resolved.judgements {
+        let r = target.div_ceil(lineups_per_round);
         if r == 0 {
             bail(format!(
-                "--comparisons ({target}) is less than one round ({triples_per_round} three-way comparisons). Use at least {triples_per_round}.",
+                "--judgements ({target}) is less than one round ({lineups_per_round} three-item lineup judgements). Use at least {lineups_per_round}.",
             ));
         }
-        let actual = triples_per_round * r;
+        let actual = lineups_per_round * r;
         if actual != target {
             eprintln!(
-                "Running {} three-way comparisons instead of {}, to align with round boundaries ({} per round).",
-                actual, target, triples_per_round,
+                "Running {} three-item lineup judgements instead of {}, to align with round boundaries ({} per round).",
+                actual, target, lineups_per_round,
             );
         }
         r
     } else {
         resolved.rounds.unwrap_or_else(|| {
-            bail(format!("No rounds or comparisons specified. Pass --rounds, --comparisons, or set it in {}", config_path.display()));
+            bail(format!("No rounds or judgements specified. Pass --rounds, --judgements, or set it in {}", config_path.display()));
         })
     };
 
@@ -953,10 +953,10 @@ async fn run_three_way(
     let titles = Arc::new(titles);
     let texts = Arc::new(texts);
 
-    let total_planned = triples_per_round * rounds;
+    let total_planned = lineups_per_round * rounds;
     if resolved.verbose {
         eprintln!(
-            "Ranking {} items across {} rounds ({} three-way comparisons planned)",
+            "Ranking {} items across {} rounds ({} three-item lineup judgements planned)",
             texts.len(), rounds, total_planned,
         );
         if criteria.len() == 1 {
@@ -970,12 +970,12 @@ async fn run_three_way(
         }
     }
 
-    let save_file = if let Some(ref save_path) = resolved.save_comparisons {
-        let path = resolve_save_path(save_path, "comparisons");
+    let save_file = if let Some(ref save_path) = resolved.save_judgements {
+        let path = resolve_save_path(save_path, "judgements");
         let file = std::fs::OpenOptions::new().create(true).append(true).open(&path)
             .unwrap_or_else(|e| bail(format!("Failed to open {}: {e}", path.display())));
         if resolved.verbose {
-            eprintln!("Saving comparisons to {}", path.display());
+            eprintln!("Saving judgements to {}", path.display());
         }
         Some(std::sync::Mutex::new(file))
     } else {
@@ -991,16 +991,16 @@ async fn run_three_way(
         None
     };
 
-    let comparison_distribution = resolved.comparison_distribution;
-    let selection_sharpness = match comparison_distribution {
-        ComparisonDistribution::TopHeavy => Some(resolved.selection_sharpness),
-        ComparisonDistribution::Uniform => None,
+    let judgement_distribution = resolved.judgement_distribution;
+    let selection_sharpness = match judgement_distribution {
+        JudgementDistribution::TopHeavy => Some(resolved.selection_sharpness),
+        JudgementDistribution::Uniform => None,
     };
 
     let engine_config = EngineConfig {
-        comparison_distribution,
+        judgement_distribution,
         matchmaking_sharpness: resolved.matchmaking_sharpness,
-        min_uniform_games: resolved.min_uniform_games,
+        min_uniform_edges: resolved.min_uniform_edges,
         seed: resolved.seed,
     };
     let mut engine = RankingEngine::new(&item_ids, engine_config);
@@ -1012,8 +1012,8 @@ async fn run_three_way(
     let judge_models: Arc<Vec<String>> = Arc::new(judges.iter().map(|j| j.model.clone()).collect());
     let judge_endpoints: Arc<Vec<String>> = Arc::new(judges.iter().map(|j| j.endpoint.clone()).collect());
 
-    // total_comparisons counts LLM calls (successfully-parsed triples).
-    let mut total_comparisons: usize = 0;
+    // total_judgements counts LLM calls (successfully-parsed lineups).
+    let mut total_judgements: usize = 0;
     let mut total_retries: usize = 0;
     let mut failed_http: usize = 0;
     let mut failed_parse: usize = 0;
@@ -1056,11 +1056,11 @@ async fn run_three_way(
 
         // Split the round into refit chunks (only top-heavy subdivides); each
         // chunk runs its own scoring refit and re-derives selection weights.
-        let chunk_sizes = engine.round_chunk_sizes_triples(resolved.refits_per_round);
+        let chunk_sizes = engine.round_chunk_sizes_lineups(resolved.refits_per_round);
         if resolved.verbose {
             eprintln!(
-                "Round {}/{}: {} triples in {} refit chunk(s)",
-                round + 1, rounds, triples_per_round, chunk_sizes.len(),
+                "Round {}/{}: {} lineups in {} refit chunk(s)",
+                round + 1, rounds, lineups_per_round, chunk_sizes.len(),
             );
         }
 
@@ -1068,42 +1068,42 @@ async fn run_three_way(
         if cancelled.load(Ordering::Relaxed) {
             break;
         }
-        let triples = engine.generate_triples(chunk_size);
+        let lineups = engine.generate_lineups(chunk_size);
         let round_start = std::time::Instant::now();
 
-        cumulative_total_pairs += triples.len();
-        let judge_assignments = assign_pairs_to_judges(
-            triples.len(), &normalized_weights, &mut cumulative_judge_pairs,
+        cumulative_total_pairs += lineups.len();
+        let judge_assignments = assign_judgements_to_judges(
+            lineups.len(), &normalized_weights, &mut cumulative_judge_pairs,
             cumulative_total_pairs, &mut judge_assign_rng,
         );
         let criterion_weights: Vec<f64> = vec![1.0 / criteria.len() as f64; criteria.len()];
-        let criterion_assignments = assign_pairs_to_judges(
-            triples.len(), &criterion_weights, &mut cumulative_criterion_pairs,
+        let criterion_assignments = assign_judgements_to_judges(
+            lineups.len(), &criterion_weights, &mut cumulative_criterion_pairs,
             cumulative_total_pairs, &mut judge_assign_rng,
         );
 
-        let precomputed_temperatures: Vec<f64> = (0..triples.len()).map(|idx| {
+        let precomputed_temperatures: Vec<f64> = (0..lineups.len()).map(|idx| {
             let judge_idx = judge_assignments[idx];
             let base = judge_llm_configs[judge_idx].temperature;
             let jitter = judge_llm_configs[judge_idx].temperature_jitter;
             crate::llm::jittered_temperature(base, jitter, &mut jitter_rng)
         }).collect();
 
-        let mut handles = Vec::with_capacity(triples.len());
-        for (triple_idx, &(t_a, t_b, t_c)) in triples.iter().enumerate() {
+        let mut handles = Vec::with_capacity(lineups.len());
+        for (lineup_idx, &(t_a, t_b, t_c)) in lineups.iter().enumerate() {
             // Shuffle the three items into random slot order so no item has a
             // fixed presentation position (each of the 6 permutations equally
-            // likely). winner_dist stays aligned because compare_triple maps
+            // likely). winner_dist stays aligned because judge_lineup maps
             // option A/B/C to whatever ids we pass here.
             let mut slots = [t_a, t_b, t_c];
             slots.shuffle(&mut slot_rng);
             let (id_a, id_b, id_c) = (slots[0], slots[1], slots[2]);
-            let judge_idx = judge_assignments[triple_idx];
+            let judge_idx = judge_assignments[lineup_idx];
             let sem = judge_semaphores[judge_idx].clone();
             let client = client.clone();
             let base_config = &judge_llm_configs[judge_idx];
             let llm_config = Arc::new(LlmConfig {
-                temperature: precomputed_temperatures[triple_idx],
+                temperature: precomputed_temperatures[lineup_idx],
                 temperature_jitter: 0.0,
                 endpoint: base_config.endpoint.clone(),
                 model: base_config.model.clone(),
@@ -1116,7 +1116,7 @@ async fn run_three_way(
                 chat_template_kwargs: base_config.chat_template_kwargs.clone(),
             });
             let texts = texts.clone();
-            let criterion = criteria[criterion_assignments[triple_idx]].clone();
+            let criterion = criteria[criterion_assignments[lineup_idx]].clone();
             let analysis_length = analysis_length.clone();
             let template = template.clone();
             let min_logprob_coverage = judge_min_logprob_coverages[judge_idx];
@@ -1126,7 +1126,7 @@ async fn run_three_way(
 
             let handle = tokio::spawn(async move {
                 let _permit = sem.acquire().await.unwrap();
-                let result = compare_triple(
+                let result = judge_lineup(
                     &client, &llm_config, &template, &criterion,
                     &texts[id_a as usize], &texts[id_b as usize], &texts[id_c as usize],
                     id_a, id_b, id_c,
@@ -1137,7 +1137,7 @@ async fn run_three_way(
             handles.push((handle, judge_idx));
         }
 
-        let mut round_results: Vec<ComparisonInput> = Vec::new();
+        let mut round_results: Vec<Edge> = Vec::new();
         let mut round_llm_calls: usize = 0;
         let mut judge_last_finish: Vec<Option<std::time::Instant>> = vec![None; judges.len()];
         let mut judge_aborted: Vec<usize> = vec![0; judges.len()];
@@ -1191,7 +1191,7 @@ async fn run_three_way(
 
                         let tempered = temper_verdict(winner_dist, judge_verdict_temperatures[judge_idx]);
 
-                        // Decomposed pairwise edges for engine and scoring.
+                        // Decomposed edges for engine and scoring.
                         let edges = winner_dist_to_edges(
                             [tw.item_a_id, tw.item_b_id, tw.item_c_id],
                             tempered,
@@ -1218,7 +1218,7 @@ async fn run_three_way(
                         }
                         if resolved.verbose {
                             eprintln!(
-                                "  Warning: unparseable 3-way ranking for {} / {} / {}, skipping",
+                                "  Warning: unparseable three-item lineup ranking for {} / {} / {}, skipping",
                                 titles[tw.item_a_id as usize],
                                 titles[tw.item_b_id as usize],
                                 titles[tw.item_c_id as usize],
@@ -1264,38 +1264,38 @@ async fn run_three_way(
             }
         }
 
-        total_comparisons += round_llm_calls;
+        total_judgements += round_llm_calls;
 
         if resolved.verbose {
             eprintln!(
                 "  Completed: {} successful, {} failed ({} edges fed)",
-                round_llm_calls, triples.len() - round_llm_calls, round_results.len(),
+                round_llm_calls, lineups.len() - round_llm_calls, round_results.len(),
             );
         }
 
-        if round_llm_calls == 0 && !triples.is_empty() {
+        if round_llm_calls == 0 && !lineups.is_empty() {
             eprintln!(
-                "Warning: all {} three-way comparisons in a round-{} chunk failed.",
-                triples.len(), round + 1,
+                "Warning: all {} three-item lineup judgements in a round-{} chunk failed.",
+                lineups.len(), round + 1,
             );
         }
 
-        engine.record_results(&round_results);
+        engine.record_edges(&round_results);
 
-        let need_interim = matches!(comparison_distribution, ComparisonDistribution::TopHeavy)
+        let need_interim = matches!(judgement_distribution, JudgementDistribution::TopHeavy)
             || resolved.live_top.is_some()
             || resolved.emit_round_rankings;
-        if need_interim && !engine.completed_comparisons.is_empty() {
+        if need_interim && !engine.completed_edges.is_empty() {
             let interim = run_scoring(
                 &item_ids,
-                &engine.completed_comparisons,
+                &engine.completed_edges,
                 &ScoringOptions {
                     confidence_level: resolved.confidence_level,
                     selection_sharpness,
                     anchor_index: resolved.anchor_index,
                     selection_cutoff: resolved.selection_cutoff,
                     selection_coverage: resolved.selection_coverage,
-                    target_prior_games: resolved.target_prior_games,
+                    target_prior_edges: resolved.target_prior_edges,
                     regularization_strength: resolved.regularization_strength,
                     prior_tau2: resolved.prior_tau2,
                     bias_prior_tau2: resolved.bias_prior_tau2,
@@ -1307,9 +1307,9 @@ async fn run_three_way(
                 let order: Vec<String> = interim.rankings.iter()
                     .map(|r| titles[r.item as usize].clone())
                     .collect();
-                round_rankings.push((total_comparisons, order));
+                round_rankings.push((total_judgements, order));
             }
-            if matches!(comparison_distribution, ComparisonDistribution::TopHeavy) {
+            if matches!(judgement_distribution, JudgementDistribution::TopHeavy) {
                 // The interim posterior replaces the per-chunk MLE refit as the
                 // matchmaking rating source; its stds let opponent selection
                 // integrate over rating uncertainty.
@@ -1322,8 +1322,8 @@ async fn run_three_way(
                         .expect("top-heavy interim scoring always computes selection ratios");
                     if log_conf >= c.ln() {
                         eprintln!(
-                            "Early stop: P(every item on its side of the anchor) = {:.1}% >= {:.1}% after {} comparisons.",
-                            log_conf.exp() * 100.0, c * 100.0, total_comparisons
+                            "Early stop: P(every item on its side of the anchor) = {:.1}% >= {:.1}% after {} judgements.",
+                            log_conf.exp() * 100.0, c * 100.0, total_judgements
                         );
                         early_stop = true;
                     }
@@ -1336,7 +1336,7 @@ async fn run_three_way(
                 engine.update_current_ratings();
             }
             if let Some(limit) = resolved.live_top {
-                output::print_live_table(&interim.rankings, &titles, round + 1, total_comparisons, limit);
+                output::print_live_table(&interim.rankings, &titles, round + 1, total_judgements, limit);
             }
         } else {
             engine.update_current_ratings();
@@ -1351,27 +1351,27 @@ async fn run_three_way(
     }
 
     if cancelled.load(Ordering::Relaxed) {
-        eprintln!("\nCancelled. {} three-way comparisons completed before interrupt.", total_comparisons);
+        eprintln!("\nCancelled. {} three-item lineup judgements completed before interrupt.", total_judgements);
     }
 
-    if total_comparisons == 0 {
-        bail("All three-way comparisons failed. No results to score.");
+    if total_judgements == 0 {
+        bail("All three-item lineup judgements failed. No results to score.");
     }
 
     if resolved.verbose {
-        eprintln!("Running final scoring ({} three-way comparisons)...", total_comparisons);
+        eprintln!("Running final scoring ({} three-item lineup judgements)...", total_judgements);
     }
 
     let scoring_result = run_scoring(
         &item_ids,
-        &engine.completed_comparisons,
+        &engine.completed_edges,
         &ScoringOptions {
             confidence_level: resolved.confidence_level,
             selection_sharpness: None,
             anchor_index: resolved.anchor_index,
             selection_cutoff: resolved.selection_cutoff,
             selection_coverage: resolved.selection_coverage,
-            target_prior_games: resolved.target_prior_games,
+            target_prior_edges: resolved.target_prior_edges,
             regularization_strength: resolved.regularization_strength,
             prior_tau2: resolved.prior_tau2,
             bias_prior_tau2: resolved.bias_prior_tau2,
@@ -1411,13 +1411,13 @@ async fn run_three_way(
 
     match resolved.output_format {
         OutputFormat::Json => output::print_json(
-            &scoring_result.rankings, &titles, &engine.games_played, rounds_run, total_comparisons,
+            &scoring_result.rankings, &titles, &engine.edge_counts, rounds_run, total_judgements,
             &scoring_result.judge_analytics,
             scoring_result.panel_positional_bias, scoring_result.panel_positional_bias_ci,
             if resolved.emit_round_rankings { Some(round_rankings.as_slice()) } else { None },
         ),
         OutputFormat::Table => output::print_table(
-            &scoring_result.rankings, &titles, &engine.games_played, rounds_run, total_comparisons,
+            &scoring_result.rankings, &titles, &engine.edge_counts, rounds_run, total_judgements,
             resolved.confidence_level, &scoring_result.judge_analytics,
             &judge_names, &judge_tokens, &judge_avg_wall_time,
         ),
@@ -1462,9 +1462,9 @@ mod tests {
     }
 
     #[test]
-    fn test_temper_verdict_three_way_pairwise_ratios() {
+    fn test_temper_verdict_lineup_pairwise_ratios() {
         // Tempering the 3-vector before the Luce ratio must divide every
-        // pairwise edge's log-odds by T.
+        // edge's log-odds by T.
         let q = [0.9, 0.08, 0.02];
         let t = temper_verdict(q, 4.0);
         assert!((t.iter().sum::<f64>() - 1.0).abs() < 1e-12);
@@ -1521,7 +1521,7 @@ mod tests {
         let mut total = 0;
         for _ in 0..5 {
             total += 10;
-            assign_pairs_to_judges(10, &weights, &mut cumulative, total, &mut rng);
+            assign_judgements_to_judges(10, &weights, &mut cumulative, total, &mut rng);
         }
 
         // After 50 total pairs with equal weights, each should have ~16-17
@@ -1541,7 +1541,7 @@ mod tests {
         let mut total = 0;
         for _ in 0..3 {
             total += 3;
-            assign_pairs_to_judges(3, &weights, &mut cumulative, total, &mut rng);
+            assign_judgements_to_judges(3, &weights, &mut cumulative, total, &mut rng);
         }
 
         // 9 pairs split across 2 judges: should be 4 and 5

@@ -21,7 +21,7 @@ impl std::fmt::Display for OutputFormat {
 }
 
 #[derive(Parser)]
-#[command(name = "nanojudge", version, about = "Rank items using LLM pairwise comparisons")]
+#[command(name = "nanojudge", version, about = "Rank items using LLM judgements")]
 pub struct Cli {
     #[command(subcommand)]
     pub command: Commands,
@@ -29,7 +29,7 @@ pub struct Cli {
 
 #[derive(clap::Subcommand)]
 pub enum Commands {
-    /// Run pairwise ranking on a list of items
+    /// Run ranking on a list of items
     Rank(RankArgs),
     /// Benchmark an LLM endpoint for throughput, latency, and reliability
     Benchmark(BenchmarkArgs),
@@ -51,14 +51,14 @@ pub struct ConfigArgs {
     #[arg(long, num_args = 0..=1, default_missing_value = "true")]
     pub logprobs: Option<bool>,
 
-    /// Number of comparison rounds
-    #[arg(long, conflicts_with = "comparisons")]
+    /// Number of judgement rounds
+    #[arg(long, conflicts_with = "judgements")]
     pub rounds: Option<usize>,
 
-    /// Target number of comparisons (alternative to --rounds).
-    /// Converted to rounds by dividing by comparisons-per-round, rounded up.
+    /// Target number of judgements (alternative to --rounds).
+    /// Converted to rounds by dividing by judgements-per-round, rounded up.
     #[arg(long, conflicts_with = "rounds")]
-    pub comparisons: Option<usize>,
+    pub judgements: Option<usize>,
 
     /// Max concurrent LLM requests
     #[arg(long)]
@@ -78,17 +78,17 @@ pub struct ConfigArgs {
     #[arg(long)]
     pub verdict_temperature: Option<f64>,
 
-    /// Comparison distribution: "uniform" or "top-heavy"
+    /// Judgement distribution: "uniform" or "top-heavy"
     #[arg(long)]
-    pub comparison_distribution: Option<String>,
+    pub judgement_distribution: Option<String>,
 
-    /// How many items each judgment compares at once: 2 (pairwise, default) or 3.
-    /// With 3, each judgment ranks three items and the winner-distribution is
-    /// folded into up to three pairwise edges, so one LLM call yields more
-    /// comparisons. 3 needs logprobs for full information (text mode keeps only
+    /// Number of items in each judged lineup: 2 (default) or 3.
+    /// With 3, each judgement ranks three items and the winner-distribution is
+    /// folded into up to three edges, so one judgement yields more scoring
+    /// evidence. Size 3 needs logprobs for full information (text mode keeps only
     /// the winner).
     #[arg(long)]
-    pub items_per_comparison: Option<usize>,
+    pub lineup_size: Option<usize>,
 
     /// Top-heavy selection sharpness: each item's uncertainty ratio around the
     /// anchor — min/max of the probability of sitting above vs below the
@@ -116,7 +116,7 @@ pub struct ConfigArgs {
     pub cutoff: Option<f64>,
 
     /// Top-heavy coverage pull (proportional-fair). Each item's weight is divided
-    /// by games-played^coverage, pulling its cumulative comparison count toward
+    /// by edge-count^coverage, pulling its cumulative edge count toward
     /// its ratio-implied share. 0 = off, 1 = standard proportional-fair, > 1
     /// over-corrects toward equal coverage. Must be finite and >= 0. Default: 1.
     /// Only used with top-heavy.
@@ -124,24 +124,24 @@ pub struct ConfigArgs {
     pub coverage: Option<f64>,
 
     /// Top-heavy selection target blend: the prior-predicted anchor strength
-    /// counts as this many pseudo-games against the observed anchor's game
-    /// count, so the prediction dominates early and fades as the anchor plays
-    /// more. Higher = trust the prediction longer. 0 disables the blend (pure
+    /// counts as this many pseudo-edges against the observed anchor's edge
+    /// count, so the prediction dominates early and fades as the anchor gains
+    /// edges. Higher = trust the prediction longer. 0 disables the blend (pure
     /// observed anchor). Must be finite and >= 0. Default: 5. Only used with
     /// top-heavy.
     #[arg(long)]
-    pub target_prior_games: Option<f64>,
+    pub target_prior_edges: Option<f64>,
 
     /// Early stop for top-heavy runs: after each interim fit, end the run once
     /// the probability that every item sits on its side of the anchor — the
     /// product of the per-item side probabilities — reaches this value; final
-    /// scoring then runs on the comparisons collected so far. In (0.5, 1.0),
+    /// scoring then runs on the judgements collected so far. In (0.5, 1.0),
     /// e.g. 0.95. No default: when absent, the run always uses its full round
     /// budget. Rejected with the uniform distribution.
     #[arg(long)]
     pub stop_confidence: Option<f64>,
 
-    /// Max retries per comparison on HTTP errors. Default: 3. Set to 0 to disable.
+    /// Max retries per judgement on HTTP errors. Default: 3. Set to 0 to disable.
     #[arg(long)]
     pub retries: Option<usize>,
 
@@ -177,10 +177,10 @@ pub struct ConfigArgs {
     #[arg(long)]
     pub matchmaking_sharpness: Option<f64>,
 
-    /// Minimum games per item before the top-heavy distribution kicks in.
+    /// Minimum edges per item before the top-heavy distribution kicks in.
     /// Must be >= 1. Default: 2.
     #[arg(long)]
-    pub min_uniform_games: Option<usize>,
+    pub min_uniform_edges: Option<usize>,
 
     /// Number of scoring refits per round once top-heavy pairing is active.
     /// 1 (default) refits once per round, as before. Higher values split each
@@ -209,11 +209,11 @@ pub struct ConfigArgs {
     #[arg(long, num_args = 0..=1, default_missing_value = "true")]
     pub emit_round_rankings: Option<bool>,
 
-    /// Save all comparisons to a JSONL file.
-    /// Bare flag: saves to comparisons-{timestamp}.jsonl in the current directory.
+    /// Save all judgements to a JSONL file.
+    /// Bare flag: saves to judgements-{timestamp}.jsonl in the current directory.
     /// With a path: saves to that file (or auto-generates a name if path is a directory).
     #[arg(long, num_args = 0..=1, default_missing_value = ".")]
-    pub save_comparisons: Option<PathBuf>,
+    pub save_judgements: Option<PathBuf>,
 
     /// Output format for final results: "table" or "json". Default: table.
     #[arg(long, value_enum)]
@@ -223,7 +223,7 @@ pub struct ConfigArgs {
     #[arg(short, long, num_args = 0..=1, default_missing_value = "true")]
     pub verbose: Option<bool>,
 
-    /// Save failed comparisons (unparseable responses) to a JSONL file.
+    /// Save failed judgements (unparseable responses) to a JSONL file.
     /// Bare flag: saves to failures-{timestamp}.jsonl in the current directory.
     /// With a path: saves to that file (or auto-generates a name if path is a directory).
     #[arg(long, num_args = 0..=1, default_missing_value = ".")]
@@ -239,7 +239,7 @@ pub struct BenchmarkArgs {
     #[command(flatten)]
     pub cfg: ConfigArgs,
 
-    /// Number of comparison pairs to run (each pair runs both directions)
+    /// Number of judgement pairs to run (each pair runs both directions)
     #[arg(short, long, default_value = DEFAULT_BENCHMARK_PAIRS)]
     pub num_pairs: usize,
 
@@ -253,7 +253,7 @@ pub struct RankArgs {
     #[command(flatten)]
     pub cfg: ConfigArgs,
 
-    /// The comparison criterion (e.g. "Which is more rewatchable?")
+    /// The judgement criterion (e.g. "Which is more rewatchable?")
     #[arg(long, required_unless_present = "criterion_file")]
     pub criterion: Option<String>,
 
