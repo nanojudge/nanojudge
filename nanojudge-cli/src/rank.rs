@@ -1,6 +1,6 @@
 use nanojudge_core::{
-    ComparisonInput, EngineConfig, JudgeInfo, RankingEngine, ScoringOptions, ComparisonDistribution,
-    calculate_pairs_for_round, calculate_rounds_for_target_comparisons,
+    ComparisonInput, EngineConfig, JudgeInfo, RankingEngine, ScoringOptions,
+    ComparisonDistribution, calculate_pairs_for_round, calculate_rounds_for_target_comparisons,
     calculate_total_expected_comparisons, calculate_triples_for_round, run_scoring,
     winner_dist_to_edges,
 };
@@ -1189,16 +1189,14 @@ async fn run_three_way(
                             let _ = f.flush();
                         }
 
-                        // Each edge already carries the true presentation slots
-                        // (from the shuffled A/B/C order), so the scoring engine
-                        // estimates and corrects the per-slot positional bias — no
-                        // orientation coin needed. Feed the edges as-is.
+                        let tempered = temper_verdict(winner_dist, judge_verdict_temperatures[judge_idx]);
+
+                        // Decomposed pairwise edges for engine and scoring.
                         let edges = winner_dist_to_edges(
                             [tw.item_a_id, tw.item_b_id, tw.item_c_id],
-                            // Raw distribution went to the JSONL above; the
-                            // scoring engine sees the tempered one.
-                            temper_verdict(winner_dist, judge_verdict_temperatures[judge_idx]),
+                            tempered,
                             assigned_judge_id,
+                            logprobs_mode,
                         );
                         round_results.extend(edges);
                     } else {
@@ -1361,8 +1359,7 @@ async fn run_three_way(
     }
 
     if resolved.verbose {
-        eprintln!("Running final scoring ({} three-way comparisons, {} edges)...",
-            total_comparisons, engine.completed_comparisons.len());
+        eprintln!("Running final scoring ({} three-way comparisons)...", total_comparisons);
     }
 
     let scoring_result = run_scoring(

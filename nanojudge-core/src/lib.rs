@@ -25,8 +25,8 @@
 //!
 //! // category_probs = [P(item1 wins), P(item2 wins)]
 //! let comparisons = vec![
-//!     ComparisonInput { slot1: 0, slot2: 1, item1: 100, item2: 200, category_probs: [1.0, 0.0], judge_id },
-//!     ComparisonInput { slot1: 0, slot2: 1, item1: 200, item2: 300, category_probs: [0.7, 0.3], judge_id },
+//!     ComparisonInput { slot1: 0, slot2: 1, item1: 100, item2: 200, category_probs: [1.0, 0.0], judge_id, weight: 1.0 },
+//!     ComparisonInput { slot1: 0, slot2: 1, item1: 200, item2: 300, category_probs: [0.7, 0.3], judge_id, weight: 1.0 },
 //! ];
 //!
 //! let judge_info = JudgeInfo {
@@ -82,6 +82,6 @@ pub use pairing::{
 pub use scoring::run_scoring;
 pub use three_way::winner_dist_to_edges;
 pub use types::{
-    stable_hash, ComparisonInput, JudgeAnalytics, JudgeInfo, Pair, RankedItem, ScoringOptions,
-    ScoringResult,
+    stable_hash, ComparisonInput, JudgeAnalytics, JudgeInfo, Pair, RankedItem,
+    ScoringOptions, ScoringResult,
 };

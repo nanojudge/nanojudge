@@ -6,8 +6,8 @@ use std::collections::HashMap;
 
 use crate::laplace_bt;
 use crate::types::{
-    ComparisonInput, IdMap, IndexedComparison, JudgeAnalytics, JudgeInfo, RankedItem,
-    ScoringOptions, ScoringResult,
+    ComparisonInput, IdMap, IndexedComparison, JudgeAnalytics, JudgeInfo,
+    RankedItem, ScoringOptions, ScoringResult,
 };
 
 /// Standard normal CDF Φ(x).
@@ -383,7 +383,7 @@ fn build_scoring_result(
     // Per-item and per-judge comparison counts.
     let mut games_per_item = vec![0usize; num_items];
     let mut comparisons_per_judge = vec![0usize; num_judges];
-    for &(i, j, _, k, _, _) in indexed {
+    for &(i, j, _, k, _, _, _) in indexed {
         games_per_item[i] += 1;
         games_per_item[j] += 1;
         comparisons_per_judge[k] += 1;
@@ -486,8 +486,8 @@ mod tests {
     /// code's 50/50 coin flip achieves this naturally.
     fn make_pair(id1: i64, id2: i64, prob: f64) -> [ComparisonInput; 2] {
         [
-            ComparisonInput { slot1: 0, slot2: 1, item1: id1, item2: id2, category_probs: dist(prob), judge_id: 42 },
-            ComparisonInput { slot1: 0, slot2: 1, item1: id2, item2: id1, category_probs: dist(1.0 - prob), judge_id: 42 },
+            ComparisonInput { slot1: 0, slot2: 1, item1: id1, item2: id2, category_probs: dist(prob), judge_id: 42, weight: 1.0 },
+            ComparisonInput { slot1: 0, slot2: 1, item1: id2, item2: id1, category_probs: dist(1.0 - prob), judge_id: 42, weight: 1.0 },
         ]
     }
 
@@ -678,7 +678,7 @@ mod tests {
     fn test_scoring_unknown_id_panics() {
         let item_ids = vec![1, 2, 3];
         let comparisons = vec![
-            ComparisonInput { slot1: 0, slot2: 1, item1: 1, item2: 99, category_probs: dist(0.8), judge_id: 42 },
+            ComparisonInput { slot1: 0, slot2: 1, item1: 1, item2: 99, category_probs: dist(0.8), judge_id: 42, weight: 1.0 },
         ];
 
         let ji = single_judge_info();
@@ -710,12 +710,12 @@ mod tests {
         let judge_b = 222;
 
         let comparisons = vec![
-            ComparisonInput { slot1: 0, slot2: 1, item1: 100, item2: 200, category_probs: dist(0.9), judge_id: judge_a },
-            ComparisonInput { slot1: 0, slot2: 1, item1: 200, item2: 100, category_probs: dist(0.1), judge_id: judge_a },
-            ComparisonInput { slot1: 0, slot2: 1, item1: 100, item2: 300, category_probs: dist(0.8), judge_id: judge_b },
-            ComparisonInput { slot1: 0, slot2: 1, item1: 300, item2: 100, category_probs: dist(0.2), judge_id: judge_b },
-            ComparisonInput { slot1: 0, slot2: 1, item1: 200, item2: 300, category_probs: dist(0.7), judge_id: judge_a },
-            ComparisonInput { slot1: 0, slot2: 1, item1: 300, item2: 200, category_probs: dist(0.3), judge_id: judge_b },
+            ComparisonInput { slot1: 0, slot2: 1, item1: 100, item2: 200, category_probs: dist(0.9), judge_id: judge_a, weight: 1.0 },
+            ComparisonInput { slot1: 0, slot2: 1, item1: 200, item2: 100, category_probs: dist(0.1), judge_id: judge_a, weight: 1.0 },
+            ComparisonInput { slot1: 0, slot2: 1, item1: 100, item2: 300, category_probs: dist(0.8), judge_id: judge_b, weight: 1.0 },
+            ComparisonInput { slot1: 0, slot2: 1, item1: 300, item2: 100, category_probs: dist(0.2), judge_id: judge_b, weight: 1.0 },
+            ComparisonInput { slot1: 0, slot2: 1, item1: 200, item2: 300, category_probs: dist(0.7), judge_id: judge_a, weight: 1.0 },
+            ComparisonInput { slot1: 0, slot2: 1, item1: 300, item2: 200, category_probs: dist(0.3), judge_id: judge_b, weight: 1.0 },
         ];
 
         let ji = JudgeInfo {
@@ -757,10 +757,10 @@ mod tests {
         let judge_b = 222;
 
         let comparisons = vec![
-            ComparisonInput { slot1: 0, slot2: 1, item1: 100, item2: 200, category_probs: dist(0.9), judge_id: judge_a },
-            ComparisonInput { slot1: 0, slot2: 1, item1: 200, item2: 100, category_probs: dist(0.1), judge_id: judge_a },
-            ComparisonInput { slot1: 0, slot2: 1, item1: 100, item2: 300, category_probs: dist(0.8), judge_id: judge_b },
-            ComparisonInput { slot1: 0, slot2: 1, item1: 300, item2: 100, category_probs: dist(0.2), judge_id: judge_b },
+            ComparisonInput { slot1: 0, slot2: 1, item1: 100, item2: 200, category_probs: dist(0.9), judge_id: judge_a, weight: 1.0 },
+            ComparisonInput { slot1: 0, slot2: 1, item1: 200, item2: 100, category_probs: dist(0.1), judge_id: judge_a, weight: 1.0 },
+            ComparisonInput { slot1: 0, slot2: 1, item1: 100, item2: 300, category_probs: dist(0.8), judge_id: judge_b, weight: 1.0 },
+            ComparisonInput { slot1: 0, slot2: 1, item1: 300, item2: 100, category_probs: dist(0.2), judge_id: judge_b, weight: 1.0 },
         ];
 
         let ji = JudgeInfo {

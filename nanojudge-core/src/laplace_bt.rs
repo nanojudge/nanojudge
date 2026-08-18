@@ -85,7 +85,7 @@ const VARIANCE_CG_TOL: f64 = 1e-6;
 /// weighting, not the ranking.
 #[allow(clippy::too_many_arguments)]
 #[allow(clippy::needless_range_loop)]
-pub fn fit_linear(
+pub(crate) fn fit_linear(
     num_items: usize,
     num_judges: usize,
     comparisons: &[IndexedComparison],
@@ -100,7 +100,7 @@ pub fn fit_linear(
     // least 2. Each judge gets `num_slots − 1` free advantage params; the highest
     // slot is the pinned zero reference.
     let mut num_slots = 2usize;
-    for &(_, _, _, _, s1, s2) in comparisons {
+    for &(_, _, _, _, s1, s2, _) in comparisons {
         num_slots = num_slots.max(s1 as usize + 1).max(s2 as usize + 1);
     }
     let free_per_judge = num_slots - 1;
@@ -125,11 +125,11 @@ pub fn fit_linear(
 
     let log_posterior = |phi: &[f64]| -> f64 {
         let mut lp = 0.0;
-        for &(i, j, p, k, s1, s2) in comparisons {
+        for &(i, j, p, k, s1, s2, wt) in comparisons {
             let g1 = bias_idx(k, s1 as usize).map(|b| phi[b]).unwrap_or(0.0);
             let g2 = bias_idx(k, s2 as usize).map(|b| phi[b]).unwrap_or(0.0);
             let d = phi[i] - phi[j] + g1 - g2;
-            lp += p * log_sigmoid(d) + (1.0 - p) * log_sigmoid(-d);
+            lp += wt * (p * log_sigmoid(d) + (1.0 - p) * log_sigmoid(-d));
         }
         for &t in phi.iter().take(num_items) {
             lp -= 0.5 * theta_precision * t * t;
@@ -141,25 +141,25 @@ pub fn fit_linear(
         lp
     };
 
-    // Per-comparison Newton weight w_c = σ(1−σ), refreshed each Newton step.
+    // Per-pairwise Newton weight w_c = wt·σ(1−σ), refreshed each Newton step.
     let mut w = vec![0.0; comparisons.len()];
 
     for _ in 0..max_iterations {
         // Gradient g and the weights w_c at the current point.
         let mut g = vec![0.0; dim];
-        for (c, &(i, j, p, k, s1, s2)) in comparisons.iter().enumerate() {
+        for (c, &(i, j, p, k, s1, s2, wt)) in comparisons.iter().enumerate() {
             let b1 = bias_idx(k, s1 as usize);
             let b2 = bias_idx(k, s2 as usize);
             let g1 = b1.map(|b| phi[b]).unwrap_or(0.0);
             let g2 = b2.map(|b| phi[b]).unwrap_or(0.0);
             let d = phi[i] - phi[j] + g1 - g2;
             let s = sigmoid(d);
-            let resid = p - s;
+            let resid = wt * (p - s);
             g[i] += resid;
             g[j] -= resid;
             if let Some(b) = b1 { g[b] += resid; }
             if let Some(b) = b2 { g[b] -= resid; }
-            w[c] = s * (1.0 - s);
+            w[c] = wt * s * (1.0 - s);
         }
         for i in 0..num_items {
             g[i] -= theta_precision * phi[i];
@@ -173,9 +173,7 @@ pub fn fit_linear(
             break;
         }
 
-        // Hessian-vector product A·v = (priors)·v + Σ_c w_c (u_c·v) u_c, where
-        // u_c = e_i − e_j + e_{b1} − e_{b2} (bias terms present only for free
-        // slots). Never materializes A.
+        // Negative-Hessian-vector product for Newton-CG.
         let hessvec = |v: &[f64]| -> Vec<f64> {
             let mut out = vec![0.0; dim];
             for i in 0..num_items {
@@ -184,7 +182,7 @@ pub fn fit_linear(
             for idx in num_items..dim {
                 out[idx] = bias_precision * v[idx];
             }
-            for (c, &(i, j, _p, k, s1, s2)) in comparisons.iter().enumerate() {
+            for (c, &(i, j, _p, k, s1, s2, _wt)) in comparisons.iter().enumerate() {
                 let b1 = bias_idx(k, s1 as usize);
                 let b2 = bias_idx(k, s2 as usize);
                 let mut uv = v[i] - v[j];
@@ -229,24 +227,23 @@ pub fn fit_linear(
     for idx in num_items..dim {
         info[idx] = bias_precision;
     }
-    for (c, &(i, j, _p, k, s1, s2)) in comparisons.iter().enumerate() {
+    for (c, &(i, j, _p, k, s1, s2, wt)) in comparisons.iter().enumerate() {
         let b1 = bias_idx(k, s1 as usize);
         let b2 = bias_idx(k, s2 as usize);
         let g1 = b1.map(|b| phi[b]).unwrap_or(0.0);
         let g2 = b2.map(|b| phi[b]).unwrap_or(0.0);
         let d = phi[i] - phi[j] + g1 - g2;
         let s = sigmoid(d);
-        let wc = s * (1.0 - s);
+        let wc = wt * s * (1.0 - s);
         w[c] = wc;
         info[i] += wc;
         info[j] += wc;
         if let Some(b) = b1 { info[b] += wc; }
         if let Some(b) = b2 { info[b] += wc; }
     }
-
     let final_hessvec = |v: &[f64]| -> Vec<f64> {
         let mut out: Vec<f64> = info.iter().zip(v).map(|(&diagonal, &value)| diagonal * value).collect();
-        for (c, &(i, j, _p, k, s1, s2)) in comparisons.iter().enumerate() {
+        for (c, &(i, j, _p, k, s1, s2, _wt)) in comparisons.iter().enumerate() {
             let b1 = bias_idx(k, s1 as usize);
             let b2 = bias_idx(k, s2 as usize);
             let mut uv = v[i] - v[j];
@@ -254,8 +251,6 @@ pub fn fit_linear(
             if let Some(b) = b2 { uv -= v[b]; }
             let scaled = w[c] * uv;
 
-            // `info * v` already contains the diagonal part of every rank-one
-            // comparison term. Add only the off-diagonal part here.
             out[i] += scaled - w[c] * v[i];
             out[j] -= scaled + w[c] * v[j];
             if let Some(b) = b1 { out[b] += scaled - w[c] * v[b]; }
@@ -491,7 +486,7 @@ mod tests {
     fn test_orders_clear_winner() {
         // Item 0 beats item 1 every time → θ_0 > θ_1, both stds positive.
         let comps: Vec<IndexedComparison> =
-            (0..20).map(|_| (0usize, 1usize, 1.0, 0usize, 0, 1)).collect();
+            (0..20).map(|_| (0usize, 1usize, 1.0, 0usize, 0, 1, 1.0)).collect();
         let f = fit_default(2, 1, &comps);
         assert!(f.means[0] > f.means[1], "winner should rank higher: {:?}", f.means);
         assert!(f.stds[0] > 0.0 && f.stds[1] > 0.0);
@@ -501,8 +496,8 @@ mod tests {
 
     #[test]
     fn test_more_data_shrinks_std() {
-        let few: Vec<IndexedComparison> = (0..4).map(|n| (0usize, 1usize, (n % 2) as f64, 0usize, 0, 1)).collect();
-        let many: Vec<IndexedComparison> = (0..200).map(|n| (0usize, 1usize, (n % 2) as f64, 0usize, 0, 1)).collect();
+        let few: Vec<IndexedComparison> = (0..4).map(|n| (0usize, 1usize, (n % 2) as f64, 0usize, 0, 1, 1.0)).collect();
+        let many: Vec<IndexedComparison> = (0..200).map(|n| (0usize, 1usize, (n % 2) as f64, 0usize, 0, 1, 1.0)).collect();
         let f_few = fit_default(2, 1, &few);
         let f_many = fit_default(2, 1, &many);
         assert!(f_many.stds[0] < f_few.stds[0], "more data should tighten std: {} vs {}", f_many.stds[0], f_few.stds[0]);
@@ -513,7 +508,7 @@ mod tests {
         // Item 2 plays nothing. The raw parameter has the prior variance, but
         // reported item scores subtract their shared mean. For three items this
         // leaves (1 - 1/3) of the independent prior variance.
-        let comps: Vec<IndexedComparison> = (0..10).map(|_| (0usize, 1usize, 1.0, 0usize, 0, 1)).collect();
+        let comps: Vec<IndexedComparison> = (0..10).map(|_| (0usize, 1usize, 1.0, 0usize, 0, 1, 1.0)).collect();
         let f = fit_default(3, 1, &comps);
         let prior_std = ((2.0 / 3.0) / (1.0 / PRIOR_TAU2 + REG)).sqrt();
         assert!((f.stds[2] - prior_std).abs() < 1e-6, "unplayed centered std {} vs expected {}", f.stds[2], prior_std);
@@ -563,7 +558,7 @@ mod tests {
     #[test]
     fn test_laplace_variances_are_deterministic() {
         let comps: Vec<IndexedComparison> =
-            (0..30).map(|n| (n % 3, (n + 1) % 3, (n % 2) as f64, 0usize, 0, 1)).collect();
+            (0..30).map(|n| (n % 3, (n + 1) % 3, (n % 2) as f64, 0usize, 0, 1, 1.0)).collect();
         let first = fit_default(3, 1, &comps);
         let second = fit_default(3, 1, &comps);
         assert_eq!(first.stds, second.stds);
@@ -577,8 +572,8 @@ mod tests {
         // both orderings equally so strengths stay tied and β carries the signal.
         let mut comps: Vec<IndexedComparison> = Vec::new();
         for _ in 0..100 {
-            comps.push((0, 1, 0.9, 0, 0, 1)); // item1=0 wins 90%
-            comps.push((1, 0, 0.9, 0, 0, 1)); // item1=1 wins 90% (same first-position edge)
+            comps.push((0, 1, 0.9, 0, 0, 1, 1.0)); // item1=0 wins 90%
+            comps.push((1, 0, 0.9, 0, 0, 1, 1.0)); // item1=1 wins 90% (same first-position edge)
         }
         let f = fit_default(2, 1, &comps);
         assert!(f.bias_means[0] > 0.5, "first-position edge → positive bias, got {}", f.bias_means[0]);
@@ -594,8 +589,8 @@ mod tests {
         // items through slot A equally so strengths stay tied.
         let mut comps: Vec<IndexedComparison> = Vec::new();
         for _ in 0..100 {
-            comps.push((0, 1, 0.9, 0, 0, 2)); // item0 in slot A beats item1 in slot C
-            comps.push((1, 0, 0.9, 0, 0, 2)); // item1 in slot A beats item0 in slot C
+            comps.push((0, 1, 0.9, 0, 0, 2, 1.0)); // item0 in slot A beats item1 in slot C
+            comps.push((1, 0, 0.9, 0, 0, 2, 1.0)); // item1 in slot A beats item0 in slot C
         }
         let f = fit_default(2, 1, &comps);
         // num_slots = 3 → two free advantages per judge [γ_A, γ_B]; slot C is the

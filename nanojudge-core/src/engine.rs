@@ -468,7 +468,7 @@ mod tests {
 
     fn make_input(id1: i64, id2: i64, prob: f64) -> ComparisonInput {
         let category_probs = if prob > 0.5 { [1.0, 0.0] } else { [0.0, 1.0] };
-        ComparisonInput { slot1: 0, slot2: 1, item1: id1, item2: id2, category_probs, judge_id: 0 }
+        ComparisonInput { slot1: 0, slot2: 1, item1: id1, item2: id2, category_probs, judge_id: 0, weight: 1.0 }
     }
 
     #[test]

@@ -40,13 +40,19 @@ pub struct ComparisonInput {
     pub slot2: u8,
     /// Hash of endpoint+model identifying which judge produced this comparison.
     pub judge_id: u64,
+    /// Likelihood weight for this edge. Pairwise comparisons use 1.0. Edges
+    /// decomposed from an n-way comparison use `df / k` where `k` is the
+    /// number of surviving edges and `df` depends on verdict provenance:
+    /// 2 for logprobs (full winner-distribution), 1 for text mode (winner
+    /// only). See `three_way::winner_dist_to_edges` for the full table.
+    pub weight: f64,
 }
 
 impl ComparisonInput {
     /// Build a plain pairwise comparison: item1 in slot 0 (shown first), item2 in
     /// slot 1 (shown second).
     pub fn pairwise(item1: i64, item2: i64, category_probs: [f64; 2], judge_id: u64) -> Self {
-        ComparisonInput { item1, item2, category_probs, slot1: 0, slot2: 1, judge_id }
+        ComparisonInput { item1, item2, category_probs, slot1: 0, slot2: 1, judge_id, weight: 1.0 }
     }
 }
 
@@ -205,12 +211,13 @@ pub type Pair = (i64, i64);
 pub type Triple = (i64, i64, i64);
 
 /// Internal indexed comparison (usize indices, not caller IDs).
-/// (item1_idx, item2_idx, win_prob, judge_internal_idx, slot1, slot2)
+/// (item1_idx, item2_idx, win_prob, judge_internal_idx, slot1, slot2, weight)
 ///
 /// `win_prob` is P(item1 wins), collapsed from the 4-category distribution:
 /// `probs[0] + probs[1]` (clear win + narrow win). `slot1`/`slot2` are the
 /// presentation slots the two items occupied (for per-slot bias correction).
-pub(crate) type IndexedComparison = (usize, usize, f64, usize, u8, u8);
+/// `weight` scales this edge's contribution to the likelihood.
+pub(crate) type IndexedComparison = (usize, usize, f64, usize, u8, u8, f64);
 
 /// Internal indexed pair (usize indices, not caller IDs).
 pub(crate) type IndexedPair = (usize, usize);
@@ -255,7 +262,8 @@ impl IdMap {
             let judge_idx = *judge_id_to_idx.get(&c.judge_id)
                 .unwrap_or_else(|| panic!("Unknown judge_id: {}", c.judge_id));
             let win_prob = c.category_probs[0];
-            (self.to_idx(c.item1), self.to_idx(c.item2), win_prob, judge_idx, c.slot1, c.slot2)
+            (self.to_idx(c.item1), self.to_idx(c.item2), win_prob, judge_idx, c.slot1, c.slot2, c.weight)
         }).collect()
     }
+
 }
