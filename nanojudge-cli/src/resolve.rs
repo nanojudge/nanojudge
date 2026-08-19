@@ -1,6 +1,7 @@
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
+use nanojudge_core::constants::{MAX_LINEUP_SIZE, MIN_LINEUP_SIZE};
 use nanojudge_core::{JudgementDistribution, stable_hash};
 
 use crate::args::{ConfigArgs, OutputFormat};
@@ -343,10 +344,14 @@ pub fn resolve_config(shared: &ConfigArgs, cfg: &config::NanojudgeConfig) -> Res
 
     let lineup_size = merge_opt(shared.lineup_size, cfg.lineup_size, "lineup-size")
         .unwrap_or(2);
-    if lineup_size != 2 && lineup_size != 3 {
-        bail(format!("lineup-size={lineup_size}, must be 2 or 3"));
+    if !(MIN_LINEUP_SIZE..=MAX_LINEUP_SIZE).contains(&lineup_size) {
+        bail(format!(
+            "lineup-size={lineup_size}, must be between {MIN_LINEUP_SIZE} and {MAX_LINEUP_SIZE}"
+        ));
     }
-    let uses_three_item_lineups = lineup_size == 3;
+    // Size 2 keeps the dedicated pairwise path (graded clear/narrow verdicts);
+    // 3 and up run the lineup path.
+    let uses_lineups = lineup_size >= 3;
 
     // Top-heavy selection tuning (only used with the top-heavy distribution).
     let selection_sharpness = merge_opt(shared.selection_sharpness, cfg.selection_sharpness, "selection-sharpness")
@@ -493,10 +498,10 @@ pub fn resolve_config(shared: &ConfigArgs, cfg: &config::NanojudgeConfig) -> Res
 
         let template_path = cli_path.or(cfg_path);
         match template_path {
-            Some(path) if uses_three_item_lineups => prompt::load_lineup_template(&path),
+            Some(path) if uses_lineups => prompt::load_lineup_template(&path, lineup_size),
             Some(path) => prompt::load_template(&path, reasoning_enabled),
-            None if uses_three_item_lineups && reasoning_enabled => prompt::DEFAULT_LINEUP_TEMPLATE.to_string(),
-            None if uses_three_item_lineups => prompt::DEFAULT_LINEUP_TEMPLATE_NO_REASONING.to_string(),
+            None if uses_lineups && reasoning_enabled => prompt::default_lineup_template(lineup_size),
+            None if uses_lineups => prompt::default_lineup_template_no_reasoning(lineup_size),
             None if reasoning_enabled => prompt::DEFAULT_TEMPLATE.to_string(),
             None => prompt::DEFAULT_TEMPLATE_NO_REASONING.to_string(),
         }

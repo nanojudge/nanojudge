@@ -127,34 +127,49 @@ fn extract_items(prompt: &str) -> (String, String) {
     (item1, item2)
 }
 
-/// True if this is a three-item lineup (3-item) judgement prompt.
+/// True if this is a lineup judgement prompt (3+ items, labelled by letter).
 fn is_lineup_judgement(prompt: &str) -> bool {
     prompt.contains("Option A:\n")
 }
 
-/// Extract the three item texts from a three-item lineup prompt. Mirrors `extract_items`
-/// but for the "Option A:/Option B:/Option C:" layout.
-fn extract_lineup_items(prompt: &str) -> (String, String, String) {
-    let a_marker = "Option A:\n";
-    let b_marker = "Option B:\n";
-    let c_marker = "Option C:\n";
+/// Option letters a lineup prompt can use, in order.
+const RANK_LETTERS: [char; 9] = ['A', 'B', 'C', 'D', 'E', 'F', 'G', 'H', 'I'];
 
-    let a_start = prompt.find(a_marker).expect("prompt missing 'Option A:' marker") + a_marker.len();
-    let b_pos = prompt.find(b_marker).expect("prompt missing 'Option B:' marker");
-    let item_a = prompt[a_start..b_pos].trim().to_string();
+/// Extract the item texts from a lineup prompt, in slot order. Mirrors
+/// `extract_items` but for the "Option A:/Option B:/..." layout, at whatever
+/// lineup size the prompt was built for.
+fn extract_lineup_items(prompt: &str) -> Vec<String> {
+    // Marker positions, in slot order, for as many options as the prompt has.
+    let mut marker_positions: Vec<(usize, usize)> = Vec::new();
+    for letter in RANK_LETTERS {
+        let marker = format!("Option {letter}:\n");
+        match prompt.find(&marker) {
+            Some(pos) => marker_positions.push((pos, marker.len())),
+            // Options are contiguous from A, so the first gap ends the lineup.
+            None => break,
+        }
+    }
+    assert!(
+        marker_positions.len() >= 2,
+        "lineup prompt must contain at least two 'Option <letter>:' markers"
+    );
 
-    let b_start = b_pos + b_marker.len();
-    let c_pos = prompt.find(c_marker).expect("prompt missing 'Option C:' marker");
-    let item_b = prompt[b_start..c_pos].trim().to_string();
-
-    let c_start = c_pos + c_marker.len();
-    let c_end = prompt[c_start..]
+    let instructions = prompt
         .find("\n\nInstructions:")
-        .map(|p| c_start + p)
         .unwrap_or(prompt.len());
-    let item_c = prompt[c_start..c_end].trim().to_string();
 
-    (item_a, item_b, item_c)
+    marker_positions
+        .iter()
+        .enumerate()
+        .map(|(i, &(pos, marker_len))| {
+            let start = pos + marker_len;
+            let end = marker_positions
+                .get(i + 1)
+                .map(|&(next_pos, _)| next_pos)
+                .unwrap_or(instructions);
+            prompt[start..end].trim().to_string()
+        })
+        .collect()
 }
 
 // ---------------------------------------------------------------------------
@@ -217,16 +232,19 @@ fn sample_token_distribution<const N: usize>(
     SampledToken { emitted, probs }
 }
 
-/// Derive a deterministic seed from (base_seed, item1, item2, encounter).
+/// Derive a deterministic seed from (base_seed, every item in the lineup,
+/// encounter).
 ///
-/// Items are hashed in prompt order so positional swaps produce different seeds.
-/// The encounter counter ensures repeated matchups of the same ordered pair get
-/// independent sample batches.
-fn deterministic_pair_seed(base: u64, item1: &str, item2: &str, seq: u64) -> u64 {
+/// Every item is hashed, in prompt order, so that neither a positional swap nor
+/// a change to any one member of the lineup reuses another lineup's RNG stream.
+/// The encounter counter ensures repeated matchups of the same ordered lineup
+/// get independent sample batches.
+fn deterministic_lineup_seed(base: u64, items: &[&str], seq: u64) -> u64 {
     let mut hasher = DefaultHasher::new();
     base.hash(&mut hasher);
-    item1.hash(&mut hasher);
-    item2.hash(&mut hasher);
+    for item in items {
+        item.hash(&mut hasher);
+    }
     seq.hash(&mut hasher);
     hasher.finish()
 }
@@ -276,85 +294,143 @@ fn build_logprobs_payload(winner: usize, probs: [f64; 2]) -> ChoiceLogprobs {
     }
 }
 
-/// Softmax over three strengths, numerically stabilized.
-fn softmax3(vals: [f64; 3]) -> [f64; 3] {
-    let m = vals[0].max(vals[1]).max(vals[2]);
-    let e = [(vals[0] - m).exp(), (vals[1] - m).exp(), (vals[2] - m).exp()];
-    let sum = e[0] + e[1] + e[2];
-    [e[0] / sum, e[1] / sum, e[2] / sum]
+/// Softmax over a lineup's strengths, giving the Plackett-Luce top-1
+/// probabilities.
+fn softmax(vals: &[f64]) -> Vec<f64> {
+    let m = vals.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+    let e: Vec<f64> = vals.iter().map(|v| (v - m).exp()).collect();
+    let sum: f64 = e.iter().sum();
+    e.into_iter().map(|v| v / sum).collect()
 }
 
-/// Estimate the two autoregressive token distributions of a three-item lineup ranking.
-/// First place gets `samples` draws from all three Plackett-Luce weights. The
-/// first draw is the emitted winner. Conditional on that emitted token, second
-/// place gets a fresh `samples` draws from the two remaining items; its first
-/// draw is emitted second. Third place is the one remaining item.
-fn sample_lineup_ranking(
-    strengths: [f64; 3],
+/// Estimate one token distribution with `samples` independent categorical
+/// draws, over a distribution whose width is known only at runtime. The slice
+/// analogue of `sample_token_distribution`; the emitted token is the first draw.
+fn sample_token_distribution_dyn(
+    probs: &[f64],
     samples: usize,
     rng: &mut impl Rng,
-) -> ([usize; 3], [f64; 3], [f64; 3]) {
-    let first = sample_token_distribution(softmax3(strengths), samples, rng);
+) -> (usize, Vec<f64>) {
+    assert!(samples > 0, "samples_per_judgement must be at least 1");
 
-    // Remaining two, softmax over just their strengths, then independently
-    // sample the conditional second-place token distribution.
-    let rest: Vec<usize> = (0..3).filter(|&i| i != first.emitted).collect();
-    let (i, j) = (rest[0], rest[1]);
-    let m = strengths[i].max(strengths[j]);
-    let (ei, ej) = ((strengths[i] - m).exp(), (strengths[j] - m).exp());
-    let (pi, pj) = (ei / (ei + ej), ej / (ei + ej));
-    let second_local = sample_token_distribution([pi, pj], samples, rng);
-    let second = if second_local.emitted == 0 { i } else { j };
-    let third = if second_local.emitted == 0 { j } else { i };
+    let mut counts = vec![0usize; probs.len()];
+    let mut emitted = 0;
+    for sample_idx in 0..samples {
+        let outcome = sample_categorical_dyn(probs, rng);
+        if sample_idx == 0 {
+            emitted = outcome;
+        }
+        counts[outcome] += 1;
+    }
 
-    let mut p2 = [0.0_f64; 3];
-    p2[i] = second_local.probs[0];
-    p2[j] = second_local.probs[1];
-
-    ([first.emitted, second, third], first.probs, p2)
+    let denominator = samples as f64;
+    let probs = counts.iter().map(|&c| c as f64 / denominator).collect();
+    (emitted, probs)
 }
 
-const RANK_LETTERS: [char; 3] = ['A', 'B', 'C'];
+/// `sample_categorical` over a runtime-width distribution.
+fn sample_categorical_dyn(probs: &[f64], rng: &mut impl Rng) -> usize {
+    let total: f64 = probs.iter().sum();
+    assert!(
+        total.is_finite() && total > 0.0 && probs.iter().all(|p| p.is_finite() && *p >= 0.0),
+        "categorical probabilities must be finite, nonnegative, and have positive mass"
+    );
 
-/// Render the three-item lineup ranking as the "Nth place is Option X" lines the
-/// default three-item lineup template asks for.
-fn lineup_judgement_text(order: [usize; 3]) -> String {
-    format!(
-        "First place is Option {}\nSecond place is Option {}\nThird place is Option {}",
-        RANK_LETTERS[order[0]], RANK_LETTERS[order[1]], RANK_LETTERS[order[2]],
-    )
+    let mut draw = rng.random::<f64>() * total;
+    for (idx, &prob) in probs.iter().enumerate() {
+        if draw < prob {
+            return idx;
+        }
+        draw -= prob;
+    }
+    probs.iter().rposition(|&p| p > 0.0).unwrap()
 }
 
-/// Build the logprobs payload for a three-item lineup ranking. Each "Nth place is
-/// Option" line ends in a letter token carrying that slot's empirical
-/// distribution over A/B/C: 1st gets `p1`, 2nd gets the conditional `p2`, and
-/// 3rd is one-hot on the remaining option. "Option" is the parser's anchor.
-fn build_lineup_logprobs(order: [usize; 3], p1: [f64; 3], p2: [f64; 3]) -> ChoiceLogprobs {
-    let mut p3 = [0.0_f64; 3];
-    p3[order[2]] = 1.0;
+/// Estimate the autoregressive token distributions of a lineup ranking.
+///
+/// Sequential Plackett-Luce: first place gets `samples` draws over every item,
+/// and its first draw is the emitted winner. Conditional on that emitted token,
+/// second place gets a fresh `samples` draws over the items still unplaced, and
+/// so on down the ranking. The last place is deterministic — one item remains.
+///
+/// Returns the emitted ranking (item indices, best first) and one distribution
+/// per rank position, each over all items (zero on the already-placed ones).
+fn sample_lineup_ranking(
+    strengths: &[f64],
+    samples: usize,
+    rng: &mut impl Rng,
+) -> (Vec<usize>, Vec<Vec<f64>>) {
+    let size = strengths.len();
+    let mut remaining: Vec<usize> = (0..size).collect();
+    let mut order: Vec<usize> = Vec::with_capacity(size);
+    let mut dists: Vec<Vec<f64>> = Vec::with_capacity(size);
 
-    let slot = |ordinal: &str, letter_idx: usize, dist: [f64; 3]| -> Vec<LogprobToken> {
-        let top: Vec<TopLogprobEntry> = (0..3)
+    while remaining.len() > 1 {
+        let local_strengths: Vec<f64> = remaining.iter().map(|&i| strengths[i]).collect();
+        let (emitted_local, local_probs) =
+            sample_token_distribution_dyn(&softmax(&local_strengths), samples, rng);
+
+        // Lift the local distribution back onto all `size` options.
+        let mut dist = vec![0.0_f64; size];
+        for (local_idx, &item) in remaining.iter().enumerate() {
+            dist[item] = local_probs[local_idx];
+        }
+        dists.push(dist);
+
+        let emitted = remaining[emitted_local];
+        order.push(emitted);
+        remaining.retain(|&i| i != emitted);
+    }
+
+    // Last place: the one item left, with probability 1.
+    let last = remaining[0];
+    let mut dist = vec![0.0_f64; size];
+    dist[last] = 1.0;
+    dists.push(dist);
+    order.push(last);
+
+    (order, dists)
+}
+
+/// Ordinal words for the ranking lines, matching the CLI's lineup template.
+const RANK_ORDINALS: [&str; 9] = [
+    "First", "Second", "Third", "Fourth", "Fifth", "Sixth", "Seventh", "Eighth", "Ninth",
+];
+
+/// Render the ranking as the "Nth place is Option X" lines the default lineup
+/// template asks for.
+fn lineup_judgement_text(order: &[usize]) -> String {
+    order
+        .iter()
+        .enumerate()
+        .map(|(rank, &item)| format!("{} place is Option {}", RANK_ORDINALS[rank], RANK_LETTERS[item]))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// Build the logprobs payload for a lineup ranking. Each "Nth place is Option"
+/// line ends in a letter token carrying that rank's empirical distribution over
+/// the option letters. "Option" is the parser's anchor.
+fn build_lineup_logprobs(order: &[usize], dists: &[Vec<f64>]) -> ChoiceLogprobs {
+    let mut content = Vec::new();
+    for (rank, &item) in order.iter().enumerate() {
+        let dist = &dists[rank];
+        let top: Vec<TopLogprobEntry> = (0..dist.len())
             .filter(|&i| dist[i] > 0.0)
             .map(|i| TopLogprobEntry {
                 token: RANK_LETTERS[i].to_string(),
                 logprob: dist[i].ln(),
             })
             .collect();
-        vec![
-            LogprobToken { token: ordinal.to_string(), top_logprobs: None },
+        content.extend(vec![
+            LogprobToken { token: RANK_ORDINALS[rank].to_string(), top_logprobs: None },
             LogprobToken { token: " place".to_string(), top_logprobs: None },
             LogprobToken { token: " is".to_string(), top_logprobs: None },
             LogprobToken { token: " Option".to_string(), top_logprobs: None },
-            LogprobToken { token: format!(" {}", RANK_LETTERS[letter_idx]), top_logprobs: Some(top) },
+            LogprobToken { token: format!(" {}", RANK_LETTERS[item]), top_logprobs: Some(top) },
             LogprobToken { token: "\n".to_string(), top_logprobs: None },
-        ]
-    };
-
-    let mut content = Vec::new();
-    content.extend(slot("First", order[0], p1));
-    content.extend(slot("Second", order[1], p2));
-    content.extend(slot("Third", order[2], p3));
+        ]);
+    }
     ChoiceLogprobs { content }
 }
 
@@ -393,7 +469,7 @@ async fn handle_chat(
             *n += 1;
             current
         };
-        let pair_seed = deterministic_pair_seed(state.seed, &item1, &item2, encounter);
+        let pair_seed = deterministic_lineup_seed(state.seed, &[&item1, &item2], encounter);
         let mut rng = StdRng::seed_from_u64(pair_seed);
         let p1 = 1.0 / (1.0 + (-(s1 - s2)).exp());
         sample_token_distribution(
@@ -426,23 +502,28 @@ async fn handle_chat(
     })
 }
 
-/// Handle a three-item lineup judgement request: estimate the first-place distribution
-/// from repeated three-item lineup draws, declare its first draw as the emitted winner,
-/// then independently estimate second place from repeated draws conditional on
-/// that emitted winner. Third place is deterministic.
+/// Handle a lineup judgement request: sample a full ranking as a sequential
+/// Plackett-Luce chain, estimating each rank's token distribution from repeated
+/// draws over the items still unplaced.
 fn handle_lineup_judgement(
     state: Arc<JudgeState>,
     prompt: &str,
     want_logprobs: bool,
 ) -> Json<ChatResponse> {
-    let (item_a, item_b, item_c) = extract_lineup_items(prompt);
-    let sa = *state.strengths.get(&item_a).unwrap_or_else(|| panic!("unknown item: {item_a:?}"));
-    let sb = *state.strengths.get(&item_b).unwrap_or_else(|| panic!("unknown item: {item_b:?}"));
-    let sc = *state.strengths.get(&item_c).unwrap_or_else(|| panic!("unknown item: {item_c:?}"));
+    let items = extract_lineup_items(prompt);
+    let strengths: Vec<f64> = items
+        .iter()
+        .map(|item| {
+            *state
+                .strengths
+                .get(item)
+                .unwrap_or_else(|| panic!("unknown item: {item:?}"))
+        })
+        .collect();
 
     // Independent draw per repeated (ordered) lineup, keyed via the shared
     // encounter counter (the second key slot is unused for lineups).
-    let key = (format!("{item_a}\u{0}{item_b}\u{0}{item_c}"), String::new());
+    let key = (items.join("\u{0}"), String::new());
     let encounter = {
         let mut counts = state.encounter_counts.lock().unwrap();
         let n = counts.entry(key).or_insert(0);
@@ -450,17 +531,14 @@ fn handle_lineup_judgement(
         *n += 1;
         current
     };
-    let seed = deterministic_pair_seed(state.seed, &item_a, &item_b, encounter.wrapping_add(sc.to_bits()));
+    let item_refs: Vec<&str> = items.iter().map(String::as_str).collect();
+    let seed = deterministic_lineup_seed(state.seed, &item_refs, encounter);
     let mut rng = StdRng::seed_from_u64(seed);
 
-    let (order, p1, p2) = sample_lineup_ranking(
-        [sa, sb, sc],
-        state.samples_per_judgement,
-        &mut rng,
-    );
-    let content = lineup_judgement_text(order);
+    let (order, dists) = sample_lineup_ranking(&strengths, state.samples_per_judgement, &mut rng);
+    let content = lineup_judgement_text(&order);
     let logprobs = if want_logprobs {
-        Some(build_lineup_logprobs(order, p1, p2))
+        Some(build_lineup_logprobs(&order, &dists))
     } else {
         None
     };
@@ -476,7 +554,7 @@ fn handle_lineup_judgement(
         }],
         usage: ResponseUsage {
             prompt_tokens: 75,
-            completion_tokens: 18,
+            completion_tokens: 6 * order.len() as u64,
         },
     })
 }
@@ -545,12 +623,12 @@ mod tests {
     fn lineup_samples_second_place_conditionally() {
         let samples = 10;
         let mut rng = StdRng::seed_from_u64(3);
-        let (order, first, second) =
-            sample_lineup_ranking([0.8, 0.1, -0.4], samples, &mut rng);
+        let (order, dists) = sample_lineup_ranking(&[0.8, 0.1, -0.4], samples, &mut rng);
+        let (first, second) = (&dists[0], &dists[1]);
 
-        let mut sorted_order = order;
+        let mut sorted_order = order.clone();
         sorted_order.sort_unstable();
-        assert_eq!(sorted_order, [0, 1, 2]);
+        assert_eq!(sorted_order, vec![0, 1, 2]);
 
         assert_close(first.iter().sum(), 1.0);
         assert!(first[order[0]] >= 1.0 / samples as f64);
@@ -560,6 +638,45 @@ mod tests {
         assert_close(second[order[0]], 0.0);
         assert_close(second.iter().sum(), 1.0);
         assert!(second[order[1]] >= 1.0 / samples as f64);
+    }
+
+    #[test]
+    fn lineup_seed_depends_on_every_member() {
+        // Two lineups sharing a prefix must not share an RNG stream: if only the
+        // last member changes, the sampled ranking has to be independent.
+        let base = deterministic_lineup_seed(7, &["a", "b", "c"], 0);
+        assert_ne!(base, deterministic_lineup_seed(7, &["a", "b", "d"], 0));
+        assert_ne!(base, deterministic_lineup_seed(7, &["a", "c", "b"], 0));
+        assert_ne!(base, deterministic_lineup_seed(7, &["a", "b"], 0));
+        assert_ne!(base, deterministic_lineup_seed(7, &["a", "b", "c"], 1));
+        assert_ne!(base, deterministic_lineup_seed(8, &["a", "b", "c"], 0));
+        assert_eq!(base, deterministic_lineup_seed(7, &["a", "b", "c"], 0));
+    }
+
+    /// A full ranking at every lineup size: each rank is a valid conditional
+    /// distribution over the items still unplaced, and the last is one-hot.
+    #[test]
+    fn lineup_ranking_is_a_plackett_luce_chain_at_every_size() {
+        for size in 2..=9usize {
+            let strengths: Vec<f64> = (0..size).map(|i| i as f64 * 0.3 - 1.0).collect();
+            let mut rng = StdRng::seed_from_u64(size as u64);
+            let (order, dists) = sample_lineup_ranking(&strengths, 20, &mut rng);
+
+            assert_eq!(order.len(), size, "size {size}: short ranking");
+            let mut sorted = order.clone();
+            sorted.sort_unstable();
+            assert_eq!(sorted, (0..size).collect::<Vec<_>>(), "size {size}: not a permutation");
+
+            for (rank, dist) in dists.iter().enumerate() {
+                assert_close(dist.iter().sum(), 1.0);
+                // Items ranked above this one carry no mass.
+                for &placed in &order[..rank] {
+                    assert_close(dist[placed], 0.0);
+                }
+                assert!(dist[order[rank]] > 0.0, "size {size}: emitted token has zero mass");
+            }
+            assert_close(dists[size - 1][order[size - 1]], 1.0);
+        }
     }
 
     #[test]

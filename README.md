@@ -115,6 +115,8 @@ nanojudge rank ... --save-judgements results.jsonl
 
 Each line is a JSON object with `round`, `item1`, `item2`, `category_probs`, `judge_model`, `judge_endpoint`, and `response` (the raw LLM text). Lines are flushed immediately so you can `tail -f` during a run.
 
+Runs with `lineup_size` above 2 write a different shape, since a lineup has no fixed number of members: `item1`/`item2` are replaced by an `items` array holding the lineup in presentation order, and `category_probs` by `winner_dist`, the judge's probability that each member of that array won. `round`, `judge_model`, `judge_endpoint`, and `response` are unchanged. Pairwise runs are unaffected — a reader written against the two-item shape keeps working for `lineup_size = 2`.
+
 ## Config file
 
 The config file lives at `~/.config/nanojudge/config.toml`. Run `nanojudge init` to create one with defaults and documentation for all available options.
@@ -124,7 +126,7 @@ Key settings:
 | Setting | Description |
 |---|---|
 | `rounds` | Number of judgement rounds |
-| `lineup_size` | Items in each judgement: `2` (default) or `3`. |
+| `lineup_size` | Items in each judgement. `2` (default) is the pairwise mode everything else is tuned around; up to `9` is supported, where one call ranks the whole lineup. |
 | `logprobs` | `true` to extract logprobs for continuous confidence (requires endpoint support, e.g. vLLM). `false` for text-based verdict parsing (works everywhere, but needs more rounds). |
 | `judgement_distribution` | `"uniform"` (default) or `"top-heavy"`. Top-heavy concentrates judgements on the contenders for the top spots. |
 | `selection_sharpness` / `cutoff` | Top-heavy tuning. Each item's pairing weight is its uncertainty ratio around the anchor — min/max of the probability of sitting above vs below the anchor, integrated over both the item's and the anchor's posterior uncertainty: `1` when the item straddles the anchor, near `0` once it's confidently on either side — raised to `selection_sharpness` (lower = flatter = more exploration; default `0.7`). `cutoff` drops items whose ratio is below it, keeping the two highest regardless (`[0,1)`, default `0` — no cutoff; sharpness does the shaping). The first item of each judgement is drawn from these weights; its opponent is then picked by info-gain matchmaking from a rating window around it, with the win probability integrated over both items' posterior uncertainty so matchups that *might* be close also score well — so the contested boundary gets the judgements. |
@@ -148,7 +150,7 @@ Per-judge settings (in `[[judge]]` blocks):
 
 ## How it works
 
-1. **Lineup judgements** — each round, the engine selects which lineups to present. A lineup currently contains two or three items. Each judge in the panel evaluates its assigned lineups. With `logprobs = true`, token logprobs give continuous confidence. With `logprobs = false`, verdicts are parsed from the response text.
+1. **Lineup judgements** — each round, the engine selects which lineups to present. A lineup is a pair by default; `lineup_size` can widen it to as many as nine items, in which case the judge ranks them all in one call and the ranking is folded back into pairwise edges. Each judge in the panel evaluates its assigned lineups. With `logprobs = true`, token logprobs give continuous confidence. With `logprobs = false`, verdicts are parsed from the response text.
 
 2. **Bradley-Terry scoring** — all edge probabilities are combined into global scores using deterministic Laplace inference. Newton-CG finds the posterior mode, while matrix-free inverse-Hessian probes estimate correlation-aware credible intervals without dense O(n²) matrices.
 

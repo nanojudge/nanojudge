@@ -21,3 +21,12 @@ pub const INITIAL_BRADLEY_TERRY_RATING: f64 = 1.0;
 ///   10K items: 452ms (old O(N^2)) vs ~5ms with windowing
 ///   100K items: 46s (old O(N^2)) vs ~50ms with windowing
 pub const OPPONENT_WINDOW_SIZE: usize = 100;
+
+/// Smallest number of items that can be presented in one judgement lineup.
+pub const MIN_LINEUP_SIZE: usize = 2;
+
+/// Largest number of items that can be presented in one judgement lineup.
+///
+/// Capped at 9 so every option carries a distinct single-letter label (A-I)
+/// that the ranking parser can read from one token's logprobs.
+pub const MAX_LINEUP_SIZE: usize = 9;

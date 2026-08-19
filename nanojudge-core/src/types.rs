@@ -204,10 +204,11 @@ pub struct ScoringResult {
 /// A two-item lineup selected for judgement.
 pub type Pair = (i64, i64);
 
-/// An ordered three-item lineup presented together in one judgement.
-/// Its winner distribution is folded into edges by
+/// An ordered lineup of items presented together in one judgement.
+/// Holds between 2 and 9 caller IDs, in presentation order. Its winner
+/// distribution is folded into edges by
 /// [`crate::lineup::winner_dist_to_edges`].
-pub type Lineup = (i64, i64, i64);
+pub type Lineup = Vec<i64>;
 
 /// Internal indexed edge (usize indices, not caller IDs).
 /// (item1_idx, item2_idx, win_prob, judge_internal_idx, slot1, slot2, weight)
@@ -222,7 +223,7 @@ pub(crate) type IndexedEdge = (usize, usize, f64, usize, u8, u8, f64);
 pub(crate) type IndexedPair = (usize, usize);
 
 /// Internal indexed lineup (usize indices, not caller IDs).
-pub(crate) type IndexedLineup = (usize, usize, usize);
+pub(crate) type IndexedLineup = Vec<usize>;
 
 /// Maps between caller-provided i64 IDs and internal 0..N indices.
 pub(crate) struct IdMap {

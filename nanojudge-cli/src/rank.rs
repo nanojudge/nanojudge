@@ -50,9 +50,21 @@ fn resolve_save_path(path: &Path, prefix: &str) -> PathBuf {
 /// derived edge's log-odds by `temperature`. Values > 1 pull overconfident
 /// verdicts toward uniform; 1.0 is the identity. One-hot (text-mode) verdicts
 /// are fixed points, so only logprob-derived verdicts are affected.
+/// Output tokens to allow per ranking line in no-reasoning mode. A line reads
+/// "First place is Option A" — about 7 tokens; 16 leaves room for tokenizer
+/// variation across models.
+const TOKENS_PER_RANKING_LINE: u32 = 16;
+
 fn temper_verdict<const N: usize>(mut dist: [f64; N], temperature: f64) -> [f64; N] {
+    temper_verdict_in_place(&mut dist, temperature);
+    dist
+}
+
+/// `temper_verdict` over a verdict distribution of any width — lineups carry
+/// one entry per option, so their width is only known at runtime.
+fn temper_verdict_in_place(dist: &mut [f64], temperature: f64) {
     if temperature == 1.0 {
-        return dist;
+        return;
     }
     let inv = 1.0 / temperature;
     let mut sum = 0.0;
@@ -63,7 +75,6 @@ fn temper_verdict<const N: usize>(mut dist: [f64; N], temperature: f64) -> [f64;
     for q in dist.iter_mut() {
         *q /= sum;
     }
-    dist
 }
 
 /// Parse a criterion file into a list of criteria, splitting on ---CRITERION---.
@@ -125,9 +136,9 @@ pub async fn run(args: RankArgs) {
     let cfg = config::load_config(&config_path);
     let resolved = resolve_config(&args.cfg, &cfg);
 
-    // Three-item judgements run a separate acquisition loop; the pairwise path
-    // below is left untouched.
-    if resolved.lineup_size == 3 {
+    // Lineup judgements (3+ items) run a separate acquisition loop; the
+    // pairwise path below is left untouched.
+    if resolved.lineup_size >= 3 {
         run_lineup_judgements(&args, &config_path, &cfg, &resolved).await;
         return;
     }
@@ -835,11 +846,12 @@ pub async fn run(args: RankArgs) {
     }
 }
 
-/// Three-item lineup (3-item) acquisition loop. Selects lineups, asks each judge to rank
-/// them, folds the winner-distribution into up to three edges, and feeds
-/// those to the same scoring engine the pairwise path uses. `total_judgements`
-/// here counts LLM calls (lineups), so accuracy-per-call is directly comparable
-/// to pairwise; each call contributes up to three edges to the fit.
+/// Lineup acquisition loop. Selects lineups, asks each judge to rank
+/// them, folds the winner-distribution into one edge per pair in the lineup,
+/// and feeds those to the same scoring engine the pairwise path uses.
+/// `total_judgements` here counts LLM calls (lineups), so accuracy-per-call is
+/// directly comparable to pairwise; each call contributes up to k(k-1)/2 edges
+/// to the fit, for a lineup of k items.
 async fn run_lineup_judgements(
     args: &RankArgs,
     config_path: &Path,
@@ -850,24 +862,32 @@ async fn run_lineup_judgements(
     let logprobs_mode = judges[0].logprobs;
 
     // No-reasoning mode forces max_tokens to 16 (calibrated for a single verdict
-    // line). The three-item lineup ranking output is three lines (~20 tokens), which 16
-    // truncates — cutting off the third line so the parser discards it. Give it
-    // enough room.
+    // line). A lineup ranking is one line per item (~7 tokens each), which 16
+    // truncates — cutting off the trailing lines so the parser discards the
+    // whole judgement. Give it enough room for every rank.
     if !resolved.reasoning_enabled {
+        let ranking_tokens = TOKENS_PER_RANKING_LINE * resolved.lineup_size as u32;
         for j in &mut judges {
-            j.max_tokens = 48;
+            j.max_tokens = ranking_tokens;
         }
     }
 
     if !logprobs_mode {
-        eprintln!("Warning: three-item lineup without logprobs keeps only each lineup's winner (2 edges instead of 3, dropping the 2nd-vs-3rd judgement). Enable logprobs for full information.");
+        eprintln!(
+            "Warning: lineups without logprobs keep only each lineup's winner ({} edges instead of {}, dropping the ordering below 1st place). Enable logprobs for full information.",
+            resolved.lineup_size - 1,
+            resolved.lineup_size * (resolved.lineup_size - 1) / 2,
+        );
     }
 
     let (titles, texts) = load_items(args);
     let item_ids: Vec<i64> = (0..texts.len() as i64).collect();
 
-    if texts.len() < 3 {
-        bail(format!("Three-item lineup judgements need at least 3 items; got {}.", texts.len()));
+    if texts.len() < resolved.lineup_size {
+        bail(format!(
+            "lineup-size={} needs at least {} items; got {}.",
+            resolved.lineup_size, resolved.lineup_size, texts.len()
+        ));
     }
 
     if matches!(resolved.judgement_distribution, JudgementDistribution::TopHeavy)
@@ -881,19 +901,19 @@ async fn run_lineup_judgements(
         ));
     }
 
-    let lineups_per_round = calculate_lineups_for_round(texts.len());
+    let lineups_per_round = calculate_lineups_for_round(texts.len(), resolved.lineup_size);
 
     let rounds = if let Some(target) = resolved.judgements {
         let r = target.div_ceil(lineups_per_round);
         if r == 0 {
             bail(format!(
-                "--judgements ({target}) is less than one round ({lineups_per_round} three-item lineup judgements). Use at least {lineups_per_round}.",
+                "--judgements ({target}) is less than one round ({lineups_per_round} lineup judgements). Use at least {lineups_per_round}.",
             ));
         }
         let actual = lineups_per_round * r;
         if actual != target {
             eprintln!(
-                "Running {} three-item lineup judgements instead of {}, to align with round boundaries ({} per round).",
+                "Running {} lineup judgements instead of {}, to align with round boundaries ({} per round).",
                 actual, target, lineups_per_round,
             );
         }
@@ -956,7 +976,7 @@ async fn run_lineup_judgements(
     let total_planned = lineups_per_round * rounds;
     if resolved.verbose {
         eprintln!(
-            "Ranking {} items across {} rounds ({} three-item lineup judgements planned)",
+            "Ranking {} items across {} rounds ({} lineup judgements planned)",
             texts.len(), rounds, total_planned,
         );
         if criteria.len() == 1 {
@@ -1033,7 +1053,7 @@ async fn run_lineup_judgements(
     let mut cumulative_total_pairs: usize = 0;
     let mut judge_assign_rng = seed::make_rng(resolved.seed, seed::SUBSYSTEM_JUDGE_ASSIGN);
     let mut jitter_rng = seed::make_rng(resolved.seed, seed::SUBSYSTEM_TEMP_JITTER);
-    // RNG for shuffling the three items into random presentation slots (A/B/C).
+    // RNG for shuffling each lineup into random presentation slots (A/B/C/...).
     // Combined with the engine's per-slot bias correction, this both keeps slot
     // placement unbiased and lets the bias be estimated out.
     let mut slot_rng = seed::make_rng(resolved.seed, seed::SUBSYSTEM_EDGE_ORIENTATION);
@@ -1056,7 +1076,7 @@ async fn run_lineup_judgements(
 
         // Split the round into refit chunks (only top-heavy subdivides); each
         // chunk runs its own scoring refit and re-derives selection weights.
-        let chunk_sizes = engine.round_chunk_sizes_lineups(resolved.refits_per_round);
+        let chunk_sizes = engine.round_chunk_sizes_lineups(resolved.refits_per_round, resolved.lineup_size);
         if resolved.verbose {
             eprintln!(
                 "Round {}/{}: {} lineups in {} refit chunk(s)",
@@ -1068,7 +1088,7 @@ async fn run_lineup_judgements(
         if cancelled.load(Ordering::Relaxed) {
             break;
         }
-        let lineups = engine.generate_lineups(chunk_size);
+        let lineups = engine.generate_lineups(chunk_size, resolved.lineup_size);
         let round_start = std::time::Instant::now();
 
         cumulative_total_pairs += lineups.len();
@@ -1090,14 +1110,13 @@ async fn run_lineup_judgements(
         }).collect();
 
         let mut handles = Vec::with_capacity(lineups.len());
-        for (lineup_idx, &(t_a, t_b, t_c)) in lineups.iter().enumerate() {
-            // Shuffle the three items into random slot order so no item has a
-            // fixed presentation position (each of the 6 permutations equally
-            // likely). winner_dist stays aligned because judge_lineup maps
-            // option A/B/C to whatever ids we pass here.
-            let mut slots = [t_a, t_b, t_c];
-            slots.shuffle(&mut slot_rng);
-            let (id_a, id_b, id_c) = (slots[0], slots[1], slots[2]);
+        for (lineup_idx, lineup) in lineups.iter().enumerate() {
+            // Shuffle the lineup into random slot order so no item has a fixed
+            // presentation position (every permutation equally likely).
+            // winner_dist stays aligned because judge_lineup maps option
+            // A/B/C/... to whatever ids we pass here, in order.
+            let mut slot_ids = lineup.clone();
+            slot_ids.shuffle(&mut slot_rng);
             let judge_idx = judge_assignments[lineup_idx];
             let sem = judge_semaphores[judge_idx].clone();
             let client = client.clone();
@@ -1126,10 +1145,13 @@ async fn run_lineup_judgements(
 
             let handle = tokio::spawn(async move {
                 let _permit = sem.acquire().await.unwrap();
+                let option_texts: Vec<&str> = slot_ids
+                    .iter()
+                    .map(|&id| texts[id as usize].as_str())
+                    .collect();
                 let result = judge_lineup(
                     &client, &llm_config, &template, &criterion,
-                    &texts[id_a as usize], &texts[id_b as usize], &texts[id_c as usize],
-                    id_a, id_b, id_c,
+                    &option_texts, &slot_ids,
                     min_logprob_coverage, &analysis_length, max_retries, verbose, &judge_name,
                 ).await;
                 (result, assigned_judge_id, judge_idx, std::time::Instant::now())
@@ -1174,11 +1196,13 @@ async fn run_lineup_judgements(
                     if let Some(winner_dist) = tw.winner_dist {
                         round_llm_calls += 1;
                         if let Some(ref file_mutex) = save_file {
+                            let lineup_titles: Vec<&str> = tw.item_ids
+                                .iter()
+                                .map(|&id| titles[id as usize].as_str())
+                                .collect();
                             let line = serde_json::json!({
                                 "round": round + 1,
-                                "item1": titles[tw.item_a_id as usize],
-                                "item2": titles[tw.item_b_id as usize],
-                                "item3": titles[tw.item_c_id as usize],
+                                "items": lineup_titles,
                                 "winner_dist": winner_dist,
                                 "judge_model": judge_models[judge_idx],
                                 "judge_endpoint": judge_endpoints[judge_idx],
@@ -1189,12 +1213,13 @@ async fn run_lineup_judgements(
                             let _ = f.flush();
                         }
 
-                        let tempered = temper_verdict(winner_dist, judge_verdict_temperatures[judge_idx]);
+                        let mut tempered = winner_dist;
+                        temper_verdict_in_place(&mut tempered, judge_verdict_temperatures[judge_idx]);
 
                         // Decomposed edges for engine and scoring.
                         let edges = winner_dist_to_edges(
-                            [tw.item_a_id, tw.item_b_id, tw.item_c_id],
-                            tempered,
+                            &tw.item_ids,
+                            &tempered,
                             assigned_judge_id,
                             logprobs_mode,
                         );
@@ -1202,11 +1227,13 @@ async fn run_lineup_judgements(
                     } else {
                         failed_parse += 1;
                         if let Some(ref file_mutex) = failures_file {
+                            let lineup_titles: Vec<&str> = tw.item_ids
+                                .iter()
+                                .map(|&id| titles[id as usize].as_str())
+                                .collect();
                             let line = serde_json::json!({
                                 "round": round + 1,
-                                "item1": titles[tw.item_a_id as usize],
-                                "item2": titles[tw.item_b_id as usize],
-                                "item3": titles[tw.item_c_id as usize],
+                                "items": lineup_titles,
                                 "judge_model": judge_models[judge_idx],
                                 "judge_endpoint": judge_endpoints[judge_idx],
                                 "prompt": tw.prompt,
@@ -1217,11 +1244,13 @@ async fn run_lineup_judgements(
                             let _ = f.flush();
                         }
                         if resolved.verbose {
+                            let lineup_titles: Vec<&str> = tw.item_ids
+                                .iter()
+                                .map(|&id| titles[id as usize].as_str())
+                                .collect();
                             eprintln!(
-                                "  Warning: unparseable three-item lineup ranking for {} / {} / {}, skipping",
-                                titles[tw.item_a_id as usize],
-                                titles[tw.item_b_id as usize],
-                                titles[tw.item_c_id as usize],
+                                "  Warning: unparseable lineup ranking for {}, skipping",
+                                lineup_titles.join(" / "),
                             );
                         }
                     }
@@ -1275,7 +1304,7 @@ async fn run_lineup_judgements(
 
         if round_llm_calls == 0 && !lineups.is_empty() {
             eprintln!(
-                "Warning: all {} three-item lineup judgements in a round-{} chunk failed.",
+                "Warning: all {} lineup judgements in a round-{} chunk failed.",
                 lineups.len(), round + 1,
             );
         }
@@ -1351,15 +1380,15 @@ async fn run_lineup_judgements(
     }
 
     if cancelled.load(Ordering::Relaxed) {
-        eprintln!("\nCancelled. {} three-item lineup judgements completed before interrupt.", total_judgements);
+        eprintln!("\nCancelled. {} lineup judgements completed before interrupt.", total_judgements);
     }
 
     if total_judgements == 0 {
-        bail("All three-item lineup judgements failed. No results to score.");
+        bail("All lineup judgements failed. No results to score.");
     }
 
     if resolved.verbose {
-        eprintln!("Running final scoring ({} three-item lineup judgements)...", total_judgements);
+        eprintln!("Running final scoring ({} lineup judgements)...", total_judgements);
     }
 
     let scoring_result = run_scoring(

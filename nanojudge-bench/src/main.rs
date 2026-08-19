@@ -105,10 +105,10 @@ struct Args {
     #[arg(long, default_value_t = 1)]
     samples_per_judgement: usize,
 
-    /// How many items each judgement compares at once: 2 (pairwise, default) or 3.
-    /// With 3, each LLM call ranks three items; `judgements` then counts LLM
-    /// calls, so the accuracy-per-judgement curve is directly comparable to
-    /// pairwise.
+    /// How many items each judgement compares at once: 2 (pairwise, default) up
+    /// to 9. Above 2, each LLM call ranks the whole lineup; `judgements` then
+    /// counts LLM calls, so the accuracy-per-judgement curve is directly
+    /// comparable to pairwise.
     #[arg(long, default_value_t = 2)]
     lineup_size: usize,
 
@@ -210,19 +210,24 @@ struct SharedTrialConfig {
     nanojudge_bin: PathBuf,
 }
 
+/// Lineup sizes the CLI accepts. Mirrors `nanojudge_core::constants`; the bench
+/// drives the CLI as a subprocess and deliberately has no dependency on it.
+const MIN_LINEUP_SIZE: usize = 2;
+const MAX_LINEUP_SIZE: usize = 9;
+
 #[tokio::main]
 async fn main() {
     let args = Args::parse();
 
-    if args.lineup_size != 2 && args.lineup_size != 3 {
-        eprintln!("Error: --lineup-size must be 2 or 3");
+    if !(MIN_LINEUP_SIZE..=MAX_LINEUP_SIZE).contains(&args.lineup_size) {
+        eprintln!("Error: --lineup-size must be between {MIN_LINEUP_SIZE} and {MAX_LINEUP_SIZE}");
         std::process::exit(1);
     }
     if args.samples_per_judgement == 0 {
         eprintln!("Error: --samples-per-judgement must be at least 1");
         std::process::exit(1);
     }
-    let min_items = if args.lineup_size == 3 { 3 } else { 2 };
+    let min_items = args.lineup_size;
     if args.items < min_items {
         eprintln!("Error: need at least {min_items} items");
         std::process::exit(1);
@@ -261,11 +266,7 @@ async fn main() {
         std::process::exit(1);
     }
 
-    let judgements_per_trial = if args.lineup_size == 3 {
-        (args.items / 3) * args.rounds
-    } else {
-        (args.items / 2) * args.rounds
-    };
+    let judgements_per_trial = (args.items / args.lineup_size) * args.rounds;
 
     eprintln!("NanoJudge Synthetic Benchmark");
     eprintln!("  Items: {}", args.items);

@@ -6,7 +6,7 @@ use rand::Rng;
 use rand::rngs::StdRng;
 use rand::seq::SliceRandom;
 
-use crate::constants::OPPONENT_WINDOW_SIZE;
+use crate::constants::{MAX_LINEUP_SIZE, MIN_LINEUP_SIZE, OPPONENT_WINDOW_SIZE};
 use crate::seed::make_rng;
 use crate::types::{IndexedPair, IndexedLineup, Pair};
 
@@ -654,55 +654,79 @@ pub(crate) fn generate_top_heavy_pairings_indexed(
 }
 
 // ---------------------------------------------------------------------------
-// Three-item lineup generation
+// Lineup generation
 // ---------------------------------------------------------------------------
 //
-// A three-item judgement shows the judge one lineup at a time. Lineup selection
-// mirrors pair selection stage-for-stage — random, then nearest-neighbour, then
-// info-gain matchmaking — but places items into three-item lineups. No position orientation
-// is assigned here: 3-slot positional bias is not modelled in this version, and
-// the caller randomizes each folded edge's orientation instead.
+// A lineup judgement shows the judge `lineup_size` items at once. Lineup
+// selection mirrors pair selection stage-for-stage — random, then
+// nearest-neighbour, then info-gain matchmaking — but places items into
+// `lineup_size`-item lineups. No position orientation is assigned here: the
+// caller shuffles each lineup into presentation slots, and the scoring engine
+// estimates the per-slot bias from the slots recorded on the folded edges.
 
 /// Number of lineups in one full round: every item gets compared roughly once
-/// (integer division drops the 1–2 leftover items, same as `num_items / 2` for
+/// (integer division drops the leftover items, same as `num_items / 2` for
 /// pairs).
-pub fn calculate_lineups_for_round(num_items: usize) -> usize {
-    num_items / 3
+pub fn calculate_lineups_for_round(num_items: usize, lineup_size: usize) -> usize {
+    assert_lineup_size(lineup_size);
+    num_items / lineup_size
+}
+
+/// Reject a lineup size outside the supported range at the point of request.
+///
+/// `lineup::winner_dist_to_edges` rejects the same range when folding a
+/// judgement, but that is only reached after the judge has been called. Failing
+/// here means a caller learns the size is unsupported before spending anything
+/// on it.
+pub(crate) fn assert_lineup_size(lineup_size: usize) {
+    assert!(
+        (MIN_LINEUP_SIZE..=MAX_LINEUP_SIZE).contains(&lineup_size),
+        "lineup_size must be between {MIN_LINEUP_SIZE} and {MAX_LINEUP_SIZE}, got {lineup_size}"
+    );
 }
 
 /// Generate uniform lineups for a round. Mirrors
 /// `generate_uniform_pairings_indexed`: round 1 (0 edges) random lineups;
 /// round 2 (1 edge) rating-adjacent lineups; round 3+ info-gain lineups.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn generate_uniform_lineups_indexed(
     num_items: usize,
     lineups_count: usize,
+    lineup_size: usize,
     current_ratings: &[f64],
     current_stds: Option<&[f64]>,
     sharpness: f64,
     edge_counts: &[usize],
     rng: &mut StdRng,
 ) -> Vec<IndexedLineup> {
-    if num_items < 3 {
+    if num_items < lineup_size {
         return Vec::new();
     }
     let rounds_completed = edge_counts.iter().copied().max().unwrap_or(0);
     if rounds_completed == 0 {
-        random_lineups(num_items, lineups_count, rng)
+        random_lineups(num_items, lineups_count, lineup_size, rng)
     } else if rounds_completed == 1 {
-        nearest_neighbour_lineups(num_items, current_ratings, lineups_count, rng)
+        nearest_neighbour_lineups(num_items, current_ratings, lineups_count, lineup_size, rng)
     } else {
-        info_gain_lineups(num_items, current_ratings, current_stds, sharpness, lineups_count, rng)
+        info_gain_lineups(
+            num_items, current_ratings, current_stds, sharpness, lineups_count, lineup_size, rng,
+        )
     }
 }
 
 /// Round 1: no ratings yet — place items into random lineups.
-fn random_lineups(num_items: usize, max_lineups: usize, rng: &mut impl Rng) -> Vec<IndexedLineup> {
+fn random_lineups(
+    num_items: usize,
+    max_lineups: usize,
+    lineup_size: usize,
+    rng: &mut impl Rng,
+) -> Vec<IndexedLineup> {
     let mut order: Vec<usize> = (0..num_items).collect();
     order.shuffle(rng);
     order
-        .chunks_exact(3)
+        .chunks_exact(lineup_size)
         .take(max_lineups)
-        .map(|c| (c[0], c[1], c[2]))
+        .map(|c| c.to_vec())
         .collect()
 }
 
@@ -712,27 +736,31 @@ fn nearest_neighbour_lineups(
     num_items: usize,
     current_ratings: &[f64],
     max_lineups: usize,
+    lineup_size: usize,
     rng: &mut impl Rng,
 ) -> Vec<IndexedLineup> {
     let mut pool: Vec<(usize, f64)> = (0..num_items).map(|i| (i, current_ratings[i])).collect();
     pool.shuffle(rng);
     pool.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
-    pool.chunks_exact(3)
+    pool.chunks_exact(lineup_size)
         .take(max_lineups)
-        .map(|c| (c[0].0, c[1].0, c[2].0))
+        .map(|c| c.iter().map(|&(item, _)| item).collect())
         .collect()
 }
 
-/// Round 3+: info-gain lineups. Pick a random unpaired item1, then draw two
-/// distinct opponents from the rating window around it, each weighted by info
-/// gain so closely-matched (more informative) trios are favoured. All three are
-/// removed once placed. Mirrors `info_gain_pairs` with two opponent draws.
+/// Round 3+: info-gain lineups. Pick a random unpaired item1, then draw
+/// `lineup_size - 1` distinct opponents from the rating window around it, each
+/// weighted by info gain so closely-matched (more informative) lineups are
+/// favoured. All of them are removed once placed. Mirrors `info_gain_pairs`
+/// with repeated opponent draws.
+#[allow(clippy::too_many_arguments)]
 fn info_gain_lineups(
     num_items: usize,
     current_ratings: &[f64],
     current_stds: Option<&[f64]>,
     sharpness: f64,
     max_lineups: usize,
+    lineup_size: usize,
     rng: &mut impl Rng,
 ) -> Vec<IndexedLineup> {
     let mut sorted_pool: Vec<(usize, f64)> = (0..num_items)
@@ -744,13 +772,14 @@ fn info_gain_lineups(
     let mut live_positions: Vec<usize> = (0..n).collect();
     let mut live_idx_of: Vec<Option<usize>> = (0..n).map(Some).collect();
     let (mut previous_live, mut next_live) = make_live_neighbour_links(n);
-    let mut candidates: Vec<usize> = Vec::with_capacity(OPPONENT_WINDOW_SIZE + 2);
-    let mut weights: Vec<f64> = Vec::with_capacity(OPPONENT_WINDOW_SIZE + 2);
+    let mut candidates: Vec<usize> = Vec::with_capacity(OPPONENT_WINDOW_SIZE + lineup_size);
+    let mut weights: Vec<f64> = Vec::with_capacity(OPPONENT_WINDOW_SIZE + lineup_size);
 
+    let opponents_needed = lineup_size - 1;
     let mut lineups: Vec<IndexedLineup> = Vec::with_capacity(max_lineups);
 
     for _ in 0..max_lineups {
-        if live_positions.len() < 3 {
+        if live_positions.len() < lineup_size {
             break;
         }
 
@@ -765,7 +794,7 @@ fn info_gain_lineups(
         );
         let (item1, item1_rating) = sorted_pool[pos1];
 
-        // Gather both opponents before selecting either one. The ordinary
+        // Gather every opponent before selecting any of them. The ordinary
         // fixed window is unchanged; only an exhausted window expands far
         // enough through live rating neighbours to make the lineup possible.
         collect_live_window_candidates(
@@ -775,7 +804,7 @@ fn info_gain_lineups(
             &previous_live,
             &next_live,
             n,
-            2,
+            opponents_needed,
             &mut candidates,
         );
         weights.clear();
@@ -790,8 +819,9 @@ fn info_gain_lineups(
             ));
         }
 
-        let mut picked = [0usize; 2];
-        for picked_pos in &mut picked {
+        let mut lineup: IndexedLineup = Vec::with_capacity(lineup_size);
+        lineup.push(item1);
+        for _ in 0..opponents_needed {
             let total_weight: f64 = weights.iter().sum();
             let selected = if total_weight == 0.0 {
                 rng.random_range(0..candidates.len())
@@ -808,28 +838,30 @@ fn info_gain_lineups(
                 &mut next_live,
                 live_idx,
             );
-            *picked_pos = pos;
+            lineup.push(sorted_pool[pos].0);
         }
-        lineups.push((item1, sorted_pool[picked[0]].0, sorted_pool[picked[1]].0));
+        lineups.push(lineup);
     }
 
     lineups
 }
 
 /// Generate top-heavy lineups. item1 is sampled from the selection weights
-/// (concentrating on contenders); item2 and item3 are two distinct info-gain
-/// opponents from the rating window around item1. Mirrors
-/// `generate_top_heavy_pairings_indexed` with a second opponent draw.
+/// (concentrating on contenders); the remaining `lineup_size - 1` items are
+/// distinct info-gain opponents from the rating window around item1. Mirrors
+/// `generate_top_heavy_pairings_indexed` with repeated opponent draws.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn generate_top_heavy_lineups_indexed(
     num_items: usize,
     lineups_count: usize,
+    lineup_size: usize,
     selection_weights: &[f64],
     current_ratings: &[f64],
     current_stds: Option<&[f64]>,
     matchmaking_sharpness: f64,
     rng: &mut StdRng,
 ) -> Vec<IndexedLineup> {
-    if num_items < 3 {
+    if num_items < lineup_size {
         return Vec::new();
     }
     assert_eq!(selection_weights.len(), num_items, "selection_weights length mismatch");
@@ -855,6 +887,7 @@ pub(crate) fn generate_top_heavy_lineups_indexed(
 
     let half_w = OPPONENT_WINDOW_SIZE / 2;
     let n = num_items;
+    let opponents_needed = lineup_size - 1;
 
     let mut lineups: Vec<IndexedLineup> = Vec::with_capacity(lineups_count);
 
@@ -863,27 +896,44 @@ pub(crate) fn generate_top_heavy_lineups_indexed(
         let item1_rating = current_ratings[item1];
         let pos1 = sorted_position[item1];
 
-        // Two distinct opponents from the window around item1. `chosen` marks
-        // item1 and any already-picked opponent as unavailable within this
-        // lineup (sampling item1 is with-replacement across lineups, so no
+        // The rest of the lineup, drawn from the window around item1. `chosen`
+        // marks item1 and any already-picked opponent as unavailable within
+        // this lineup (sampling item1 is with-replacement across lineups, so no
         // global alive array — exclusion is per-lineup).
         let mut chosen = vec![false; n];
         chosen[pos1] = true;
-        let mut opponents: Vec<usize> = Vec::with_capacity(2);
-        for _ in 0..2 {
-            let window_start = pos1.saturating_sub(half_w);
-            let window_end = (pos1 + half_w + 1).min(n);
-            let mut candidates: Vec<usize> = Vec::new();
-            let mut weights: Vec<f64> = Vec::new();
-            for p in window_start..window_end {
-                if !chosen[p] {
-                    candidates.push(p);
-                    weights.push(window_info_gain(
-                        item1_rating, sorted_pool[p].1, item1, sorted_pool[p].0, current_stds, matchmaking_sharpness,
-                    ));
+        let mut lineup: IndexedLineup = Vec::with_capacity(lineup_size);
+        lineup.push(item1);
+        for _ in 0..opponents_needed {
+            // The fixed window normally holds every opponent the lineup needs.
+            // Widen it only when it does not — with few items, or once earlier
+            // draws have consumed the neighbourhood.
+            let mut window_radius = half_w;
+            let (mut candidates, mut weights) = (Vec::new(), Vec::new());
+            loop {
+                let window_start = pos1.saturating_sub(window_radius);
+                let window_end = (pos1 + window_radius + 1).min(n);
+                candidates.clear();
+                weights.clear();
+                for p in window_start..window_end {
+                    if !chosen[p] {
+                        candidates.push(p);
+                        weights.push(window_info_gain(
+                            item1_rating,
+                            sorted_pool[p].1,
+                            item1,
+                            sorted_pool[p].0,
+                            current_stds,
+                            matchmaking_sharpness,
+                        ));
+                    }
                 }
+                if !candidates.is_empty() || (window_start == 0 && window_end == n) {
+                    break;
+                }
+                window_radius *= 2;
             }
-            // For num_items >= 3 the window always holds two other items.
+            // num_items >= lineup_size guarantees an unchosen item exists.
             debug_assert!(!candidates.is_empty(), "top-heavy lineup window was empty");
             let total_candidate_weight: f64 = weights.iter().sum();
             let selected = if total_candidate_weight == 0.0 {
@@ -893,9 +943,9 @@ pub(crate) fn generate_top_heavy_lineups_indexed(
             };
             let pos = candidates[selected];
             chosen[pos] = true;
-            opponents.push(sorted_pool[pos].0);
+            lineup.push(sorted_pool[pos].0);
         }
-        lineups.push((item1, opponents[0], opponents[1]));
+        lineups.push(lineup);
     }
 
     lineups
@@ -927,6 +977,7 @@ fn weighted_random_select(weights: &[f64], total_weight: f64, rng: &mut impl Rng
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::constants::{MAX_LINEUP_SIZE, MIN_LINEUP_SIZE};
 
     #[test]
     fn test_info_gain_equal_ratings() {
@@ -1363,16 +1414,35 @@ mod tests {
 
     #[test]
     fn test_calculate_lineups_for_round() {
-        assert_eq!(calculate_lineups_for_round(9), 3);
-        assert_eq!(calculate_lineups_for_round(10), 3);
-        assert_eq!(calculate_lineups_for_round(3), 1);
-        assert_eq!(calculate_lineups_for_round(2), 0);
+        assert_eq!(calculate_lineups_for_round(9, 3), 3);
+        assert_eq!(calculate_lineups_for_round(10, 3), 3);
+        assert_eq!(calculate_lineups_for_round(3, 3), 1);
+        assert_eq!(calculate_lineups_for_round(2, 3), 0);
+        assert_eq!(calculate_lineups_for_round(100, 9), 11);
+        assert_eq!(calculate_lineups_for_round(8, 9), 0);
+        assert_eq!(calculate_lineups_for_round(10, 2), 5);
     }
 
-    /// All three members of every lineup are distinct.
-    fn assert_lineups_distinct(lineups: &[IndexedLineup]) {
-        for &(a, b, c) in lineups {
-            assert!(a != b && a != c && b != c, "lineup ({a},{b},{c}) has a repeat");
+    #[test]
+    #[should_panic(expected = "lineup_size must be between 2 and 9, got 10")]
+    fn test_calculate_lineups_for_round_rejects_oversized_lineup() {
+        let _ = calculate_lineups_for_round(100, 10);
+    }
+
+    #[test]
+    #[should_panic(expected = "lineup_size must be between 2 and 9, got 1")]
+    fn test_calculate_lineups_for_round_rejects_undersized_lineup() {
+        let _ = calculate_lineups_for_round(100, 1);
+    }
+
+    /// Every lineup holds `lineup_size` distinct members.
+    fn assert_lineups_distinct(lineups: &[IndexedLineup], lineup_size: usize) {
+        for lineup in lineups {
+            assert_eq!(lineup.len(), lineup_size, "lineup {lineup:?} has the wrong size");
+            let mut sorted = lineup.clone();
+            sorted.sort_unstable();
+            sorted.dedup();
+            assert_eq!(sorted.len(), lineup_size, "lineup {lineup:?} has a repeat");
         }
     }
 
@@ -1381,9 +1451,9 @@ mod tests {
         let ratings = vec![1.0; 12];
         let edges = vec![0usize; 12]; // round 1
         let mut rng = make_rng(Some(1), crate::seed::SUBSYSTEM_PAIRING);
-        let lineups = generate_uniform_lineups_indexed(12, 4, &ratings, None, 1.0, &edges, &mut rng);
+        let lineups = generate_uniform_lineups_indexed(12, 4, 3, &ratings, None, 1.0, &edges, &mut rng);
         assert_eq!(lineups.len(), 4);
-        assert_lineups_distinct(&lineups);
+        assert_lineups_distinct(&lineups, 3);
     }
 
     #[test]
@@ -1391,9 +1461,39 @@ mod tests {
         let ratings: Vec<f64> = (0..12).map(|i| i as f64).collect();
         let edges = vec![2usize; 12]; // round 3+ info-gain stage
         let mut rng = make_rng(Some(2), crate::seed::SUBSYSTEM_PAIRING);
-        let lineups = generate_uniform_lineups_indexed(12, 4, &ratings, None, 1.0, &edges, &mut rng);
+        let lineups = generate_uniform_lineups_indexed(12, 4, 3, &ratings, None, 1.0, &edges, &mut rng);
         assert_eq!(lineups.len(), 4);
-        assert_lineups_distinct(&lineups);
+        assert_lineups_distinct(&lineups, 3);
+    }
+
+    /// Every supported lineup size fills a full round with correctly-sized,
+    /// internally-distinct lineups, at each of the three selection stages.
+    #[test]
+    fn test_uniform_lineups_every_size() {
+        let num_items = 60;
+        for lineup_size in MIN_LINEUP_SIZE..=MAX_LINEUP_SIZE {
+            for (stage, edge_count) in [("random", 0usize), ("neighbour", 1), ("info-gain", 2)] {
+                let ratings: Vec<f64> = (0..num_items).map(|i| i as f64 * 0.1).collect();
+                let edges = vec![edge_count; num_items];
+                let mut rng = make_rng(Some(7), crate::seed::SUBSYSTEM_PAIRING);
+                let wanted = calculate_lineups_for_round(num_items, lineup_size);
+                let lineups = generate_uniform_lineups_indexed(
+                    num_items, wanted, lineup_size, &ratings, None, 1.0, &edges, &mut rng,
+                );
+                assert_eq!(
+                    lineups.len(), wanted,
+                    "size {lineup_size} stage {stage}: short round"
+                );
+                assert_lineups_distinct(&lineups, lineup_size);
+
+                // A uniform round places each item at most once.
+                let mut seen = vec![false; num_items];
+                for item in lineups.iter().flatten() {
+                    assert!(!seen[*item], "size {lineup_size} stage {stage}: item {item} placed twice");
+                    seen[*item] = true;
+                }
+            }
+        }
     }
 
     #[test]
@@ -1404,7 +1504,7 @@ mod tests {
         for seed in 0..128 {
             let mut rng = make_rng(Some(seed), crate::seed::SUBSYSTEM_PAIRING);
             let lineups =
-                info_gain_lineups(num_items, &ratings, None, 1.0, num_items / 3, &mut rng);
+                info_gain_lineups(num_items, &ratings, None, 1.0, num_items / 3, 3, &mut rng);
             assert_eq!(
                 lineups.len(),
                 num_items / 3,
@@ -1412,13 +1512,9 @@ mod tests {
             );
 
             let mut seen = vec![false; num_items];
-            for (a, b, c) in lineups {
-                assert!(!seen[a], "item {a} appeared in two lineups for seed {seed}");
-                assert!(!seen[b], "item {b} appeared in two lineups for seed {seed}");
-                assert!(!seen[c], "item {c} appeared in two lineups for seed {seed}");
-                seen[a] = true;
-                seen[b] = true;
-                seen[c] = true;
+            for item in lineups.iter().flatten() {
+                assert!(!seen[*item], "item {item} appeared in two lineups for seed {seed}");
+                seen[*item] = true;
             }
         }
     }
@@ -1428,9 +1524,30 @@ mod tests {
         let selection_weights: Vec<f64> = (0..10).map(|i| if i < 3 { 0.8 } else { 0.05 }).collect();
         let ratings: Vec<f64> = (0..10).map(|i| i as f64).collect();
         let mut rng = make_rng(Some(3), crate::seed::SUBSYSTEM_PAIRING);
-        let lineups = generate_top_heavy_lineups_indexed(10, 5, &selection_weights, &ratings, None, 1.0, &mut rng);
+        let lineups = generate_top_heavy_lineups_indexed(10, 5, 3, &selection_weights, &ratings, None, 1.0, &mut rng);
         assert_eq!(lineups.len(), 5);
-        assert_lineups_distinct(&lineups);
+        assert_lineups_distinct(&lineups, 3);
+    }
+
+    /// Top-heavy lineups stay correctly sized and distinct at every supported
+    /// size, including when the item count barely covers one lineup.
+    #[test]
+    fn test_top_heavy_lineups_every_size() {
+        for lineup_size in MIN_LINEUP_SIZE..=MAX_LINEUP_SIZE {
+            for num_items in [lineup_size, lineup_size + 1, 40] {
+                let selection_weights = vec![1.0; num_items];
+                let ratings: Vec<f64> = (0..num_items).map(|i| i as f64).collect();
+                let mut rng = make_rng(Some(11), crate::seed::SUBSYSTEM_PAIRING);
+                let lineups = generate_top_heavy_lineups_indexed(
+                    num_items, 20, lineup_size, &selection_weights, &ratings, None, 1.0, &mut rng,
+                );
+                assert_eq!(
+                    lineups.len(), 20,
+                    "size {lineup_size}, {num_items} items: wrong lineup count"
+                );
+                assert_lineups_distinct(&lineups, lineup_size);
+            }
+        }
     }
 
     #[test]
@@ -1442,12 +1559,10 @@ mod tests {
         let selection_weights: Vec<f64> = (0..12).map(|i| if i < 3 { 1.0 } else { 0.0001 }).collect();
         let ratings: Vec<f64> = (0..12).map(|i| if i < 3 { 5.0 } else { 0.0 }).collect();
         let mut rng = make_rng(Some(4), crate::seed::SUBSYSTEM_PAIRING);
-        let lineups = generate_top_heavy_lineups_indexed(12, 200, &selection_weights, &ratings, None, 1.0, &mut rng);
+        let lineups = generate_top_heavy_lineups_indexed(12, 200, 3, &selection_weights, &ratings, None, 1.0, &mut rng);
         let mut appearances = [0usize; 12];
-        for &(a, b, c) in &lineups {
-            appearances[a] += 1;
-            appearances[b] += 1;
-            appearances[c] += 1;
+        for item in lineups.iter().flatten() {
+            appearances[*item] += 1;
         }
         let top_3: usize = appearances[0] + appearances[1] + appearances[2];
         let tail: usize = appearances[3..].iter().sum();
@@ -1455,13 +1570,26 @@ mod tests {
     }
 
     #[test]
-    fn test_lineups_empty_below_three_items() {
-        let ratings = vec![1.0; 2];
-        let edges = vec![0usize; 2];
-        let mut rng = make_rng(Some(5), crate::seed::SUBSYSTEM_PAIRING);
-        assert!(generate_uniform_lineups_indexed(2, 4, &ratings, None, 1.0, &edges, &mut rng).is_empty());
-        let weights = vec![1.0; 2];
-        assert!(generate_top_heavy_lineups_indexed(2, 4, &weights, &ratings, None, 1.0, &mut rng).is_empty());
+    fn test_lineups_empty_below_lineup_size() {
+        for lineup_size in MIN_LINEUP_SIZE..=MAX_LINEUP_SIZE {
+            let num_items = lineup_size - 1;
+            let ratings = vec![1.0; num_items];
+            let edges = vec![0usize; num_items];
+            let weights = vec![1.0; num_items];
+            let mut rng = make_rng(Some(5), crate::seed::SUBSYSTEM_PAIRING);
+            assert!(
+                generate_uniform_lineups_indexed(
+                    num_items, 4, lineup_size, &ratings, None, 1.0, &edges, &mut rng,
+                ).is_empty(),
+                "size {lineup_size}: uniform lineups should be empty with {num_items} items"
+            );
+            assert!(
+                generate_top_heavy_lineups_indexed(
+                    num_items, 4, lineup_size, &weights, &ratings, None, 1.0, &mut rng,
+                ).is_empty(),
+                "size {lineup_size}: top-heavy lineups should be empty with {num_items} items"
+            );
+        }
     }
 
     #[test]

@@ -303,14 +303,13 @@ pub async fn judge_pair(
     Err(last_err)
 }
 
-/// Result of a single three-item lineup (three-item) judgement call.
+/// Result of a single lineup judgement call.
 pub struct LineupJudgementResult {
-    pub item_a_id: i64,
-    pub item_b_id: i64,
-    pub item_c_id: i64,
-    /// Winner-distribution `[q_A, q_B, q_C]` (probability each option is best),
-    /// aligned to items a, b, c. None if the response was unparseable.
-    pub winner_dist: Option<[f64; 3]>,
+    /// The lineup's item IDs, in presentation order (slot A first).
+    pub item_ids: Vec<i64>,
+    /// Winner-distribution `[q_A, q_B, ...]` (probability each option is best),
+    /// aligned to `item_ids`. None if the response was unparseable.
+    pub winner_dist: Option<Vec<f64>>,
     pub response_text: String,
     pub prompt: String,
     pub retries_used: usize,
@@ -318,57 +317,59 @@ pub struct LineupJudgementResult {
     pub hit_max_tokens: bool,
 }
 
-/// Send one HTTP request for a three-item lineup judgement and fold the response into a
-/// winner-distribution over the three options. Returns Err only on HTTP/network
+/// Send one HTTP request for a lineup judgement and fold the response into a
+/// winner-distribution over the lineup's options. Returns Err only on HTTP/network
 /// failures; an unparseable ranking yields `Ok` with `winner_dist = None`.
 async fn send_lineup_judgement_request(
     client: &Client,
     config: &LlmConfig,
     prompt: &str,
+    lineup_size: usize,
     min_logprob_coverage: f64,
-) -> Result<(Option<[f64; 3]>, String, Option<Usage>, bool), String> {
+) -> Result<(Option<Vec<f64>>, String, Option<Usage>, bool), String> {
     let (content, logprobs, usage, hit_max_tokens) = send_chat_raw(client, config, prompt).await?;
 
     let winner_dist = if config.logprobs {
-        parse_lineup(&logprobs, min_logprob_coverage)
+        parse_lineup(&logprobs, lineup_size, min_logprob_coverage)
     } else {
-        parse_lineup_text(&content)
+        parse_lineup_text(&content, lineup_size)
     };
 
     Ok((winner_dist, content, usage, hit_max_tokens))
 }
 
-/// Call the LLM to rank three items, with retries on HTTP errors. Mirrors
+/// Call the LLM to rank a lineup's items, with retries on HTTP errors. Mirrors
 /// `judge_pair`: retries only HTTP/network errors, never an unparseable
-/// ranking.
+/// ranking. `option_texts` and `item_ids` are in presentation order and must be
+/// the same length.
 #[allow(clippy::too_many_arguments)]
 pub async fn judge_lineup(
     client: &Client,
     config: &LlmConfig,
     template: &str,
     criterion: &str,
-    option_a: &str,
-    option_b: &str,
-    option_c: &str,
-    item_a_id: i64,
-    item_b_id: i64,
-    item_c_id: i64,
+    option_texts: &[&str],
+    item_ids: &[i64],
     min_logprob_coverage: f64,
     analysis_length: &str,
     max_retries: usize,
     verbose: bool,
     judge_name: &str,
 ) -> Result<LineupJudgementResult, String> {
-    let prompt = build_lineup_prompt(template, criterion, option_a, option_b, option_c, analysis_length);
+    assert_eq!(
+        option_texts.len(),
+        item_ids.len(),
+        "option_texts and item_ids must describe the same lineup"
+    );
+    let lineup_size = item_ids.len();
+    let prompt = build_lineup_prompt(template, criterion, option_texts, analysis_length);
 
     let mut last_err = String::new();
     for attempt in 0..=max_retries {
-        match send_lineup_judgement_request(client, config, &prompt, min_logprob_coverage).await {
+        match send_lineup_judgement_request(client, config, &prompt, lineup_size, min_logprob_coverage).await {
             Ok((winner_dist, content, usage, hit_max_tokens)) => {
                 return Ok(LineupJudgementResult {
-                    item_a_id,
-                    item_b_id,
-                    item_c_id,
+                    item_ids: item_ids.to_vec(),
                     winner_dist,
                     response_text: content,
                     prompt: prompt.clone(),
@@ -382,7 +383,7 @@ pub async fn judge_lineup(
                 if attempt < max_retries {
                     if verbose {
                         eprintln!(
-                            "  Retry {}/{} for three-item lineup [{}]: {}",
+                            "  Retry {}/{} for lineup [{}]: {}",
                             attempt + 1, max_retries, judge_name, last_err
                         );
                     }

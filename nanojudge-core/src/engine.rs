@@ -7,7 +7,7 @@
 use crate::bradley_terry::BradleyTerry;
 use crate::constants::INITIAL_BRADLEY_TERRY_RATING;
 use crate::pairing::{
-    calculate_lineups_for_round, generate_uniform_pairings_indexed,
+    assert_lineup_size, calculate_lineups_for_round, generate_uniform_pairings_indexed,
     generate_top_heavy_pairings_indexed, generate_uniform_lineups_indexed,
     generate_top_heavy_lineups_indexed, get_effective_judgement_distribution,
     JudgementDistribution,
@@ -153,17 +153,17 @@ impl RankingEngine {
         }
     }
 
-    /// The three-item lineup analogue of `round_chunk_sizes`: chunk sizes in lineups that
-    /// sum to one full round (`calculate_lineups_for_round(num_items)`). Same
+    /// The lineup analogue of `round_chunk_sizes`: chunk sizes in lineups that
+    /// sum to one full round (`calculate_lineups_for_round(num_items, lineup_size)`). Same
     /// policy — only top-heavy rounds subdivide (for mid-round refits); the
     /// uniform stage always returns a single full-round chunk.
     ///
     /// # Panics
     ///
     /// Panics if `refits_per_round` is 0.
-    pub fn round_chunk_sizes_lineups(&self, refits_per_round: usize) -> Vec<usize> {
+    pub fn round_chunk_sizes_lineups(&self, refits_per_round: usize, lineup_size: usize) -> Vec<usize> {
         assert!(refits_per_round >= 1, "refits_per_round must be at least 1");
-        let lineups_per_round = calculate_lineups_for_round(self.id_map.len());
+        let lineups_per_round = calculate_lineups_for_round(self.id_map.len(), lineup_size);
         if refits_per_round > 1
             && self.effective_distribution() == JudgementDistribution::TopHeavy
         {
@@ -217,9 +217,10 @@ impl RankingEngine {
         }).collect()
     }
 
-    /// Generate a batch of `lineups_count` three-item lineups using the
-    /// current effective distribution. The three-item lineup analogue of `generate_pairs`: a
-    /// full round is `calculate_lineups_for_round(num_items)` lineups. Each lineup
+    /// Generate a batch of `lineups_count` lineups of `lineup_size` items each,
+    /// using the current effective distribution. The lineup analogue of
+    /// `generate_pairs`: a full round is
+    /// `calculate_lineups_for_round(num_items, lineup_size)` lineups. Each lineup
     /// receives one judgement, then is folded into edges by the caller via
     /// `lineup::winner_dist_to_edges` before being fed
     /// back through `record_edges`.
@@ -228,7 +229,8 @@ impl RankingEngine {
     ///
     /// Panics under the same conditions as `generate_pairs`: a top-heavy round
     /// with `selection_weights` unset or malformed.
-    pub fn generate_lineups(&mut self, lineups_count: usize) -> Vec<Lineup> {
+    pub fn generate_lineups(&mut self, lineups_count: usize, lineup_size: usize) -> Vec<Lineup> {
+        assert_lineup_size(lineup_size);
         let num_items = self.id_map.len();
 
         let effective_judgement_distribution = self.effective_distribution();
@@ -237,6 +239,7 @@ impl RankingEngine {
             JudgementDistribution::Uniform => generate_uniform_lineups_indexed(
                 num_items,
                 lineups_count,
+                lineup_size,
                 &self.current_ratings,
                 self.current_stds.as_deref(),
                 self.config.matchmaking_sharpness,
@@ -250,6 +253,7 @@ impl RankingEngine {
                 generate_top_heavy_lineups_indexed(
                     num_items,
                     lineups_count,
+                    lineup_size,
                     selection_weights,
                     &self.current_ratings,
                     self.current_stds.as_deref(),
@@ -260,9 +264,10 @@ impl RankingEngine {
         };
 
         // Convert index lineups to ID lineups.
-        index_lineups.into_iter().map(|(a, b, c)| {
-            (self.id_map.to_id(a), self.id_map.to_id(b), self.id_map.to_id(c))
-        }).collect()
+        index_lineups
+            .into_iter()
+            .map(|lineup| lineup.into_iter().map(|idx| self.id_map.to_id(idx)).collect())
+            .collect()
     }
 
     /// Record edges from a round.
@@ -550,6 +555,36 @@ mod tests {
             seed: None,
         };
         let _ = RankingEngine::new(&[1], config);
+    }
+
+    #[test]
+    #[should_panic(expected = "lineup_size must be between 2 and 9, got 10")]
+    fn test_generate_lineups_rejects_oversized_lineup() {
+        // The size is rejected here, before any judge is called, rather than
+        // later when the returned lineup fails to fold into edges.
+        let item_ids: Vec<i64> = (1..=20).collect();
+        let config = EngineConfig {
+            judgement_distribution: JudgementDistribution::Uniform,
+            matchmaking_sharpness: 1.0,
+            min_uniform_edges: 3,
+            seed: None,
+        };
+        let mut engine = RankingEngine::new(&item_ids, config);
+        let _ = engine.generate_lineups(2, 10);
+    }
+
+    #[test]
+    #[should_panic(expected = "lineup_size must be between 2 and 9, got 1")]
+    fn test_generate_lineups_rejects_undersized_lineup() {
+        let item_ids: Vec<i64> = (1..=20).collect();
+        let config = EngineConfig {
+            judgement_distribution: JudgementDistribution::Uniform,
+            matchmaking_sharpness: 1.0,
+            min_uniform_edges: 3,
+            seed: None,
+        };
+        let mut engine = RankingEngine::new(&item_ids, config);
+        let _ = engine.generate_lineups(2, 1);
     }
 
     #[test]

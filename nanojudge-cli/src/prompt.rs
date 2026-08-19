@@ -7,6 +7,7 @@
 //! a "Verdict: Option <n>" line naming the winning option.
 
 use crate::bail;
+use nanojudge_core::constants::{MAX_LINEUP_SIZE, MIN_LINEUP_SIZE};
 
 pub const DEFAULT_TEMPLATE: &str = "\
 $criterion
@@ -43,53 +44,120 @@ Verdict: Option 2
 const REQUIRED_VARIABLES: &[&str] = &["$criterion", "$option1", "$option2"];
 const REQUIRED_VARIABLES_NO_REASONING: &[&str] = &["$criterion", "$option1", "$option2"];
 
-// --- Three-item lineup (3-item) judgement templates ---
+// --- Lineup judgement templates ---
 //
-// The judge ranks all three items (first/second/third); the parser reads the
-// last three "Option <letter>" lines and folds them into a `[q_A, q_B, q_C]`
-// winner-distribution that feeds `winner_dist_to_edges`.
+// A lineup template names its options literally: `$optionA`, `$optionB`, ...,
+// one per item, up to `$optionI` for a nine-item lineup. A template is therefore
+// written for one specific lineup size; using it at another size is an error
+// rather than something the tool papers over.
+//
+// The judge ranks every option (first place through last); the parser reads the
+// trailing "Option <letter>" lines and folds them into a winner-distribution
+// that feeds `winner_dist_to_edges`.
 
-pub const DEFAULT_LINEUP_TEMPLATE: &str = "\
-$criterion
+/// Option letters, in presentation order. Index 0 is slot A.
+pub const OPTION_LETTERS: [char; MAX_LINEUP_SIZE] =
+    ['A', 'B', 'C', 'D', 'E', 'F', 'G', 'H', 'I'];
 
-Option A:
-$optionA
+/// Ordinal words for the ranking lines, one per rank position.
+const ORDINALS: [&str; MAX_LINEUP_SIZE] = [
+    "First", "Second", "Third", "Fourth", "Fifth", "Sixth", "Seventh", "Eighth", "Ninth",
+];
 
-Option B:
-$optionB
+/// The `$option` variable name for slot `index` (`$optionA`, `$optionB`, ...).
+fn option_variable(index: usize) -> String {
+    format!("$option{}", OPTION_LETTERS[index])
+}
 
-Option C:
-$optionC
+/// Every variable a `lineup_size` lineup template must contain: `$criterion`
+/// plus one `$option<letter>` per item.
+fn required_lineup_variables(lineup_size: usize) -> Vec<String> {
+    let mut vars = vec!["$criterion".to_string()];
+    vars.extend((0..lineup_size).map(option_variable));
+    vars
+}
 
-Instructions:
-Write a $length analysis. Analyse all three options before forming a preference. You MUST end your response with these three lines, replacing X, Y, and Z with the letter of the option (A, B, or C):
+/// The ranking-instruction block: one "Nth place is Option X" line per rank,
+/// with the placeholder letters the judge is told to replace.
+fn ranking_lines(lineup_size: usize) -> String {
+    // Placeholders start well past the option letters so they can't be mistaken
+    // for a real option: X, Y, Z, then W, V, ... backwards.
+    const PLACEHOLDERS: [char; MAX_LINEUP_SIZE] =
+        ['X', 'Y', 'Z', 'W', 'V', 'U', 'T', 'S', 'R'];
+    (0..lineup_size)
+        .map(|i| format!("{} place is Option {}", ORDINALS[i], PLACEHOLDERS[i]))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
 
-First place is Option X
-Second place is Option Y
-Third place is Option Z
-";
+/// The option blocks: "Option A:\n$optionA\n\nOption B:\n$optionB\n\n...".
+fn option_blocks(lineup_size: usize) -> String {
+    (0..lineup_size)
+        .map(|i| format!("Option {}:\n{}", OPTION_LETTERS[i], option_variable(i)))
+        .collect::<Vec<_>>()
+        .join("\n\n")
+}
 
-pub const DEFAULT_LINEUP_TEMPLATE_NO_REASONING: &str = "\
-$criterion
+/// A comma-separated list of the option letters, for prose ("A, B, or C").
+fn option_letter_list(lineup_size: usize) -> String {
+    let letters: Vec<String> = (0..lineup_size).map(|i| OPTION_LETTERS[i].to_string()).collect();
+    match letters.split_last() {
+        Some((last, rest)) if !rest.is_empty() => format!("{}, or {}", rest.join(", "), last),
+        _ => letters.join(", "),
+    }
+}
 
-Option A:
-$optionA
+/// The lineup size written as an English word, as the instruction prose reads
+/// better spelled out ("Analyse all three options") than in digits.
+fn size_word(lineup_size: usize) -> &'static str {
+    const WORDS: [&str; MAX_LINEUP_SIZE + 1] = [
+        "zero", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine",
+    ];
+    WORDS[lineup_size]
+}
 
-Option B:
-$optionB
+/// The built-in lineup template for `lineup_size` items, with an analysis step.
+///
+/// The 3-item form is the shape all sizes follow:
+///
+/// ```text
+/// $criterion
+///
+/// Option A:
+/// $optionA
+/// ...
+/// Instructions:
+/// Write a $length analysis. Analyse all three options before forming a
+/// preference. You MUST end your response with these three lines, ...
+/// ```
+pub fn default_lineup_template(lineup_size: usize) -> String {
+    format!(
+        "{criterion}\n\n{blocks}\n\nInstructions:\nWrite a $length analysis. \
+Analyse all {count} options before forming a preference. You MUST end your response \
+with these {count} lines, replacing the placeholder letters with the letter of the \
+option ({letters}):\n\n{lines}\n",
+        criterion = "$criterion",
+        blocks = option_blocks(lineup_size),
+        count = size_word(lineup_size),
+        letters = option_letter_list(lineup_size),
+        lines = ranking_lines(lineup_size),
+    )
+}
 
-Option C:
-$optionC
+/// The built-in lineup template for `lineup_size` items, verdict only (no
+/// reasoning step).
+pub fn default_lineup_template_no_reasoning(lineup_size: usize) -> String {
+    format!(
+        "{criterion}\n\n{blocks}\n\nInstructions:\nRespond only with these {count} lines, \
+replacing the placeholder letters with the letter of the option ({letters}):\n\n{lines}\n",
+        criterion = "$criterion",
+        blocks = option_blocks(lineup_size),
+        count = size_word(lineup_size),
+        letters = option_letter_list(lineup_size),
+        lines = ranking_lines(lineup_size),
+    )
+}
 
-Instructions:
-Respond only with these three lines, replacing X, Y, and Z with the letter of the option (A, B, or C):
-
-First place is Option X
-Second place is Option Y
-Third place is Option Z
-";
-
-const REQUIRED_LINEUP_VARIABLES: &[&str] = &["$criterion", "$optionA", "$optionB", "$optionC"];
 
 /// Validate that a template contains all required variables.
 /// Returns an error message listing any missing variables.
@@ -110,22 +178,41 @@ pub fn validate_template(template: &str, reasoning_enabled: bool) -> Result<(), 
     }
 }
 
-/// Validate that a three-item lineup template contains all required variables
-/// (`$criterion`, `$optionA`, `$optionB`, `$optionC`).
-pub fn validate_lineup_template(template: &str) -> Result<(), String> {
-    let missing: Vec<&&str> = REQUIRED_LINEUP_VARIABLES
-        .iter()
-        .filter(|var| !template.contains(**var))
+/// Validate that a lineup template matches `lineup_size`: it must contain
+/// `$criterion` and exactly one `$option<letter>` per item — `$optionA` through
+/// `$optionC` for a 3-item lineup, through `$optionI` for a 9-item one.
+///
+/// A template carrying option variables beyond the lineup size was written for a
+/// different size and is rejected, rather than silently leaving `$optionD` in the
+/// prompt text sent to the judge.
+pub fn validate_lineup_template(template: &str, lineup_size: usize) -> Result<(), String> {
+    let missing: Vec<String> = required_lineup_variables(lineup_size)
+        .into_iter()
+        .filter(|var| !template.contains(var.as_str()))
         .collect();
 
-    if missing.is_empty() {
-        Ok(())
-    } else {
-        Err(format!(
-            "Three-item lineup prompt template is missing required variable(s): {}",
-            missing.iter().map(|v| v.to_string()).collect::<Vec<_>>().join(", ")
-        ))
+    if !missing.is_empty() {
+        return Err(format!(
+            "Lineup prompt template for {lineup_size} items is missing required variable(s): {}",
+            missing.join(", ")
+        ));
     }
+
+    let extra: Vec<String> = (lineup_size..MAX_LINEUP_SIZE)
+        .map(option_variable)
+        .filter(|var| template.contains(var.as_str()))
+        .collect();
+
+    if !extra.is_empty() {
+        return Err(format!(
+            "Lineup prompt template is for a larger lineup than lineup-size={lineup_size}: \
+it uses {}. Use a template with exactly {} option variable(s), or change lineup-size.",
+            extra.join(", "),
+            lineup_size
+        ));
+    }
+
+    Ok(())
 }
 
 /// Load a prompt template from a file path, validate it, and return the contents.
@@ -140,12 +227,13 @@ pub fn load_template(path: &std::path::Path, reasoning_enabled: bool) -> String 
     content
 }
 
-/// Load a three-item lineup prompt template from a file path, validate it, and return it.
-pub fn load_lineup_template(path: &std::path::Path) -> String {
+/// Load a lineup prompt template from a file path, validate it against the
+/// lineup size, and return it.
+pub fn load_lineup_template(path: &std::path::Path, lineup_size: usize) -> String {
     let content = std::fs::read_to_string(path)
         .unwrap_or_else(|e| bail(format!("Failed to read prompt template {}: {e}", path.display())));
 
-    if let Err(msg) = validate_lineup_template(&content) {
+    if let Err(msg) = validate_lineup_template(&content, lineup_size) {
         bail(format!("{} (in {})", msg, path.display()));
     }
 
@@ -187,34 +275,44 @@ pub fn build_prompt(template: &str, criterion: &str, option1: &str, option2: &st
     out
 }
 
-/// Build a three-item lineup judgement prompt by substituting the three options into a
-/// template. Single-pass, like `build_prompt`: item text containing literal
-/// template tokens passes through untouched.
+/// Build a lineup judgement prompt by substituting the options into a template.
+/// Single-pass, like `build_prompt`: item text containing literal template
+/// tokens passes through untouched.
+///
+/// `option_texts` is in presentation order — index 0 fills `$optionA`.
+///
+/// # Panics
+///
+/// Panics if `option_texts` is not a valid lineup size (2..=9).
 pub fn build_lineup_prompt(
     template: &str,
     criterion: &str,
-    option_a: &str,
-    option_b: &str,
-    option_c: &str,
+    option_texts: &[&str],
     analysis_length: &str,
 ) -> String {
-    let length = analysis_length.trim_end_matches('s');
-    let vars: [(&str, &str); 5] = [
-        ("$criterion", criterion),
-        ("$optionA", option_a),
-        ("$optionB", option_b),
-        ("$optionC", option_c),
-        ("$length", length),
-    ];
-
-    let mut out = String::with_capacity(
-        template.len() + option_a.len() + option_b.len() + option_c.len(),
+    let lineup_size = option_texts.len();
+    assert!(
+        (MIN_LINEUP_SIZE..=MAX_LINEUP_SIZE).contains(&lineup_size),
+        "lineup size must be between {MIN_LINEUP_SIZE} and {MAX_LINEUP_SIZE}, got {lineup_size}"
     );
+
+    let length = analysis_length.trim_end_matches('s');
+
+    // No variable name is a prefix of another, so substitution order does not
+    // affect the result; options are listed first only to read in lineup order.
+    let mut vars: Vec<(String, &str)> = (0..lineup_size)
+        .map(|i| (option_variable(i), option_texts[i]))
+        .collect();
+    vars.push(("$criterion".to_string(), criterion));
+    vars.push(("$length".to_string(), length));
+
+    let options_len: usize = option_texts.iter().map(|o| o.len()).sum();
+    let mut out = String::with_capacity(template.len() + options_len);
     let mut rest = template;
     while let Some(pos) = rest.find('$') {
         out.push_str(&rest[..pos]);
         let tail = &rest[pos..];
-        if let Some((var, value)) = vars.iter().find(|(v, _)| tail.starts_with(v)) {
+        if let Some((var, value)) = vars.iter().find(|(v, _)| tail.starts_with(v.as_str())) {
             out.push_str(value);
             rest = &tail[var.len()..];
         } else {
@@ -228,6 +326,61 @@ pub fn build_lineup_prompt(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn test_lineup_template_spells_the_size_as_a_word() {
+        // Instruction prose reads as English at every size, and never as a
+        // digit that could be mistaken for part of the ranking format.
+        for size in MIN_LINEUP_SIZE..=MAX_LINEUP_SIZE {
+            for template in
+                [default_lineup_template(size), default_lineup_template_no_reasoning(size)]
+            {
+                let word = size_word(size);
+                assert!(
+                    template.contains(&format!("these {word} lines")),
+                    "size {size}: line count not spelled out:\n{template}"
+                );
+                assert!(
+                    !template.contains(&format!("these {size} lines")),
+                    "size {size}: line count left as a digit:\n{template}"
+                );
+            }
+            assert!(
+                default_lineup_template(size).contains(&format!("all {} options", size_word(size))),
+                "size {size}: option count not spelled out"
+            );
+        }
+    }
+
+    #[test]
+    fn test_lineup_template_size_three_matches_the_historical_wording() {
+        // The three-item template predates variable sizes. Its option blocks,
+        // ranking lines and letter list are reproduced exactly; only the
+        // sentence naming the placeholders is deliberately reworded, since
+        // listing them individually does not scale to nine.
+        let expected = "\
+$criterion
+
+Option A:
+$optionA
+
+Option B:
+$optionB
+
+Option C:
+$optionC
+
+Instructions:
+Write a $length analysis. Analyse all three options before forming a preference. \
+You MUST end your response with these three lines, replacing the placeholder letters \
+with the letter of the option (A, B, or C):
+
+First place is Option X
+Second place is Option Y
+Third place is Option Z
+";
+        assert_eq!(default_lineup_template(3), expected);
+    }
+
     use super::*;
 
     #[test]
@@ -304,20 +457,24 @@ mod tests {
         assert!(DEFAULT_TEMPLATE_NO_REASONING.contains("Verdict: Option 2"));
     }
 
-    // --- Three-item lineup template tests ---
+    // --- Lineup template tests ---
 
     #[test]
-    fn test_default_lineup_templates_valid() {
-        validate_lineup_template(DEFAULT_LINEUP_TEMPLATE).unwrap();
-        validate_lineup_template(DEFAULT_LINEUP_TEMPLATE_NO_REASONING).unwrap();
+    fn test_default_lineup_templates_valid_at_every_size() {
+        for size in MIN_LINEUP_SIZE..=MAX_LINEUP_SIZE {
+            validate_lineup_template(&default_lineup_template(size), size)
+                .unwrap_or_else(|e| panic!("size {size}: {e}"));
+            validate_lineup_template(&default_lineup_template_no_reasoning(size), size)
+                .unwrap_or_else(|e| panic!("size {size} (no reasoning): {e}"));
+        }
     }
 
     #[test]
     fn test_build_lineup_prompt() {
         let prompt = build_lineup_prompt(
-            DEFAULT_LINEUP_TEMPLATE,
+            &default_lineup_template(3),
             "Which is tastier?",
-            "Pizza", "Sushi", "Tacos",
+            &["Pizza", "Sushi", "Tacos"],
             "2 paragraphs",
         );
         assert!(prompt.starts_with("Which is tastier?"));
@@ -329,11 +486,78 @@ mod tests {
         assert!(prompt.contains("2 paragraph"));
     }
 
+    /// Every option's text lands in its own slot, and no `$option` variable is
+    /// left unsubstituted, at any lineup size.
+    #[test]
+    fn test_build_lineup_prompt_every_size() {
+        for size in MIN_LINEUP_SIZE..=MAX_LINEUP_SIZE {
+            let texts: Vec<String> = (0..size).map(|i| format!("item-text-{i}")).collect();
+            let refs: Vec<&str> = texts.iter().map(|t| t.as_str()).collect();
+            let prompt = build_lineup_prompt(
+                &default_lineup_template(size),
+                "Which is best?",
+                &refs,
+                "2 paragraphs",
+            );
+            for (i, text) in texts.iter().enumerate() {
+                assert!(
+                    prompt.contains(&format!("Option {}:\n{}", OPTION_LETTERS[i], text)),
+                    "size {size}: option {i} missing from prompt"
+                );
+            }
+            assert!(!prompt.contains("$option"), "size {size}: unsubstituted variable");
+            assert!(!prompt.contains("$criterion"), "size {size}: unsubstituted criterion");
+            assert!(!prompt.contains("$length"), "size {size}: unsubstituted length");
+            // One ranking line per rank.
+            assert!(prompt.contains("First place is Option X"), "size {size}");
+            assert!(
+                prompt.contains(&format!("{} place is Option", ORDINALS[size - 1])),
+                "size {size}: last ranking line missing"
+            );
+        }
+    }
+
+    /// The ranking-line placeholders must never collide with a real option
+    /// letter, or the parser would read them as part of the block.
+    #[test]
+    fn test_ranking_placeholders_are_not_option_letters() {
+        for size in MIN_LINEUP_SIZE..=MAX_LINEUP_SIZE {
+            let lines = ranking_lines(size);
+            for letter in &OPTION_LETTERS[..size] {
+                assert!(
+                    !lines.contains(&format!("Option {letter}")),
+                    "size {size}: placeholder collides with option {letter}"
+                );
+            }
+        }
+    }
+
     #[test]
     fn test_validate_lineup_missing_option() {
-        let result = validate_lineup_template("$criterion $optionA $optionB only");
+        let result = validate_lineup_template("$criterion $optionA $optionB only", 3);
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("$optionC"));
+    }
+
+    /// A template written for a bigger lineup is rejected, not silently sent
+    /// with a stray `$optionD` in the text.
+    #[test]
+    fn test_validate_lineup_rejects_oversized_template() {
+        let template = "$criterion $optionA $optionB $optionC $optionD";
+        let result = validate_lineup_template(template, 3);
+        assert!(result.is_err());
+        let msg = result.unwrap_err();
+        assert!(msg.contains("$optionD"), "message should name the extra variable: {msg}");
+    }
+
+    /// The 4-item default template is valid at 4 and rejected at 3 and 5 —
+    /// templates are written for one specific lineup size.
+    #[test]
+    fn test_lineup_template_is_size_specific() {
+        let four = default_lineup_template(4);
+        validate_lineup_template(&four, 4).unwrap();
+        assert!(validate_lineup_template(&four, 3).is_err());
+        assert!(validate_lineup_template(&four, 5).is_err());
     }
 
     #[test]
@@ -341,7 +565,7 @@ mod tests {
         let prompt = build_lineup_prompt(
             "$criterion|$optionA|$optionB|$optionC",
             "crit",
-            "has $optionB inside", "plain", "also $length here",
+            &["has $optionB inside", "plain", "also $length here"],
             "brief",
         );
         assert_eq!(prompt, "crit|has $optionB inside|plain|also $length here");

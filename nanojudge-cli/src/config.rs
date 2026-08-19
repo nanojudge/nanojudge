@@ -44,7 +44,7 @@ pub struct NanojudgeConfig {
     pub logprobs: Option<bool>,
     pub analysis_length: Option<String>,
     pub judgement_distribution: Option<String>,
-    /// Number of items in each judged lineup: 2 or 3.
+    /// Number of items in each judged lineup: 2 to 9.
     pub lineup_size: Option<usize>,
     pub selection_sharpness: Option<f64>,
     pub anchor_index: Option<f64>,
@@ -112,10 +112,11 @@ const DEFAULT_CONFIG_TEMPLATE: &str = "\
 # Uniform gives equal attention to all items. Top-heavy focuses on contenders.
 # judgement_distribution = \"uniform\"
 
-# Number of items in each judged lineup: 2 (default) or 3.
-# With 3, each judgement ranks three items and is folded into up to three edges,
-# so one LLM call yields more information. Requires logprobs for the
-# full benefit.
+# Number of items in each judged lineup: 2 (default) up to 9.
+# Above 2, each judgement ranks the whole lineup and is folded into one edge per
+# pair, so one LLM call yields more information. Requires logprobs for the
+# full benefit. A custom prompt_template must name exactly as many options as
+# the lineup size ($optionA through $optionI).
 # lineup_size = 2
 
 # Tuning for the top-heavy distribution. Each item's pairing weight is its
@@ -155,7 +156,7 @@ const DEFAULT_CONFIG_TEMPLATE: &str = "\
 
 # Minimum fraction of verdict-token probability mass the top-logprobs must
 # cover for a logprob-based verdict to be trusted (logprobs mode only) — the
-# option digits for pairwise, the option letters for three-item lineup. Below this, the
+# option digits for pairwise, the option letters for a lineup. Below this, the
 # judgement is treated as unparseable. Must be > 0.0 and <= 1.0.
 # Can be overridden per-judge.
 # min_logprob_coverage = 0.95
