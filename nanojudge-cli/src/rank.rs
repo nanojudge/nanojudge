@@ -1,8 +1,7 @@
 use nanojudge_core::{
     Edge, EngineConfig, JudgeInfo, RankingEngine, ScoringOptions,
-    JudgementDistribution, calculate_pairs_for_round, calculate_rounds_for_target_judgements,
-    calculate_total_expected_judgements, calculate_lineups_for_round, run_scoring,
-    winner_dist_to_edges,
+    JudgementDistribution, calculate_budget,
+    judgements_needed_for_every_item_to_appear_once, run_scoring, winner_dist_to_edges,
 };
 use nanojudge_core::seed;
 use rand::seq::SliceRandom;
@@ -28,7 +27,7 @@ struct JudgeStats {
     max_tokens_hits: usize,
     total_responses: usize,
     wall_time_sum: f64,
-    round_count: usize,
+    collection_count: usize,
 }
 
 fn resolve_save_path(path: &Path, prefix: &str) -> PathBuf {
@@ -86,14 +85,14 @@ fn parse_criteria(content: &str) -> Vec<String> {
         .collect()
 }
 
-/// Assign pairs to judges for one round, balancing cumulative usage across rounds.
+/// Assign the judgement attempts scheduled before one refit, balancing cumulative usage.
 ///
-/// `cumulative_total` is the total pairs INCLUDING this round. Each judge's target
-/// is `cumulative_total * weight`, minus what they've already been assigned. This
-/// ensures even distribution over time rather than independent per-round allocation.
+/// `cumulative_total` includes these judgements. Each judge's target is
+/// `cumulative_total * weight`, minus what they have already been assigned. This
+/// ensures even distribution over time rather than independent per-refit allocation.
 /// Updates `cumulative_assigned` in place.
 fn assign_judgements_to_judges(
-    round_pairs: usize,
+    judgements_before_refit: usize,
     normalized_weights: &[f64],
     cumulative_assigned: &mut [usize],
     cumulative_total: usize,
@@ -106,15 +105,16 @@ fn assign_judgements_to_judges(
     let mut assigned = 0usize;
 
     for (i, &w) in normalized_weights.iter().enumerate() {
-        let target_this_round = (w * cumulative_total as f64) - cumulative_assigned[i] as f64;
-        let floor = (target_this_round.floor() as usize).min(round_pairs.saturating_sub(assigned));
+        let target_this_refit = (w * cumulative_total as f64) - cumulative_assigned[i] as f64;
+        let floor = (target_this_refit.floor() as usize)
+            .min(judgements_before_refit.saturating_sub(assigned));
         counts.push(floor);
-        remainders.push((i, target_this_round - floor as f64));
+        remainders.push((i, target_this_refit - floor as f64));
         assigned += floor;
     }
 
     remainders.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
-    for &(judge_idx, _) in remainders.iter().take(round_pairs - assigned) {
+    for &(judge_idx, _) in remainders.iter().take(judgements_before_refit - assigned) {
         counts[judge_idx] += 1;
     }
 
@@ -122,7 +122,7 @@ fn assign_judgements_to_judges(
         cumulative_assigned[i] += count;
     }
 
-    let mut assignments: Vec<usize> = Vec::with_capacity(round_pairs);
+    let mut assignments: Vec<usize> = Vec::with_capacity(judgements_before_refit);
     for (judge_idx, &count) in counts.iter().enumerate() {
         assignments.extend(std::iter::repeat_n(judge_idx, count));
     }
@@ -167,30 +167,12 @@ pub async fn run(args: RankArgs) {
         ));
     }
 
-    let rounds = if let Some(target) = resolved.judgements {
-        let pairs_per_round = calculate_pairs_for_round(texts.len());
-        if pairs_per_round == 0 {
-            bail("Cannot run judgements: need at least 2 items.");
-        }
-        let r = calculate_rounds_for_target_judgements(texts.len(), target);
-        if r == 0 {
-            bail(format!(
-                "--judgements ({target}) is less than one round ({pairs_per_round} judgements). Use at least {pairs_per_round}.",
-            ));
-        }
-        let actual = calculate_total_expected_judgements(texts.len(), r);
-        if actual != target {
-            eprintln!(
-                "Running {} judgements instead of {}, to align with round boundaries ({} per round).",
-                actual, target, pairs_per_round,
-            );
-        }
-        r
-    } else {
-        resolved.rounds.unwrap_or_else(|| {
-            bail(format!("No rounds or judgements specified. Pass --rounds, --judgements, or set it in {}", config_path.display()));
-        })
-    };
+    let budget = calculate_budget(texts.len(), resolved.judgements_per_item, 2);
+    let default_judgements_per_refit =
+        judgements_needed_for_every_item_to_appear_once(texts.len(), 2);
+    let judgements_per_refit = resolved
+        .judgements_per_refit
+        .unwrap_or(default_judgements_per_refit);
 
     // Build JudgeInfo for the core engine
     let judge_ids: Vec<u64> = judges.iter().map(|j| j.judge_id).collect();
@@ -258,14 +240,12 @@ pub async fn run(args: RankArgs) {
     let titles = Arc::new(titles);
     let texts = Arc::new(texts);
 
-    let total_planned = calculate_total_expected_judgements(texts.len(), rounds);
-
     if resolved.verbose {
         eprintln!(
-            "Ranking {} items across {} rounds ({} judgements planned)",
+            "Ranking {} items ({} judgements planned, {} per item)",
             texts.len(),
-            rounds,
-            total_planned,
+            budget,
+            resolved.judgements_per_item,
         );
         if criteria.len() == 1 {
             eprintln!("Criterion: \"{}\"", criteria[0]);
@@ -382,44 +362,30 @@ pub async fn run(args: RankArgs) {
     let mut judge_assign_rng = seed::make_rng(resolved.seed, seed::SUBSYSTEM_JUDGE_ASSIGN);
     let mut jitter_rng = seed::make_rng(resolved.seed, seed::SUBSYSTEM_TEMP_JITTER);
 
-    // When --emit-round-rankings is set, record (cumulative judgements, ranked
-    // names) after each round so the benchmark can plot per-round convergence.
-    let mut round_rankings: Vec<(usize, Vec<String>)> = Vec::new();
-    let pairs_per_round = calculate_pairs_for_round(texts.len());
-    // Set when --stop-confidence is active and an interim fit shows the
-    // partition confidence — P(every item on its side of the anchor) — has
-    // reached the requested level; ends the round loop early and proceeds
-    // straight to final scoring.
+    // When --emit-interim-rankings is set, record (cumulative judgements, ranked
+    // names) after each refit so the benchmark can plot convergence by refit.
+    let mut interim_rankings: Vec<(usize, Vec<String>)> = Vec::new();
     let mut early_stop = false;
-    // Rounds actually executed (early stop or cancellation can end the run
-    // before the configured budget); this is what the output reports.
-    let mut rounds_run = 0usize;
-    for round in 0..rounds {
+    let mut refits_run = 0usize;
+    let mut judgements_done = 0usize;
+
+    while judgements_done < budget {
         if cancelled.load(Ordering::Relaxed) {
             break;
         }
-        rounds_run = round + 1;
+        refits_run += 1;
 
-        // Decide how many refit chunks this round splits into. The engine
-        // applies the policy: only top-heavy batches may be subdivided (the
-        // uniform stage pairs every item exactly once per full round, so it
-        // stays whole). Each chunk runs its own scoring refit and re-derives
-        // selection weights, so pairing adapts mid-round.
-        let chunk_sizes = engine.round_chunk_sizes(resolved.refits_per_round);
+        let judgements_before_refit = judgements_per_refit.min(budget - judgements_done);
 
         if resolved.verbose {
             eprintln!(
-                "Round {}/{}: {} pairs in {} refit chunk(s)",
-                round + 1, rounds, pairs_per_round, chunk_sizes.len(),
+                "Refit {}: collecting {} pairs ({}/{})",
+                refits_run, judgements_before_refit, judgements_done, budget,
             );
         }
 
-        for chunk_size in chunk_sizes {
-        if cancelled.load(Ordering::Relaxed) {
-            break;
-        }
-        let pairs = engine.generate_pairs(chunk_size);
-        let round_start = std::time::Instant::now();
+        let pairs = engine.generate_pairs(judgements_before_refit);
+        let collection_start = std::time::Instant::now();
 
         cumulative_total_pairs += pairs.len();
         let pair_assignments = assign_judgements_to_judges(
@@ -504,8 +470,7 @@ pub async fn run(args: RankArgs) {
             handles.push((handle, judge_idx));
         }
 
-        // Collect results
-        let mut round_results: Vec<Edge> = Vec::new();
+        let mut refit_results: Vec<Edge> = Vec::new();
         let mut judge_last_finish: Vec<Option<std::time::Instant>> = vec![None; judges.len()];
         let mut judge_aborted: Vec<usize> = vec![0; judges.len()];
 
@@ -525,7 +490,7 @@ pub async fn run(args: RankArgs) {
             };
             match result {
                 Ok((Ok(result), assigned_judge_id, judge_idx, finished_at)) => {
-                    // Track latest finish time per judge for this round
+                    // Track latest finish time per judge before this refit.
                     let entry = &mut judge_last_finish[judge_idx];
                     if entry.is_none() || finished_at > entry.unwrap() {
                         *entry = Some(finished_at);
@@ -542,7 +507,7 @@ pub async fn run(args: RankArgs) {
                     if let Some(category_probs) = result.parse_result.category_probs {
                         if let Some(ref file_mutex) = save_file {
                             let line = serde_json::json!({
-                                "round": round + 1,
+                                "refit": refits_run,
                                 "item1": titles[result.item1_id as usize],
                                 "item2": titles[result.item2_id as usize],
                                 "category_probs": category_probs,
@@ -557,7 +522,7 @@ pub async fn run(args: RankArgs) {
 
                         // The raw distribution is what went to the JSONL above;
                         // the tempered one is what the scoring engine sees.
-                        round_results.push(Edge::new(
+                        refit_results.push(Edge::new(
                             result.item1_id,
                             result.item2_id,
                             temper_verdict(category_probs, judge_verdict_temperatures[judge_idx]),
@@ -567,7 +532,7 @@ pub async fn run(args: RankArgs) {
                         failed_parse += 1;
                         if let Some(ref file_mutex) = failures_file {
                             let line = serde_json::json!({
-                                "round": round + 1,
+                                "refit": refits_run,
                                 "item1": titles[result.item1_id as usize],
                                 "item2": titles[result.item2_id as usize],
                                 "judge_model": judge_models[judge_idx],
@@ -629,40 +594,40 @@ pub async fn run(args: RankArgs) {
             break;
         }
 
-        // Accumulate per-judge wall time for this round
         for (j, finish) in judge_last_finish.iter().enumerate() {
             if let Some(t) = finish {
-                judge_stats[j].wall_time_sum += t.duration_since(round_start).as_secs_f64();
-                judge_stats[j].round_count += 1;
+                judge_stats[j].wall_time_sum += t.duration_since(collection_start).as_secs_f64();
+                judge_stats[j].collection_count += 1;
             }
         }
 
-        total_judgements += round_results.len();
+        total_judgements += refit_results.len();
+        judgements_done += pairs.len();
 
-        let round_failed = pairs.len() - round_results.len();
+        let failed_before_refit = pairs.len() - refit_results.len();
         if resolved.verbose {
             eprintln!(
                 "  Completed: {} successful, {} failed",
-                round_results.len(),
-                round_failed,
+                refit_results.len(),
+                failed_before_refit,
             );
         }
 
-        if round_failed == pairs.len() {
+        if failed_before_refit == pairs.len() {
             eprintln!(
-                "Warning: all {} judgements in round {} failed. \
+                "Warning: all {} judgements before refit {} failed. \
                  If your endpoint requires an API key, ensure it is set via \
                  --api-key or api_key_env in your config.",
                 pairs.len(),
-                round + 1,
+                refits_run,
             );
         }
 
-        engine.record_edges(&round_results);
+        engine.record_edges(&refit_results);
 
         let need_interim = matches!(judgement_distribution, JudgementDistribution::TopHeavy)
             || resolved.live_top.is_some()
-            || resolved.emit_round_rankings;
+            || resolved.emit_interim_rankings;
         if need_interim && !engine.completed_edges.is_empty() {
             let interim = run_scoring(
                 &item_ids,
@@ -681,23 +646,17 @@ pub async fn run(args: RankArgs) {
                 },
                 &judge_info,
             );
-            if resolved.emit_round_rankings {
+            if resolved.emit_interim_rankings {
                 let order: Vec<String> = interim
                     .rankings
                     .iter()
                     .map(|r| titles[r.item as usize].clone())
                     .collect();
-                round_rankings.push((total_judgements, order));
+                interim_rankings.push((total_judgements, order));
             }
             if matches!(judgement_distribution, JudgementDistribution::TopHeavy) {
-                // The interim posterior replaces the per-chunk MLE refit as the
-                // matchmaking rating source; its stds let opponent selection
-                // integrate over rating uncertainty.
                 engine.set_current_posterior(&interim.item_means, &interim.item_stds);
                 if let Some(c) = resolved.stop_confidence {
-                    // Stop once P(every checked item is on its side of the
-                    // anchor) >= c — the log-domain partition confidence
-                    // clearing ln(c).
                     let log_conf = interim.partition_log_confidence
                         .expect("top-heavy interim scoring always computes selection ratios");
                     if log_conf >= c.ln() {
@@ -710,26 +669,19 @@ pub async fn run(args: RankArgs) {
                 }
                 engine.selection_weights = interim.selection_weights;
             } else {
-                // Interim fit ran only for display (--live-top or round
-                // rankings on a uniform run): keep MLE ratings so a display
-                // flag never changes pairing.
                 engine.update_current_ratings();
             }
             if let Some(limit) = resolved.live_top {
                 output::print_live_table(
                     &interim.rankings,
                     &titles,
-                    round + 1,
+                    refits_run,
                     total_judgements,
                     limit,
                 );
             }
         } else {
             engine.update_current_ratings();
-        }
-        if early_stop {
-            break;
-        }
         }
         if early_stop {
             break;
@@ -806,8 +758,8 @@ pub async fn run(args: RankArgs) {
         .collect();
     let judge_avg_wall_time: HashMap<u64, f64> = judges.iter().enumerate()
         .map(|(i, j)| {
-            let avg = if judge_stats[i].round_count > 0 {
-                judge_stats[i].wall_time_sum / judge_stats[i].round_count as f64
+            let avg = if judge_stats[i].collection_count > 0 {
+                judge_stats[i].wall_time_sum / judge_stats[i].collection_count as f64
             } else {
                 0.0
             };
@@ -820,13 +772,12 @@ pub async fn run(args: RankArgs) {
             &scoring_result.rankings,
             &titles,
             &engine.edge_counts,
-            rounds_run,
             total_judgements,
             &scoring_result.judge_analytics,
             scoring_result.panel_positional_bias,
             scoring_result.panel_positional_bias_ci,
-            if resolved.emit_round_rankings {
-                Some(round_rankings.as_slice())
+            if resolved.emit_interim_rankings {
+                Some(interim_rankings.as_slice())
             } else {
                 None
             },
@@ -835,7 +786,6 @@ pub async fn run(args: RankArgs) {
             &scoring_result.rankings,
             &titles,
             &engine.edge_counts,
-            rounds_run,
             total_judgements,
             resolved.confidence_level,
             &scoring_result.judge_analytics,
@@ -901,28 +851,13 @@ async fn run_lineup_judgements(
         ));
     }
 
-    let lineups_per_round = calculate_lineups_for_round(texts.len(), resolved.lineup_size);
-
-    let rounds = if let Some(target) = resolved.judgements {
-        let r = target.div_ceil(lineups_per_round);
-        if r == 0 {
-            bail(format!(
-                "--judgements ({target}) is less than one round ({lineups_per_round} lineup judgements). Use at least {lineups_per_round}.",
-            ));
-        }
-        let actual = lineups_per_round * r;
-        if actual != target {
-            eprintln!(
-                "Running {} lineup judgements instead of {}, to align with round boundaries ({} per round).",
-                actual, target, lineups_per_round,
-            );
-        }
-        r
-    } else {
-        resolved.rounds.unwrap_or_else(|| {
-            bail(format!("No rounds or judgements specified. Pass --rounds, --judgements, or set it in {}", config_path.display()));
-        })
-    };
+    let lineup_size = resolved.lineup_size;
+    let budget = calculate_budget(texts.len(), resolved.judgements_per_item, lineup_size);
+    let default_judgements_per_refit =
+        judgements_needed_for_every_item_to_appear_once(texts.len(), lineup_size);
+    let judgements_per_refit = resolved
+        .judgements_per_refit
+        .unwrap_or(default_judgements_per_refit);
 
     let judge_ids: Vec<u64> = judges.iter().map(|j| j.judge_id).collect();
     let judge_info = JudgeInfo {
@@ -973,11 +908,10 @@ async fn run_lineup_judgements(
     let titles = Arc::new(titles);
     let texts = Arc::new(texts);
 
-    let total_planned = lineups_per_round * rounds;
     if resolved.verbose {
         eprintln!(
-            "Ranking {} items across {} rounds ({} lineup judgements planned)",
-            texts.len(), rounds, total_planned,
+            "Ranking {} items ({} lineup judgements planned, {} per item)",
+            texts.len(), budget, resolved.judgements_per_item,
         );
         if criteria.len() == 1 {
             eprintln!("Criterion: \"{}\"", criteria[0]);
@@ -1058,38 +992,28 @@ async fn run_lineup_judgements(
     // placement unbiased and lets the bias be estimated out.
     let mut slot_rng = seed::make_rng(resolved.seed, seed::SUBSYSTEM_EDGE_ORIENTATION);
 
-    let mut round_rankings: Vec<(usize, Vec<String>)> = Vec::new();
-
-    // Set when --stop-confidence is active and an interim fit shows the
-    // partition confidence — P(every item on its side of the anchor) — has
-    // reached the requested level; ends the round loop early and proceeds
-    // straight to final scoring.
+    let mut interim_rankings: Vec<(usize, Vec<String>)> = Vec::new();
     let mut early_stop = false;
-    // Rounds actually executed (early stop or cancellation can end the run
-    // before the configured budget); this is what the output reports.
-    let mut rounds_run = 0usize;
-    for round in 0..rounds {
+    let mut refits_run = 0usize;
+    let mut judgements_done = 0usize;
+
+    while judgements_done < budget {
         if cancelled.load(Ordering::Relaxed) {
             break;
         }
-        rounds_run = round + 1;
+        refits_run += 1;
 
-        // Split the round into refit chunks (only top-heavy subdivides); each
-        // chunk runs its own scoring refit and re-derives selection weights.
-        let chunk_sizes = engine.round_chunk_sizes_lineups(resolved.refits_per_round, resolved.lineup_size);
+        let judgements_before_refit = judgements_per_refit.min(budget - judgements_done);
+
         if resolved.verbose {
             eprintln!(
-                "Round {}/{}: {} lineups in {} refit chunk(s)",
-                round + 1, rounds, lineups_per_round, chunk_sizes.len(),
+                "Refit {}: collecting {} lineups ({}/{})",
+                refits_run, judgements_before_refit, judgements_done, budget,
             );
         }
 
-        for chunk_size in chunk_sizes {
-        if cancelled.load(Ordering::Relaxed) {
-            break;
-        }
-        let lineups = engine.generate_lineups(chunk_size, resolved.lineup_size);
-        let round_start = std::time::Instant::now();
+        let lineups = engine.generate_lineups(judgements_before_refit, lineup_size);
+        let collection_start = std::time::Instant::now();
 
         cumulative_total_pairs += lineups.len();
         let judge_assignments = assign_judgements_to_judges(
@@ -1159,8 +1083,8 @@ async fn run_lineup_judgements(
             handles.push((handle, judge_idx));
         }
 
-        let mut round_results: Vec<Edge> = Vec::new();
-        let mut round_llm_calls: usize = 0;
+        let mut refit_results: Vec<Edge> = Vec::new();
+        let mut calls_before_refit: usize = 0;
         let mut judge_last_finish: Vec<Option<std::time::Instant>> = vec![None; judges.len()];
         let mut judge_aborted: Vec<usize> = vec![0; judges.len()];
 
@@ -1194,14 +1118,14 @@ async fn run_lineup_judgements(
                         judge_stats[judge_idx].output_tokens += usage.completion_tokens;
                     }
                     if let Some(winner_dist) = tw.winner_dist {
-                        round_llm_calls += 1;
+                        calls_before_refit += 1;
                         if let Some(ref file_mutex) = save_file {
                             let lineup_titles: Vec<&str> = tw.item_ids
                                 .iter()
                                 .map(|&id| titles[id as usize].as_str())
                                 .collect();
                             let line = serde_json::json!({
-                                "round": round + 1,
+                                "refit": refits_run,
                                 "items": lineup_titles,
                                 "winner_dist": winner_dist,
                                 "judge_model": judge_models[judge_idx],
@@ -1223,7 +1147,7 @@ async fn run_lineup_judgements(
                             assigned_judge_id,
                             logprobs_mode,
                         );
-                        round_results.extend(edges);
+                        refit_results.extend(edges);
                     } else {
                         failed_parse += 1;
                         if let Some(ref file_mutex) = failures_file {
@@ -1232,7 +1156,7 @@ async fn run_lineup_judgements(
                                 .map(|&id| titles[id as usize].as_str())
                                 .collect();
                             let line = serde_json::json!({
-                                "round": round + 1,
+                                "refit": refits_run,
                                 "items": lineup_titles,
                                 "judge_model": judge_models[judge_idx],
                                 "judge_endpoint": judge_endpoints[judge_idx],
@@ -1288,32 +1212,33 @@ async fn run_lineup_judgements(
 
         for (j, finish) in judge_last_finish.iter().enumerate() {
             if let Some(t) = finish {
-                judge_stats[j].wall_time_sum += t.duration_since(round_start).as_secs_f64();
-                judge_stats[j].round_count += 1;
+                judge_stats[j].wall_time_sum += t.duration_since(collection_start).as_secs_f64();
+                judge_stats[j].collection_count += 1;
             }
         }
 
-        total_judgements += round_llm_calls;
+        total_judgements += calls_before_refit;
+        judgements_done += lineups.len();
 
         if resolved.verbose {
             eprintln!(
                 "  Completed: {} successful, {} failed ({} edges fed)",
-                round_llm_calls, lineups.len() - round_llm_calls, round_results.len(),
+                calls_before_refit, lineups.len() - calls_before_refit, refit_results.len(),
             );
         }
 
-        if round_llm_calls == 0 && !lineups.is_empty() {
+        if calls_before_refit == 0 && !lineups.is_empty() {
             eprintln!(
-                "Warning: all {} lineup judgements in a round-{} chunk failed.",
-                lineups.len(), round + 1,
+                "Warning: all {} lineup judgements before refit {} failed.",
+                lineups.len(), refits_run,
             );
         }
 
-        engine.record_edges(&round_results);
+        engine.record_edges(&refit_results);
 
         let need_interim = matches!(judgement_distribution, JudgementDistribution::TopHeavy)
             || resolved.live_top.is_some()
-            || resolved.emit_round_rankings;
+            || resolved.emit_interim_rankings;
         if need_interim && !engine.completed_edges.is_empty() {
             let interim = run_scoring(
                 &item_ids,
@@ -1332,21 +1257,15 @@ async fn run_lineup_judgements(
                 },
                 &judge_info,
             );
-            if resolved.emit_round_rankings {
+            if resolved.emit_interim_rankings {
                 let order: Vec<String> = interim.rankings.iter()
                     .map(|r| titles[r.item as usize].clone())
                     .collect();
-                round_rankings.push((total_judgements, order));
+                interim_rankings.push((total_judgements, order));
             }
             if matches!(judgement_distribution, JudgementDistribution::TopHeavy) {
-                // The interim posterior replaces the per-chunk MLE refit as the
-                // matchmaking rating source; its stds let opponent selection
-                // integrate over rating uncertainty.
                 engine.set_current_posterior(&interim.item_means, &interim.item_stds);
                 if let Some(c) = resolved.stop_confidence {
-                    // Stop once P(every checked item is on its side of the
-                    // anchor) >= c — the log-domain partition confidence
-                    // clearing ln(c).
                     let log_conf = interim.partition_log_confidence
                         .expect("top-heavy interim scoring always computes selection ratios");
                     if log_conf >= c.ln() {
@@ -1359,20 +1278,13 @@ async fn run_lineup_judgements(
                 }
                 engine.selection_weights = interim.selection_weights;
             } else {
-                // Interim fit ran only for display (--live-top or round
-                // rankings on a uniform run): keep MLE ratings so a display
-                // flag never changes pairing.
                 engine.update_current_ratings();
             }
             if let Some(limit) = resolved.live_top {
-                output::print_live_table(&interim.rankings, &titles, round + 1, total_judgements, limit);
+                output::print_live_table(&interim.rankings, &titles, refits_run, total_judgements, limit);
             }
         } else {
             engine.update_current_ratings();
-        }
-        if early_stop {
-            break;
-        }
         }
         if early_stop {
             break;
@@ -1429,8 +1341,8 @@ async fn run_lineup_judgements(
         .collect();
     let judge_avg_wall_time: HashMap<u64, f64> = judges.iter().enumerate()
         .map(|(i, j)| {
-            let avg = if judge_stats[i].round_count > 0 {
-                judge_stats[i].wall_time_sum / judge_stats[i].round_count as f64
+            let avg = if judge_stats[i].collection_count > 0 {
+                judge_stats[i].wall_time_sum / judge_stats[i].collection_count as f64
             } else {
                 0.0
             };
@@ -1440,13 +1352,13 @@ async fn run_lineup_judgements(
 
     match resolved.output_format {
         OutputFormat::Json => output::print_json(
-            &scoring_result.rankings, &titles, &engine.edge_counts, rounds_run, total_judgements,
+            &scoring_result.rankings, &titles, &engine.edge_counts, total_judgements,
             &scoring_result.judge_analytics,
             scoring_result.panel_positional_bias, scoring_result.panel_positional_bias_ci,
-            if resolved.emit_round_rankings { Some(round_rankings.as_slice()) } else { None },
+            if resolved.emit_interim_rankings { Some(interim_rankings.as_slice()) } else { None },
         ),
         OutputFormat::Table => output::print_table(
-            &scoring_result.rankings, &titles, &engine.edge_counts, rounds_run, total_judgements,
+            &scoring_result.rankings, &titles, &engine.edge_counts, total_judgements,
             resolved.confidence_level, &scoring_result.judge_analytics,
             &judge_names, &judge_tokens, &judge_avg_wall_time,
         ),
@@ -1546,7 +1458,7 @@ mod tests {
         let mut cumulative = vec![0usize; 3];
         let mut rng = rand::rng();
 
-        // Simulate 5 rounds of 10 pairs each
+        // Simulate 5 refit intervals of 10 pairs each.
         let mut total = 0;
         for _ in 0..5 {
             total += 10;
@@ -1561,12 +1473,12 @@ mod tests {
     }
 
     #[test]
-    fn test_cumulative_balancing_uneven_round_sizes() {
+    fn test_cumulative_balancing_uneven_refit_intervals() {
         let weights = vec![0.5, 0.5];
         let mut cumulative = vec![0usize; 2];
         let mut rng = rand::rng();
 
-        // Odd-sized rounds: 3, 3, 3
+        // Uneven refit intervals: 3, 3, 3.
         let mut total = 0;
         for _ in 0..3 {
             total += 3;

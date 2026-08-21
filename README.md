@@ -8,6 +8,9 @@ Works with any OpenAI-compatible API endpoint.
 
 [nanojudge.ai](https://nanojudge.ai) is a hosted version built on this engine, wrapped in a web UI with managed GPU infrastructure.
 
+See the [NanoJudge glossary](docs/glossary.md) for precise definitions of
+judgements, edges, refits, coverage, and the adaptive-selection terms used below.
+
 ## Install
 
 Download a prebuilt binary from [GitHub Releases](https://github.com/nanojudge/nanojudge/releases), or build from source:
@@ -27,7 +30,7 @@ nanojudge init   # creates ~/.config/nanojudge/config.toml
 Example config with multiple judges:
 
 ```toml
-rounds = 10
+judgements_per_item = 10
 logprobs = true
 
 [[judge]]
@@ -70,7 +73,7 @@ cat papers.txt | nanojudge rank \
   --criterion "Which paper is more impactful?"
 ```
 
-CLI flags like `--rounds` override config file values.
+CLI flags like `--judgements-per-item` override config file values.
 
 Output with criterion "Which of these fruits is healthiest?":
 
@@ -113,9 +116,9 @@ nanojudge rank ... --save-judgements
 nanojudge rank ... --save-judgements results.jsonl
 ```
 
-Each line is a JSON object with `round`, `item1`, `item2`, `category_probs`, `judge_model`, `judge_endpoint`, and `response` (the raw LLM text). Lines are flushed immediately so you can `tail -f` during a run.
+Each line is a JSON object with `refit`, `item1`, `item2`, `category_probs`, `judge_model`, `judge_endpoint`, and `response` (the raw LLM text). Lines are flushed immediately so you can `tail -f` during a run.
 
-Runs with `lineup_size` above 2 write a different shape, since a lineup has no fixed number of members: `item1`/`item2` are replaced by an `items` array holding the lineup in presentation order, and `category_probs` by `winner_dist`, the judge's probability that each member of that array won. `round`, `judge_model`, `judge_endpoint`, and `response` are unchanged. Pairwise runs are unaffected — a reader written against the two-item shape keeps working for `lineup_size = 2`.
+Runs with `lineup_size` above 2 write a different shape, since a lineup has no fixed number of members: `item1`/`item2` are replaced by an `items` array holding the lineup in presentation order, and `category_probs` by `winner_dist`, the judge's probability that each member of that array won. `refit`, `judge_model`, `judge_endpoint`, and `response` are unchanged. Pairwise runs are unaffected — a reader written against the two-item shape keeps working for `lineup_size = 2`.
 
 ## Config file
 
@@ -125,13 +128,14 @@ Key settings:
 
 | Setting | Description |
 |---|---|
-| `rounds` | Number of judgement rounds |
+| `judgements_per_item` | Average judgements per item. Total budget = `ceil(judgements_per_item * num_items / lineup_size)`. |
+| `judgements_per_refit` | Literal number of judgement attempts scheduled between scoring refits, including during uniform pairing. Defaults to enough scheduled judgements for every item to appear at least once. |
 | `lineup_size` | Items in each judgement. `2` (default) is the pairwise mode everything else is tuned around; up to `9` is supported, where one call ranks the whole lineup. |
-| `logprobs` | `true` to extract logprobs for continuous confidence (requires endpoint support, e.g. vLLM). `false` for text-based verdict parsing (works everywhere, but needs more rounds). |
+| `logprobs` | `true` to extract logprobs for continuous confidence (requires endpoint support, e.g. vLLM). `false` for text-based verdict parsing (works everywhere, but needs more judgements). |
 | `judgement_distribution` | `"uniform"` (default) or `"top-heavy"`. Top-heavy concentrates judgements on the contenders for the top spots. |
 | `selection_sharpness` / `cutoff` | Top-heavy tuning. Each item's pairing weight is its uncertainty ratio around the anchor — min/max of the probability of sitting above vs below the anchor, integrated over both the item's and the anchor's posterior uncertainty: `1` when the item straddles the anchor, near `0` once it's confidently on either side — raised to `selection_sharpness` (lower = flatter = more exploration; default `0.7`). `cutoff` drops items whose ratio is below it, keeping the two highest regardless (`[0,1)`, default `0` — no cutoff; sharpness does the shaping). The first item of each judgement is drawn from these weights; its opponent is then picked by info-gain matchmaking from a rating window around it, with the win probability integrated over both items' posterior uncertainty so matchups that *might* be close also score well — so the contested boundary gets the judgements. |
 | `anchor_index` | Which rank anchors top-heavy selection, 0-based into the ranking sorted best-first (default `0` — the current leader). `9` anchors on the 10th-best: right for "find the top ten, order within them doesn't matter", since judgements concentrate on the boundary around rank 10 while items confidently inside or outside the top ten shed weight. Fractional values interpolate between adjacent ranks (`0.5` targets the midpoint of the 1st and 2nd items). Must be at most the number of items minus 1. |
-| `stop_confidence` | Early stop for top-heavy runs. After each interim fit, the run ends early once the probability that every item sits on its side of the anchor — the product of the per-item side probabilities — reaches this value; final scoring then runs on the judgements collected so far. Items far from the anchor contribute ~1 to the product, so the criterion is governed by the few stragglers at the boundary. In `(0.5, 1.0)`, e.g. `0.95`. No default: when unset, the run always uses its full round budget. The rounds/judgements budget stays the hard cap — a boundary too crowded to ever resolve simply runs to the cap. Rejected with the uniform distribution (no anchor to measure against). |
+| `stop_confidence` | Early stop for top-heavy runs. After each interim fit, the run ends early once the probability that every item sits on its side of the anchor — the product of the per-item side probabilities — reaches this value; final scoring then runs on the judgements collected so far. Items far from the anchor contribute ~1 to the product, so the criterion is governed by the few stragglers at the boundary. In `(0.5, 1.0)`, e.g. `0.95`. No default: when unset, the run always uses its full budget. The `judgements_per_item` budget stays the hard cap — a boundary too crowded to ever resolve simply runs to the cap. Rejected with the uniform distribution (no anchor to measure against). |
 
 Per-judge settings (in `[[judge]]` blocks):
 
@@ -150,7 +154,7 @@ Per-judge settings (in `[[judge]]` blocks):
 
 ## How it works
 
-1. **Lineup judgements** — each round, the engine selects which lineups to present. A lineup is a pair by default; `lineup_size` can widen it to as many as nine items, in which case the judge ranks them all in one call and the ranking is folded back into pairwise edges. Each judge in the panel evaluates its assigned lineups. With `logprobs = true`, token logprobs give continuous confidence. With `logprobs = false`, verdicts are parsed from the response text.
+1. **Lineup judgements** — the engine iteratively selects which lineups to present. A lineup is a pair by default; `lineup_size` can widen it to as many as nine items, in which case the judge ranks them all in one call and the ranking is folded back into pairwise edges. Each judge in the panel evaluates its assigned lineups. With `logprobs = true`, token logprobs give continuous confidence. With `logprobs = false`, verdicts are parsed from the response text.
 
 2. **Bradley-Terry scoring** — all edge probabilities are combined into global scores using deterministic Laplace inference. Newton-CG finds the posterior mode, while matrix-free inverse-Hessian probes estimate correlation-aware credible intervals without dense O(n²) matrices.
 

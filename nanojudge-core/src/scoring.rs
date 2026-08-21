@@ -204,7 +204,7 @@ fn compute_selection_weights(
     // deliberately inflates the early target toward the prior-predicted anchor
     // for exploration, and items "confidently below" that inflated boundary
     // are not resolved against the actual anchor — measuring against the blend
-    // fires spurious stops in the first rounds.
+    // fires spurious stops after the first few refits.
     //
     // An integer anchor exempts the anchor item itself (some item must hold
     // the boundary; its own side probability is ~0.5 by construction and
@@ -1028,7 +1028,7 @@ mod tests {
         // "confidently below" a boundary that is not the anchor and the
         // selection ratios collapse. The stopping statistic must measure
         // against the observed anchor instead and stay high — otherwise a
-        // confidence-based early stop fires after the first uniform round.
+        // confidence-based early stop fires after the first uniform refit.
         let n = 50;
         let mut means = vec![0.0; n];
         means[0] = 0.5; // modest observed leader, far below the predicted max

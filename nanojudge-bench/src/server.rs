@@ -92,7 +92,7 @@ pub struct JudgeState {
     pub seed: u64,
     /// Independent draws used to estimate each verdict-token distribution.
     pub samples_per_judgement: usize,
-    /// Per-pair encounter counter so repeated matchups get independent sample batches.
+    /// Per-pair encounter counter so repeated matchups get independent sample sets.
     pub encounter_counts: Mutex<HashMap<(String, String), u64>>,
 }
 
@@ -177,8 +177,8 @@ fn extract_lineup_items(prompt: &str) -> Vec<String> {
 // ---------------------------------------------------------------------------
 
 /// One emitted verdict token plus the empirical distribution estimated from a
-/// batch of independent draws. The emitted token is the first draw in the
-/// batch, matching normal generation while guaranteeing it has nonzero mass in
+/// set of independent draws. The emitted token is the first draw in the
+/// set, matching normal generation while guaranteeing it has nonzero mass in
 /// the empirical distribution.
 #[derive(Debug)]
 struct SampledToken<const N: usize> {
@@ -238,7 +238,7 @@ fn sample_token_distribution<const N: usize>(
 /// Every item is hashed, in prompt order, so that neither a positional swap nor
 /// a change to any one member of the lineup reuses another lineup's RNG stream.
 /// The encounter counter ensures repeated matchups of the same ordered lineup
-/// get independent sample batches.
+/// get independent sample sets.
 fn deterministic_lineup_seed(base: u64, items: &[&str], seq: u64) -> u64 {
     let mut hasher = DefaultHasher::new();
     base.hash(&mut hasher);
@@ -634,7 +634,7 @@ mod tests {
         assert!(first[order[0]] >= 1.0 / samples as f64);
 
         // The emitted first-place item is removed before the second sample
-        // batch. The conditional distribution covers exactly the other two.
+        // sample set. The conditional distribution covers exactly the other two.
         assert_close(second[order[0]], 0.0);
         assert_close(second.iter().sum(), 1.0);
         assert!(second[order[1]] >= 1.0 / samples as f64);

@@ -42,14 +42,15 @@ for r in &result.rankings {
 }
 ```
 
-## Multi-round usage with the engine
+## Iterative usage with the engine
 
-For iterative ranking (compare, score, pick next pairs, repeat):
+For iterative ranking (compare, score, choose the next judgements, repeat):
 
 ```rust
 use nanojudge_core::{
     RankingEngine, EngineConfig, JudgementDistribution,
     Edge, run_scoring, ScoringOptions, JudgeInfo, stable_hash,
+    judgements_needed_for_every_item_to_appear_once, calculate_budget,
 };
 
 let item_ids: Vec<i64> = vec![10, 20, 30, 40];
@@ -64,18 +65,15 @@ let config = EngineConfig {
 };
 
 let mut engine = RankingEngine::new(&item_ids, config);
+let budget = calculate_budget(item_ids.len(), 10, 2); // 10 judgements per item, pairwise
+let refit_interval = judgements_needed_for_every_item_to_appear_once(item_ids.len(), 2);
+let mut done = 0;
 
-for round in 0..20 {
+while done < budget {
     // 1. Score existing edges to get posterior summaries for pairing
     if !engine.completed_edges.is_empty() {
         let scoring = run_scoring(&item_ids, &engine.completed_edges, &ScoringOptions {
             confidence_level: 0.95,
-            // Top-heavy selection: weight each item by its sharpened
-            // uncertainty ratio around the anchor (anchor_index 0.0 = the
-            // current leader) — items straddling the anchor get the focus.
-            // The first item of each pair is drawn from these weights; its
-            // opponent comes from info-gain matchmaking in a rating window
-            // around it. `None` would disable top-heavy weighting.
             selection_sharpness: Some(0.5),
             anchor_index: 0.0,
             selection_cutoff: 0.0005,
@@ -86,27 +84,23 @@ for round in 0..20 {
             bias_prior_tau2: 2.0,
             bias_prior_logit: 0.0,
         }, &judge_info);
-        // The posterior (means + stds) drives matchmaking: opponent selection
-        // integrates its win probabilities over the rating uncertainty, so
-        // matchups that *might* be close also score well.
         engine.set_current_posterior(&scoring.item_means, &scoring.item_stds);
         engine.selection_weights = scoring.selection_weights;
     }
 
-    // 2. Engine selects two-item lineups
-    let pairs = engine.generate_pairs_for_round(round);
+    // 2. Engine selects pairs to collect before the next refit
+    let judgements_before_refit = refit_interval.min(budget - done);
+    let pairs = engine.generate_pairs(judgements_before_refit);
 
     // 3. You obtain the judgements (call your LLM, ask humans, etc.).
-    //    The placeholder below stands in for your source of P(a beats b).
     let results: Vec<Edge> = pairs.iter().map(|&(a, b)| {
         let prob = if a < b { 0.7 } else { 0.3 }; // your LLM call goes here
         Edge::new(a, b, [prob, 1.0 - prob], judge_id)
     }).collect();
 
-    // 4. Feed results back. No rating refit here: step 1 installs the
-    //    posterior before the next pairing. (Standalone `update_current_ratings()`
-    //    only matters for flows that pair without an interim scoring pass.)
+    // 4. Feed results back
     engine.record_edges(&results);
+    done += results.len();
 }
 ```
 
@@ -122,10 +116,10 @@ for round in 0..20 {
 | Module | What it does |
 |---|---|
 | `scoring` | `run_scoring()` — Laplace Bradley-Terry scoring, the main entry point |
-| `engine` | `RankingEngine` — multi-round orchestrator with smart pair selection |
+| `engine` | `RankingEngine` — iterative orchestrator with smart pair selection |
 | `pairing` | Uniform and top-heavy judgement distributions |
 | `laplace_bt` | Deterministic MAP fit and matrix-free covariance estimation |
-| `bradley_terry` | Fast iterative MLE for quick rating updates between rounds |
+| `bradley_terry` | Fast iterative MLE for quick rating updates between refits |
 | `types` | `Edge`, `ScoringOptions`, `ScoringResult`, `RankedItem` |
 
 ## Judgement distributions
@@ -135,7 +129,7 @@ for round in 0..20 {
 **Top-heavy**: Focuses judgements on items whose standing around the anchor rank is still uncertain. Confidently placed items get the uniform-stage minimum while contested boundary items get many more judgements.
 
 The engine handles two stages automatically:
-1. **Uniform stage** (first few rounds): uniform pairing until every item has the minimum edge count
+1. **Uniform stage** (first few refits): uniform pairing until every item has the minimum edge count
 2. **Main phase**: your chosen distribution
 
 ## Key concepts

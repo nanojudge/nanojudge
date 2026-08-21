@@ -21,9 +21,9 @@ struct Args {
     #[arg(short = 'n', long)]
     items: usize,
 
-    /// Judgement rounds per trial.
-    #[arg(short, long)]
-    rounds: usize,
+    /// Average judgements per item.
+    #[arg(long)]
+    judgements_per_item: usize,
 
     /// Number of independent trials to run.
     #[arg(short, long)]
@@ -83,7 +83,7 @@ struct Args {
     /// the probability that every item sits on its side of the anchor (the
     /// product of per-item side probabilities) reaches this value. In
     /// (0.5, 1.0). Omit for no early stop (the CLI has no default — the run
-    /// then always uses its full round budget).
+    /// then always uses its full budget).
     #[arg(long)]
     stop_confidence: Option<f64>,
 
@@ -92,12 +92,11 @@ struct Args {
     #[arg(long)]
     min_uniform_edges: Option<usize>,
 
-    /// Scoring refits per round forwarded to the CLI. 1 (default) refits once
-    /// per round; higher values subdivide each top-heavy round into that many
-    /// chunks, refitting and re-deriving selection weights after each — more
-    /// adaptive pairing. The uniform stage is never subdivided.
+    /// Judgement attempts to schedule before refitting the scoring model.
+    /// Smaller values refit more often (more adaptive pairing, more overhead).
+    /// Default: enough judgements for every item to appear at least once.
     #[arg(long)]
-    refits_per_round: Option<usize>,
+    judgements_per_refit: Option<usize>,
 
     /// Number of independent samples used to estimate each verdict-token
     /// distribution. One judgement still counts as one judgement regardless
@@ -193,7 +192,7 @@ fn find_nanojudge_binary(override_path: Option<PathBuf>) -> PathBuf {
 /// the `String`/`PathBuf` here is what lets the spawned tasks be `'static`.
 struct SharedTrialConfig {
     num_items: usize,
-    rounds: usize,
+    judgements_per_item: usize,
     actual_tau2: f64,
     prior_tau2: Option<f64>,
     samples_per_judgement: usize,
@@ -205,7 +204,7 @@ struct SharedTrialConfig {
     target_prior_edges: Option<f64>,
     stop_confidence: Option<f64>,
     min_uniform_edges: Option<usize>,
-    refits_per_round: Option<usize>,
+    judgements_per_refit: Option<usize>,
     lineup_size: usize,
     nanojudge_bin: PathBuf,
 }
@@ -232,8 +231,8 @@ async fn main() {
         eprintln!("Error: need at least {min_items} items");
         std::process::exit(1);
     }
-    if args.rounds == 0 {
-        eprintln!("Error: need at least 1 round");
+    if args.judgements_per_item == 0 {
+        eprintln!("Error: --judgements-per-item must be at least 1");
         std::process::exit(1);
     }
     if args.trials == 0 {
@@ -266,11 +265,18 @@ async fn main() {
         std::process::exit(1);
     }
 
-    let judgements_per_trial = (args.items / args.lineup_size) * args.rounds;
+    let judgements_per_trial = args
+        .judgements_per_item
+        .checked_mul(args.items)
+        .unwrap_or_else(|| {
+            eprintln!("Error: judgement budget calculation overflow");
+            std::process::exit(1);
+        })
+        .div_ceil(args.lineup_size);
 
     eprintln!("NanoJudge Synthetic Benchmark");
     eprintln!("  Items: {}", args.items);
-    eprintln!("  Rounds: {}", args.rounds);
+    eprintln!("  Judgements per item: {}", args.judgements_per_item);
     eprintln!("  Trials: {}", args.trials);
     eprintln!("  Judgements per trial: {}", judgements_per_trial);
     eprintln!("  Actual tau2: {:.3}", args.actual_tau2);
@@ -293,10 +299,10 @@ async fn main() {
         }
     );
     eprintln!(
-        "  Refits per round: {}",
-        match args.refits_per_round {
+        "  Judgements per refit: {}",
+        match args.judgements_per_refit {
             Some(n) => n.to_string(),
-            None => "CLI default (1)".to_string(),
+            None => "CLI default (enough judgements for every item to appear once)".to_string(),
         }
     );
     eprintln!("  Inference: Laplace");
@@ -307,7 +313,7 @@ async fn main() {
     // Owned config the concurrent tasks share by Arc.
     let shared = Arc::new(SharedTrialConfig {
         num_items: args.items,
-        rounds: args.rounds,
+        judgements_per_item: args.judgements_per_item,
         actual_tau2: args.actual_tau2,
         prior_tau2: args.prior_tau2,
         samples_per_judgement: args.samples_per_judgement,
@@ -319,7 +325,7 @@ async fn main() {
         target_prior_edges: args.target_prior_edges,
         stop_confidence: args.stop_confidence,
         min_uniform_edges: args.min_uniform_edges,
-        refits_per_round: args.refits_per_round,
+        judgements_per_refit: args.judgements_per_refit,
         lineup_size: args.lineup_size,
         nanojudge_bin: nanojudge_bin.clone(),
     });
@@ -344,7 +350,7 @@ async fn main() {
                 .expect("semaphore unexpectedly closed");
             let config = trial::TrialConfig {
                 num_items: shared.num_items,
-                rounds: shared.rounds,
+                judgements_per_item: shared.judgements_per_item,
                 actual_tau2: shared.actual_tau2,
                 prior_tau2: shared.prior_tau2,
                 samples_per_judgement: shared.samples_per_judgement,
@@ -356,7 +362,7 @@ async fn main() {
                 target_prior_edges: shared.target_prior_edges,
                 stop_confidence: shared.stop_confidence,
                 min_uniform_edges: shared.min_uniform_edges,
-                refits_per_round: shared.refits_per_round,
+                judgements_per_refit: shared.judgements_per_refit,
                 lineup_size: shared.lineup_size,
                 nanojudge_bin: &shared.nanojudge_bin,
             };
@@ -412,7 +418,7 @@ async fn main() {
         std::process::exit(1);
     }
 
-    print_round_convergence(&results, top_k);
+    print_convergence(&results, top_k);
     print_summary(&results, top_k, errors);
 
     // Show one example ranking (captured from the first trial) so the actual
@@ -429,25 +435,23 @@ async fn main() {
 // Summary output
 // ---------------------------------------------------------------------------
 
-/// Print the mean accuracy metrics after each round, showing how the ranking
+/// Print the mean accuracy metrics after each refit, showing how the ranking
 /// converges as judgements accumulate. Each cell is averaged across all trials.
-fn print_round_convergence(results: &[trial::TrialResult], top_k: usize) {
-    // All trials run the same number of rounds; take the min defensively so a
-    // short result can never index out of bounds.
-    let num_rounds = results
+fn print_convergence(results: &[trial::TrialResult], top_k: usize) {
+    let num_refits = results
         .iter()
-        .map(|r| r.per_round.len())
+        .map(|r| r.per_refit.len())
         .min()
         .unwrap_or(0);
-    if num_rounds == 0 {
+    if num_refits == 0 {
         return;
     }
 
-    println!("Per-round convergence (mean across {} trials)", results.len());
+    println!("Per-refit convergence (mean across {} trials)", results.len());
     println!();
     println!(
         "  {:>5} {:>12} {:>10} {:>10} {:>10}",
-        "Round",
+        "Refit",
         "Judgements",
         "rho",
         "Top-1",
@@ -457,14 +461,14 @@ fn print_round_convergence(results: &[trial::TrialResult], top_k: usize) {
         "  {:>5} {:>12} {:>10} {:>10} {:>10}",
         "-----", "-----------", "---", "-----", "-----"
     );
-    for r in 0..num_rounds {
-        let judgements: Vec<f64> = results.iter().map(|res| res.per_round[r].judgements as f64).collect();
-        let rhos: Vec<f64> = results.iter().map(|res| res.per_round[r].spearman_rho).collect();
-        let top1: Vec<f64> = results.iter().map(|res| res.per_round[r].top_1_displacement).collect();
-        let topk: Vec<f64> = results.iter().map(|res| res.per_round[r].top_k_displacement).collect();
+    for refit in 0..num_refits {
+        let judgements: Vec<f64> = results.iter().map(|res| res.per_refit[refit].judgements as f64).collect();
+        let rhos: Vec<f64> = results.iter().map(|res| res.per_refit[refit].spearman_rho).collect();
+        let top1: Vec<f64> = results.iter().map(|res| res.per_refit[refit].top_1_displacement).collect();
+        let topk: Vec<f64> = results.iter().map(|res| res.per_refit[refit].top_k_displacement).collect();
         println!(
             "  {:>5} {:>12} {:>10.6} {:>10.4} {:>10.4}",
-            r + 1,
+            refit + 1,
             mean(&judgements) as usize,
             mean(&rhos),
             mean(&top1),

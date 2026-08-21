@@ -7,7 +7,7 @@
 use crate::bradley_terry::BradleyTerry;
 use crate::constants::INITIAL_BRADLEY_TERRY_RATING;
 use crate::pairing::{
-    assert_lineup_size, calculate_lineups_for_round, generate_uniform_pairings_indexed,
+    assert_lineup_size, generate_uniform_pairings_indexed,
     generate_top_heavy_pairings_indexed, generate_uniform_lineups_indexed,
     generate_top_heavy_lineups_indexed, get_effective_judgement_distribution,
     JudgementDistribution,
@@ -42,7 +42,7 @@ pub struct RankingEngine {
     pub edge_counts: Vec<usize>,
     /// Number of edges on which each item was `item1` (indexed internally
     /// 0..num_items). Used by the pairing layer to balance position assignments
-    /// across rounds.
+    /// across refits.
     pub item1_edge_counts: Vec<usize>,
 
     /// Current BT ratings (indexed internally 0..num_items).
@@ -57,7 +57,7 @@ pub struct RankingEngine {
 
     /// Per-item selection weights for top-heavy pairing (indexed 0..num_items,
     /// same order as item_ids). Caller MUST set this before calling
-    /// `generate_pairs_for_round()` when using the TopHeavy distribution past
+    /// `generate_pairs()` when using the TopHeavy distribution past
     /// the uniform stage. The engine will panic if missing.
     pub selection_weights: Option<Vec<f64>>,
 
@@ -97,27 +97,9 @@ impl RankingEngine {
         self.id_map.len()
     }
 
-    /// Generate pairs for a round. Returns pairs of item IDs.
-    ///
-    /// # Panics
-    ///
-    /// Panics if the round's effective distribution is top-heavy and the
-    /// posterior summary is missing or malformed. The effective distribution is top-heavy
-    /// when the engine is configured with `JudgementDistribution::TopHeavy`
-    /// and every item has reached `min_uniform_edges` (the uniform stage needs
-    /// no posterior summary). In a top-heavy round `selection_weights` must be set, with
-    /// one entry per item.
-    pub fn generate_pairs_for_round(&mut self, _round_index: usize) -> Vec<Pair> {
-        let pairs_count = calculate_pairs_for_round(self.id_map.len());
-        self.generate_pairs(pairs_count)
-    }
-
-    /// The judgement distribution the next generated batch will use, given the
+    /// The judgement distribution the next generated set will use, given the
     /// edge counts so far. Top-heavy only once every item has reached
-    /// `min_uniform_edges` (otherwise uniform pairing). Round subdivision into
-    /// refit chunks derives from this via `round_chunk_sizes()`: only top-heavy
-    /// batches are safe to split, since the uniform stage pairs every item
-    /// exactly once per full round.
+    /// `min_uniform_edges` (otherwise uniform pairing).
     pub fn effective_distribution(&self) -> JudgementDistribution {
         get_effective_judgement_distribution(
             self.config.judgement_distribution,
@@ -127,56 +109,10 @@ impl RankingEngine {
         )
     }
 
-    /// Decide how many refit chunks the next round splits into, returning the
-    /// chunk sizes (each a `generate_pairs()` batch; they sum to one full round).
-    ///
-    /// `refits_per_round = 1` keeps the round whole. Higher values subdivide it
-    /// into that many near-equal chunks so the caller can refit scoring and
-    /// re-derive selection weights between chunks — but only when the round's
-    /// effective distribution is top-heavy. Uniform rounds pair every item
-    /// exactly once, so they are never subdivided and always come back as a
-    /// single full-round chunk. Encoding that rule here means callers cannot
-    /// get the policy wrong.
-    ///
-    /// # Panics
-    ///
-    /// Panics if `refits_per_round` is 0.
-    pub fn round_chunk_sizes(&self, refits_per_round: usize) -> Vec<usize> {
-        assert!(refits_per_round >= 1, "refits_per_round must be at least 1");
-        let pairs_per_round = calculate_pairs_for_round(self.id_map.len());
-        if refits_per_round > 1
-            && self.effective_distribution() == JudgementDistribution::TopHeavy
-        {
-            split_round_into_chunks(pairs_per_round, refits_per_round)
-        } else {
-            vec![pairs_per_round]
-        }
-    }
-
-    /// The lineup analogue of `round_chunk_sizes`: chunk sizes in lineups that
-    /// sum to one full round (`calculate_lineups_for_round(num_items, lineup_size)`). Same
-    /// policy — only top-heavy rounds subdivide (for mid-round refits); the
-    /// uniform stage always returns a single full-round chunk.
-    ///
-    /// # Panics
-    ///
-    /// Panics if `refits_per_round` is 0.
-    pub fn round_chunk_sizes_lineups(&self, refits_per_round: usize, lineup_size: usize) -> Vec<usize> {
-        assert!(refits_per_round >= 1, "refits_per_round must be at least 1");
-        let lineups_per_round = calculate_lineups_for_round(self.id_map.len(), lineup_size);
-        if refits_per_round > 1
-            && self.effective_distribution() == JudgementDistribution::TopHeavy
-        {
-            split_round_into_chunks(lineups_per_round, refits_per_round)
-        } else {
-            vec![lineups_per_round]
-        }
-    }
-
-    /// Generate a batch of `pairs_count` pairs using the current effective
-    /// distribution. A full round is `calculate_pairs_for_round(num_items)`
-    /// pairs; passing a smaller count yields a sub-round batch (used to refit
-    /// more often than once per round in top-heavy mode).
+    /// Generate exactly `pairs_count` pairs using the current effective
+    /// distribution. Uniform generation balances cumulative incident edge
+    /// counts even when the request is too small to include every item or large
+    /// enough to include every item several times.
     pub fn generate_pairs(&mut self, pairs_count: usize) -> Vec<Pair> {
         let num_items = self.id_map.len();
 
@@ -217,17 +153,15 @@ impl RankingEngine {
         }).collect()
     }
 
-    /// Generate a batch of `lineups_count` lineups of `lineup_size` items each,
+    /// Generate `lineups_count` lineups of `lineup_size` items each,
     /// using the current effective distribution. The lineup analogue of
-    /// `generate_pairs`: a full round is
-    /// `calculate_lineups_for_round(num_items, lineup_size)` lineups. Each lineup
-    /// receives one judgement, then is folded into edges by the caller via
-    /// `lineup::winner_dist_to_edges` before being fed
+    /// `generate_pairs`. Each lineup receives one judgement, then is folded into
+    /// edges by the caller via `lineup::winner_dist_to_edges` before being fed
     /// back through `record_edges`.
     ///
     /// # Panics
     ///
-    /// Panics under the same conditions as `generate_pairs`: a top-heavy round
+    /// Panics under the same conditions as `generate_pairs`: top-heavy generation
     /// with `selection_weights` unset or malformed.
     pub fn generate_lineups(&mut self, lineups_count: usize, lineup_size: usize) -> Vec<Lineup> {
         assert_lineup_size(lineup_size);
@@ -270,7 +204,7 @@ impl RankingEngine {
             .collect()
     }
 
-    /// Record edges from a round.
+    /// Record edges collected before a refit.
     ///
     /// # Panics
     ///
@@ -341,39 +275,41 @@ impl RankingEngine {
     }
 }
 
-/// Calculate pairs for a single round: every item gets compared once.
-pub fn calculate_pairs_for_round(num_items: usize) -> usize {
-    num_items / 2
+/// Maximum judgement-attempt budget for a run:
+/// `ceil(judgements_per_item * num_items / lineup_size)`.
+/// Rounding up ensures the budget contains at least the requested number of
+/// item appearances. Each attempt judges one lineup of `lineup_size` items.
+///
+/// # Panics
+///
+/// Panics if `lineup_size` is outside the supported range of 2 to 9, or if
+/// `judgements_per_item * num_items` overflows `usize`.
+pub fn calculate_budget(num_items: usize, judgements_per_item: usize, lineup_size: usize) -> usize {
+    assert_lineup_size(lineup_size);
+    judgements_per_item
+        .checked_mul(num_items)
+        .expect("judgement budget calculation overflow")
+        .div_ceil(lineup_size)
 }
 
-/// Calculate total expected two-item judgements across all rounds.
-pub fn calculate_total_expected_judgements(num_items: usize, number_of_rounds: usize) -> usize {
-    calculate_pairs_for_round(num_items) * number_of_rounds
-}
-
-/// Split a round's `total` pairs into `parts` chunk sizes that sum to `total`,
-/// as evenly as possible (the first `total % parts` chunks get one extra).
-/// Zero-sized chunks (when `parts` exceeds `total`) are dropped, so the result
-/// always has between 1 and `min(parts, total)` entries.
-pub fn split_round_into_chunks(total: usize, parts: usize) -> Vec<usize> {
-    if parts <= 1 || total == 0 {
-        return vec![total];
+/// The number of judgements needed for every item to appear at least once.
+/// When the item count is not divisible by `lineup_size`, the final judgement
+/// contains some items that already appeared. Returns zero when there are too
+/// few items to form even one lineup.
+///
+/// # Panics
+///
+/// Panics if `lineup_size` is outside the supported range of 2 to 9.
+pub fn judgements_needed_for_every_item_to_appear_once(
+    num_items: usize,
+    lineup_size: usize,
+) -> usize {
+    assert_lineup_size(lineup_size);
+    if num_items < lineup_size {
+        0
+    } else {
+        num_items.div_ceil(lineup_size)
     }
-    let base = total / parts;
-    let remainder = total % parts;
-    (0..parts)
-        .map(|i| base + usize::from(i < remainder))
-        .filter(|&size| size > 0)
-        .collect()
-}
-
-/// Calculate rounds needed to reach a target number of two-item judgements.
-pub fn calculate_rounds_for_target_judgements(num_items: usize, target_judgements: usize) -> usize {
-    let pairs_per_round = calculate_pairs_for_round(num_items);
-    if pairs_per_round == 0 || target_judgements == 0 {
-        return 0;
-    }
-    target_judgements.div_ceil(pairs_per_round)
 }
 
 #[cfg(test)]
@@ -381,95 +317,43 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_calculate_pairs_for_round() {
-        assert_eq!(calculate_pairs_for_round(1000), 500);
-        assert_eq!(calculate_pairs_for_round(10), 5);
-        assert_eq!(calculate_pairs_for_round(79), 39);
-        assert_eq!(calculate_pairs_for_round(1), 0);
-        assert_eq!(calculate_pairs_for_round(0), 0);
+    fn test_calculate_budget() {
+        // 10 items, 4 judgements per item, pairwise → 4*10/2 = 20
+        assert_eq!(calculate_budget(10, 4, 2), 20);
+        // 9 items, 6 judgements per item, lineup of 3 → 6*9/3 = 18
+        assert_eq!(calculate_budget(9, 6, 3), 18);
+        // Exact division: 11 items, 2 jpi, pairwise → 2*11/2 = 11
+        assert_eq!(calculate_budget(11, 2, 2), 11);
+        // Non-divisible item appearances round up so no requested slot is lost.
+        assert_eq!(calculate_budget(10, 1, 3), 4);
+        assert_eq!(calculate_budget(11, 1, 2), 6);
     }
 
     #[test]
-    fn test_calculate_total_expected_judgements() {
-        assert_eq!(calculate_total_expected_judgements(10, 5), 25);
-        assert_eq!(calculate_total_expected_judgements(78, 10), 390);
-        assert_eq!(calculate_total_expected_judgements(1000, 3), 1500);
+    fn test_judgements_needed_for_every_item_to_appear_once() {
+        assert_eq!(judgements_needed_for_every_item_to_appear_once(10, 2), 5);
+        assert_eq!(judgements_needed_for_every_item_to_appear_once(9, 3), 3);
+        assert_eq!(judgements_needed_for_every_item_to_appear_once(11, 2), 6);
+        assert_eq!(judgements_needed_for_every_item_to_appear_once(100, 9), 12);
+        assert_eq!(judgements_needed_for_every_item_to_appear_once(2, 3), 0);
     }
 
     #[test]
-    fn test_calculate_rounds_for_target() {
-        assert_eq!(calculate_rounds_for_target_judgements(100, 500), 10);
-        assert_eq!(calculate_rounds_for_target_judgements(100, 501), 11);
-        assert_eq!(calculate_rounds_for_target_judgements(100, 0), 0);
-        assert_eq!(calculate_rounds_for_target_judgements(1, 100), 0);
+    #[should_panic(expected = "lineup_size must be between 2 and 9, got 0")]
+    fn test_calculate_budget_rejects_zero_lineup_size() {
+        let _ = calculate_budget(10, 4, 0);
     }
 
     #[test]
-    fn test_split_round_into_chunks_even() {
-        assert_eq!(split_round_into_chunks(200, 4), vec![50, 50, 50, 50]);
+    #[should_panic(expected = "judgement budget calculation overflow")]
+    fn test_calculate_budget_reports_overflow() {
+        let _ = calculate_budget(usize::MAX, 2, 2);
     }
 
     #[test]
-    fn test_split_round_into_chunks_uneven_sums_to_total() {
-        let chunks = split_round_into_chunks(201, 4);
-        assert_eq!(chunks, vec![51, 50, 50, 50]);
-        assert_eq!(chunks.iter().sum::<usize>(), 201);
-    }
-
-    #[test]
-    fn test_split_round_into_chunks_single_part() {
-        assert_eq!(split_round_into_chunks(200, 1), vec![200]);
-    }
-
-    #[test]
-    fn test_split_round_into_chunks_more_parts_than_pairs() {
-        // 3 pairs, 8 requested chunks → three 1-pair chunks, zeros dropped.
-        assert_eq!(split_round_into_chunks(3, 8), vec![1, 1, 1]);
-    }
-
-    fn top_heavy_engine(num_items: usize) -> RankingEngine {
-        let item_ids: Vec<i64> = (0..num_items as i64).collect();
-        RankingEngine::new(&item_ids, EngineConfig {
-            judgement_distribution: JudgementDistribution::TopHeavy,
-            matchmaking_sharpness: 1.0,
-            min_uniform_edges: 3,
-            seed: Some(1),
-        })
-    }
-
-    #[test]
-    fn test_round_chunk_sizes_uniform_stage_never_subdivides() {
-        // Fresh engine: nobody has reached min_uniform_edges, so the effective
-        // distribution is uniform and the round stays whole despite refits > 1.
-        let engine = top_heavy_engine(10);
-        assert_eq!(engine.round_chunk_sizes(4), vec![5]);
-    }
-
-    #[test]
-    fn test_round_chunk_sizes_top_heavy_subdivides() {
-        let mut engine = top_heavy_engine(10);
-        engine.edge_counts = vec![3; 10]; // uniform stage complete
-        assert_eq!(engine.round_chunk_sizes(4), vec![2, 1, 1, 1]);
-        assert_eq!(engine.round_chunk_sizes(1), vec![5]);
-    }
-
-    #[test]
-    fn test_round_chunk_sizes_uniform_config_never_subdivides() {
-        let item_ids: Vec<i64> = (0..10).collect();
-        let mut engine = RankingEngine::new(&item_ids, EngineConfig {
-            judgement_distribution: JudgementDistribution::Uniform,
-            matchmaking_sharpness: 1.0,
-            min_uniform_edges: 3,
-            seed: Some(1),
-        });
-        engine.edge_counts = vec![10; 10];
-        assert_eq!(engine.round_chunk_sizes(4), vec![5]);
-    }
-
-    #[test]
-    #[should_panic(expected = "refits_per_round must be at least 1")]
-    fn test_round_chunk_sizes_zero_refits_panics() {
-        top_heavy_engine(10).round_chunk_sizes(0);
+    #[should_panic(expected = "lineup_size must be between 2 and 9, got 10")]
+    fn test_judgements_needed_for_every_item_to_appear_once_rejects_unsupported_size() {
+        let _ = judgements_needed_for_every_item_to_appear_once(10, 10);
     }
 
     fn make_input(id1: i64, id2: i64, prob: f64) -> Edge {
@@ -489,7 +373,10 @@ mod tests {
 
         let mut engine = RankingEngine::new(&item_ids, config);
 
-        let pairs = engine.generate_pairs_for_round(0);
+        let pairs = engine.generate_pairs(judgements_needed_for_every_item_to_appear_once(
+            item_ids.len(),
+            2,
+        ));
         assert!(!pairs.is_empty());
 
         // Pairs should contain our IDs, not indices
@@ -506,6 +393,73 @@ mod tests {
         engine.update_current_ratings();
 
         assert_eq!(engine.completed_edge_count(), pairs.len());
+    }
+
+    #[test]
+    fn test_uniform_pairs_honor_arbitrary_requested_count() {
+        let item_ids: Vec<i64> = (0..6).collect();
+        let config = EngineConfig {
+            judgement_distribution: JudgementDistribution::Uniform,
+            matchmaking_sharpness: 1.0,
+            min_uniform_edges: 2,
+            seed: Some(7),
+        };
+        let mut engine = RankingEngine::new(&item_ids, config);
+
+        let pairs = engine.generate_pairs(11);
+
+        assert_eq!(pairs.len(), 11);
+        assert!(pairs.iter().all(|(a, b)| a != b));
+    }
+
+    #[test]
+    fn test_subdivided_uniform_pairs_reach_edge_threshold_before_advancing() {
+        let item_ids: Vec<i64> = (0..5).collect();
+        let config = EngineConfig {
+            judgement_distribution: JudgementDistribution::TopHeavy,
+            matchmaking_sharpness: 1.0,
+            min_uniform_edges: 1,
+            seed: Some(11),
+        };
+        let mut engine = RankingEngine::new(&item_ids, config);
+
+        for _ in 0..judgements_needed_for_every_item_to_appear_once(item_ids.len(), 2) {
+            let pairs = engine.generate_pairs(1);
+            assert_eq!(pairs.len(), 1);
+            engine.record_edges(&[make_input(pairs[0].0, pairs[0].1, 0.5)]);
+        }
+
+        assert!(engine.edge_counts.iter().all(|&count| count >= 1));
+        assert_eq!(engine.effective_distribution(), JudgementDistribution::TopHeavy);
+    }
+
+    #[test]
+    fn test_uniform_lineups_honor_arbitrary_size_and_cover_remainder() {
+        let item_ids: Vec<i64> = (0..10).collect();
+        let config = EngineConfig {
+            judgement_distribution: JudgementDistribution::Uniform,
+            matchmaking_sharpness: 1.0,
+            min_uniform_edges: 2,
+            seed: Some(13),
+        };
+        let mut engine = RankingEngine::new(&item_ids, config);
+
+        let lineups = engine.generate_lineups(9, 3);
+
+        assert_eq!(lineups.len(), 9);
+        assert!(lineups.iter().all(|lineup| {
+            lineup.len() == 3
+                && lineup[0] != lineup[1]
+                && lineup[0] != lineup[2]
+                && lineup[1] != lineup[2]
+        }));
+        let initially_scheduled_items: std::collections::HashSet<i64> = lineups
+            [..judgements_needed_for_every_item_to_appear_once(item_ids.len(), 3)]
+            .iter()
+            .flatten()
+            .copied()
+            .collect();
+        assert_eq!(initially_scheduled_items.len(), item_ids.len());
     }
 
     #[test]
@@ -589,7 +543,7 @@ mod tests {
 
     #[test]
     fn test_first_position_balancing_converges() {
-        // Drive the engine through many rounds and verify each item's
+        // Drive the engine through many refits and verify each item's
         // first-position ratio stays close to 0.5. A pure coin flip would also
         // pass with these sample sizes; this test guards against regressions
         // that would degrade balancing (e.g. accidentally stop tracking).
@@ -603,8 +557,10 @@ mod tests {
 
         let mut engine = RankingEngine::new(&item_ids, config);
 
-        for round in 0..342 {
-            let pairs = engine.generate_pairs_for_round(round);
+        let judgements_to_include_every_item_once =
+            judgements_needed_for_every_item_to_appear_once(item_ids.len(), 2);
+        for _ in 0..342 {
+            let pairs = engine.generate_pairs(judgements_to_include_every_item_once);
             let results: Vec<Edge> = pairs.iter()
                 .map(|(a, b)| make_input(*a, *b, 0.5))
                 .collect();

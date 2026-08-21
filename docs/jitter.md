@@ -2,7 +2,7 @@
 
 ## What it does
 
-Each judge has a base `temperature`. Temperature jitter applies a per-prompt multiplier drawn from `N(1.0, temperature_jitter)`, clamped to `[0.8, 1.2]`, so every prompt the judge answers gets a slightly different effective temperature. With `temperature_jitter = 0` (the default) the multiplier is always 1.0 and jitter does nothing; raising it spreads the effective temperatures used across a round.
+Each judge has a base `temperature`. Temperature jitter applies a per-prompt multiplier drawn from `N(1.0, temperature_jitter)`, clamped to `[0.8, 1.2]`, so every prompt the judge answers gets a slightly different effective temperature. With `temperature_jitter = 0` (the default) the multiplier is always 1.0 and jitter does nothing; raising it spreads the effective temperatures used between refits.
 
 ## Why
 

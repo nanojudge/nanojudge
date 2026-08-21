@@ -37,8 +37,7 @@ pub struct JudgeConfig {
 #[derive(Deserialize, Default, Debug)]
 #[serde(deny_unknown_fields)]
 pub struct NanojudgeConfig {
-    pub rounds: Option<usize>,
-    pub judgements: Option<usize>,
+    pub judgements_per_item: Option<usize>,
     pub concurrency: Option<usize>,
     pub prompt_template: Option<String>,
     pub logprobs: Option<bool>,
@@ -58,7 +57,7 @@ pub struct NanojudgeConfig {
     pub bias_prior: Option<f64>,
     pub matchmaking_sharpness: Option<f64>,
     pub min_uniform_edges: Option<usize>,
-    pub refits_per_round: Option<usize>,
+    pub judgements_per_refit: Option<usize>,
     pub prior_tau2: Option<f64>,
     pub bias_prior_tau2: Option<f64>,
     pub reasoning_enabled: Option<bool>,
@@ -78,12 +77,8 @@ const DEFAULT_CONFIG_TEMPLATE: &str = "\
 # nanojudge configuration
 # All values here can be overridden by CLI flags unless noted otherwise.
 
-# Number of judgement rounds (mutually exclusive with judgements)
-# rounds = 10
-
-# Target number of judgements (alternative to rounds).
-# Converted to rounds by dividing by judgements-per-round, rounded up.
-# judgements = 500
+# Average judgements per item. Total budget = ceil(judgements_per_item * num_items / lineup_size).
+# judgements_per_item = 10
 
 # Default max concurrent LLM requests per judge (can be overridden per-judge)
 # concurrency = 16
@@ -95,7 +90,7 @@ const DEFAULT_CONFIG_TEMPLATE: &str = "\
 
 # Enable logprob extraction for continuous win probabilities.
 # Requires an endpoint that supports logprobs (e.g. vLLM, OpenAI direct).
-# When false, uses text-based verdict parsing (discrete) — may need more rounds.
+# When false, uses text-based verdict parsing (discrete) — may need more judgements.
 # logprobs = false
 
 # How much analysis the LLM should write before its verdict.
@@ -150,7 +145,7 @@ const DEFAULT_CONFIG_TEMPLATE: &str = "\
 # once the probability that every item sits on its side of the anchor — the
 # product of the per-item side probabilities — reaches this value; final
 # scoring then runs on the judgements collected so far. In (0.5, 1.0), e.g.
-# 0.95. No default: when unset, the run always uses its full round budget.
+# 0.95. No default: when unset, the run always uses its full budget.
 # Rejected with judgement_distribution = \"uniform\".
 # stop_confidence = 0.95
 
@@ -172,7 +167,7 @@ const DEFAULT_CONFIG_TEMPLATE: &str = "\
 # 1.0 when reasoning is disabled.
 # verdict_temperature = 3.0
 
-# Print a live ranking table after each round. 0 = all items, N = top N.
+# Print a live ranking table after each refit. 0 = all items, N = top N.
 # Omit or comment out to disable.
 # live_top = 10
 
@@ -257,6 +252,11 @@ temperature = 0.7
 # Must be at least 1. Default: 2.
 # min_uniform_edges = 2
 
+# Number of judgement attempts scheduled between refits. The value is literal,
+# including during uniform pairing. Default: the number needed for every item
+# to appear at least once.
+# judgements_per_refit = 50
+
 # Prior variance on log-strengths. Default: 10.0.
 # prior_tau2 = 10.0
 
@@ -327,7 +327,7 @@ mod tests {
     #[test]
     fn test_load_config_missing_file_returns_defaults() {
         let config = load_config(Path::new("/tmp/nanojudge-test-nonexistent/config.toml"));
-        assert!(config.rounds.is_none());
+        assert!(config.judgements_per_item.is_none());
         assert!(config.concurrency.is_none());
         assert!(config.judge.is_none());
     }
@@ -336,7 +336,8 @@ mod tests {
     fn test_load_config_parses_global_fields() {
         let mut tmpfile = tempfile::NamedTempFile::new().unwrap();
         write!(tmpfile, r#"
-rounds = 10
+judgements_per_item = 10
+judgements_per_refit = 3
 concurrency = 16
 logprobs = false
 analysis_length = "3 sentences"
@@ -351,7 +352,8 @@ top_p = 0.95
 "#).unwrap();
 
         let config = load_config(tmpfile.path());
-        assert_eq!(config.rounds.unwrap(), 10);
+        assert_eq!(config.judgements_per_item.unwrap(), 10);
+        assert_eq!(config.judgements_per_refit, Some(3));
         assert_eq!(config.concurrency.unwrap(), 16);
         assert!(!config.logprobs.unwrap());
         assert_eq!(config.analysis_length.as_deref().unwrap(), "3 sentences");
@@ -369,11 +371,11 @@ top_p = 0.95
     fn test_load_config_partial_fields() {
         let mut tmpfile = tempfile::NamedTempFile::new().unwrap();
         write!(tmpfile, r#"
-rounds = 5
+judgements_per_item = 5
 "#).unwrap();
 
         let config = load_config(tmpfile.path());
-        assert_eq!(config.rounds.unwrap(), 5);
+        assert_eq!(config.judgements_per_item.unwrap(), 5);
         assert!(config.judge.is_none());
         assert!(config.concurrency.is_none());
     }
@@ -384,14 +386,14 @@ rounds = 5
         // Template has one uncommented [[judge]] block
         assert!(config.judge.is_some());
         assert_eq!(config.judge.as_ref().unwrap().len(), 1);
-        assert!(config.rounds.is_none());
+        assert!(config.judgements_per_item.is_none());
     }
 
     #[test]
     fn test_parse_judge_blocks() {
         let mut tmpfile = tempfile::NamedTempFile::new().unwrap();
         write!(tmpfile, r#"
-rounds = 10
+judgements_per_item = 10
 
 [[judge]]
 endpoint = "http://localhost:8000"
@@ -410,7 +412,7 @@ temperature = 1.0
 "#).unwrap();
 
         let config = load_config(tmpfile.path());
-        assert_eq!(config.rounds.unwrap(), 10);
+        assert_eq!(config.judgements_per_item.unwrap(), 10);
         let judges = config.judge.unwrap();
         assert_eq!(judges.len(), 2);
         assert_eq!(judges[0].endpoint, "http://localhost:8000");
@@ -428,12 +430,12 @@ temperature = 1.0
     fn test_no_judge_blocks_returns_none() {
         let mut tmpfile = tempfile::NamedTempFile::new().unwrap();
         write!(tmpfile, r#"
-rounds = 5
+judgements_per_item = 5
 "#).unwrap();
 
         let config = load_config(tmpfile.path());
         assert!(config.judge.is_none());
-        assert_eq!(config.rounds.unwrap(), 5);
+        assert_eq!(config.judgements_per_item.unwrap(), 5);
     }
 
     #[test]
@@ -469,7 +471,7 @@ verdict_temperature = 2.5
     fn test_reasoning_enabled_defaults_to_none() {
         let mut tmpfile = tempfile::NamedTempFile::new().unwrap();
         write!(tmpfile, r#"
-rounds = 5
+judgements_per_item = 5
 "#).unwrap();
 
         let config = load_config(tmpfile.path());
@@ -478,7 +480,7 @@ rounds = 5
 
     #[test]
     fn test_unknown_top_level_field_rejected() {
-        let input = "rounds = 10\nbogus_field = true\n";
+        let input = "judgements_per_item = 10\nbogus_field = true\n";
         let result: Result<NanojudgeConfig, _> = toml::from_str(input);
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();

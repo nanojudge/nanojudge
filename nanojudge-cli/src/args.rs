@@ -51,14 +51,9 @@ pub struct ConfigArgs {
     #[arg(long, num_args = 0..=1, default_missing_value = "true")]
     pub logprobs: Option<bool>,
 
-    /// Number of judgement rounds
-    #[arg(long, conflicts_with = "judgements")]
-    pub rounds: Option<usize>,
-
-    /// Target number of judgements (alternative to --rounds).
-    /// Converted to rounds by dividing by judgements-per-round, rounded up.
-    #[arg(long, conflicts_with = "rounds")]
-    pub judgements: Option<usize>,
+    /// Average judgements per item. Total budget = ceil(judgements_per_item * num_items / lineup_size).
+    #[arg(long)]
+    pub judgements_per_item: Option<usize>,
 
     /// Max concurrent LLM requests
     #[arg(long)]
@@ -137,7 +132,7 @@ pub struct ConfigArgs {
     /// the probability that every item sits on its side of the anchor — the
     /// product of the per-item side probabilities — reaches this value; final
     /// scoring then runs on the judgements collected so far. In (0.5, 1.0),
-    /// e.g. 0.95. No default: when absent, the run always uses its full round
+    /// e.g. 0.95. No default: when absent, the run always uses its full
     /// budget. Rejected with the uniform distribution.
     #[arg(long)]
     pub stop_confidence: Option<f64>,
@@ -183,13 +178,12 @@ pub struct ConfigArgs {
     #[arg(long)]
     pub min_uniform_edges: Option<usize>,
 
-    /// Number of scoring refits per round once top-heavy pairing is active.
-    /// 1 (default) refits once per round, as before. Higher values split each
-    /// round's pairs into that many chunks, refitting strengths/CIs and
-    /// re-deriving selection weights after each chunk — more adaptive pairing.
-    /// The uniform stage is never subdivided. Must be >= 1.
+    /// Number of judgement attempts to schedule before refitting the scoring model.
+    /// Smaller values refit more often (more adaptive pairing, more overhead).
+    /// The value is literal, including during uniform pairing. Default: the
+    /// number of judgements needed for every item to appear at least once.
     #[arg(long)]
-    pub refits_per_round: Option<usize>,
+    pub judgements_per_refit: Option<usize>,
 
     /// Prior variance on log-strengths. Default: 10.0.
     #[arg(long)]
@@ -199,16 +193,16 @@ pub struct ConfigArgs {
     #[arg(long)]
     pub bias_prior_tau2: Option<f64>,
 
-    /// Print a live ranking table after each round.
+    /// Print a live ranking table after each refit.
     /// With no value: prints all items. With a number: prints top N only.
     #[arg(long, num_args = 0..=1, default_missing_value = "0")]
     pub live_top: Option<usize>,
 
-    /// Emit the interim ranking after every round as a `round_rankings` array
-    /// in JSON output. Forces an interim scoring pass each round even for uniform.
-    /// Intended for the benchmark harness to plot per-round convergence.
+    /// Emit the interim ranking after every refit as an `interim_rankings` array
+    /// in JSON output. Forces an interim scoring pass each refit even for uniform.
+    /// Intended for the benchmark harness to plot convergence.
     #[arg(long, num_args = 0..=1, default_missing_value = "true")]
-    pub emit_round_rankings: Option<bool>,
+    pub emit_interim_rankings: Option<bool>,
 
     /// Save all judgements to a JSONL file.
     /// Bare flag: saves to judgements-{timestamp}.jsonl in the current directory.

@@ -13,7 +13,7 @@ use crate::server;
 
 pub struct TrialConfig<'a> {
     pub num_items: usize,
-    pub rounds: usize,
+    pub judgements_per_item: usize,
     pub actual_tau2: f64,
     pub prior_tau2: Option<f64>,
     pub samples_per_judgement: usize,
@@ -25,14 +25,14 @@ pub struct TrialConfig<'a> {
     pub target_prior_edges: Option<f64>,
     pub stop_confidence: Option<f64>,
     pub min_uniform_edges: Option<usize>,
-    pub refits_per_round: Option<usize>,
+    pub judgements_per_refit: Option<usize>,
     pub lineup_size: usize,
     pub nanojudge_bin: &'a Path,
 }
 
-/// Accuracy metrics for one round's interim ranking, measured against ground
-/// truth. One per round when the CLI is run with `--emit-round-rankings`.
-pub struct RoundMetrics {
+/// Accuracy metrics for one refit's interim ranking, measured against ground
+/// truth. One per refit when the CLI is run with `--emit-interim-rankings`.
+pub struct InterimMetrics {
     pub judgements: usize,
     pub spearman_rho: f64,
     pub top_1_displacement: f64,
@@ -45,8 +45,8 @@ pub struct TrialResult {
     pub top_k_displacement: f64,
     pub judgements: usize,
     pub duration: std::time::Duration,
-    /// Per-round interim metrics (round 1..N), for plotting convergence.
-    pub per_round: Vec<RoundMetrics>,
+    /// Per-refit interim metrics, for plotting convergence.
+    pub per_refit: Vec<InterimMetrics>,
     /// Rendered ranking table for this trial, present only when `capture_example`
     /// was set (we print one example and suppress the rest to avoid spam).
     pub example_ranking: Option<String>,
@@ -87,7 +87,7 @@ pub async fn run(
     // carries NO ground-truth signal. (true_order, used for metrics, stays in
     // strength order.) Without this, the CLI receives items in true-strength
     // order and any stable tie-break in its ranking defaults to the true order,
-    // spuriously inflating accuracy when scores are tied (sparse early rounds).
+    // spuriously inflating accuracy when scores are tied (sparse early refits).
     let mut item_names: Vec<String> = (0..config.num_items)
         .map(|i| format!("item_{:04}", i + 1))
         .collect();
@@ -140,15 +140,13 @@ pub async fn run(
         .arg("Which is better?")
         .arg("--output-format")
         .arg("json")
-        .arg("--rounds")
-        .arg(config.rounds.to_string())
+        .arg("--judgements-per-item")
+        .arg(config.judgements_per_item.to_string())
         .arg("--judgement-distribution")
         .arg(config.judgement_distribution)
         .arg("--seed")
         .arg(cli_seed.to_string())
-        // Emit the interim ranking after every round so we can measure the
-        // accuracy curve, not just the final number.
-        .arg("--emit-round-rankings");
+        .arg("--emit-interim-rankings");
 
     // Forward top-heavy selection tuning if the bench was given it.
     if let Some(selection_sharpness) = config.selection_sharpness {
@@ -175,8 +173,8 @@ pub async fn run(
     if let Some(min_uniform_edges) = config.min_uniform_edges {
         cmd.arg("--min-uniform-edges").arg(min_uniform_edges.to_string());
     }
-    if let Some(refits_per_round) = config.refits_per_round {
-        cmd.arg("--refits-per-round").arg(refits_per_round.to_string());
+    if let Some(judgements_per_refit) = config.judgements_per_refit {
+        cmd.arg("--judgements-per-refit").arg(judgements_per_refit.to_string());
     }
     if config.lineup_size != 2 {
         cmd.arg("--lineup-size").arg(config.lineup_size.to_string());
@@ -226,23 +224,20 @@ pub async fn run(
     let top_1_displacement = metrics::top_k_displacement(&true_order, &output_order, 1);
     let top_k_displacement = metrics::top_k_displacement(&true_order, &output_order, top_k);
 
-    // Per-round interim metrics. The CLI was run with --emit-round-rankings, so
-    // it must include this array; a missing field is a hard error, not a silent
-    // skip.
-    let round_rankings = json["round_rankings"]
+    let interim_rankings = json["interim_rankings"]
         .as_array()
-        .ok_or("missing 'round_rankings' in output (was --emit-round-rankings honored?)")?;
-    let per_round: Vec<RoundMetrics> = round_rankings
+        .ok_or("missing 'interim_rankings' in output (was --emit-interim-rankings honored?)")?;
+    let per_refit: Vec<InterimMetrics> = interim_rankings
         .iter()
         .map(|entry| {
             let judgements = entry["judgements"].as_u64().unwrap_or(0) as usize;
             let order: Vec<String> = entry["order"]
                 .as_array()
-                .ok_or("round entry missing 'order' array")?
+                .ok_or("refit entry missing 'order' array")?
                 .iter()
                 .map(|v| v.as_str().unwrap().to_string())
                 .collect();
-            Ok(RoundMetrics {
+            Ok(InterimMetrics {
                 judgements,
                 spearman_rho: metrics::spearman_rho(&true_order, &order),
                 top_1_displacement: metrics::top_k_displacement(&true_order, &order, 1),
@@ -257,7 +252,7 @@ pub async fn run(
         top_k_displacement,
         judgements,
         duration,
-        per_round,
+        per_refit,
         example_ranking,
     })
 }

@@ -70,12 +70,11 @@ pub mod types;
 
 // Re-export primary public API at crate root.
 pub use engine::{
-    calculate_pairs_for_round, calculate_rounds_for_target_judgements,
-    calculate_total_expected_judgements, split_round_into_chunks, EngineConfig,
+    calculate_budget, judgements_needed_for_every_item_to_appear_once, EngineConfig,
     RankingEngine,
 };
 pub use pairing::{
-    calculate_info_gain, calculate_integrated_info_gain, calculate_lineups_for_round,
+    calculate_info_gain, calculate_integrated_info_gain,
     generate_uniform_pairings, generate_top_heavy_pairings,
     get_effective_judgement_distribution, JudgementDistribution,
 };

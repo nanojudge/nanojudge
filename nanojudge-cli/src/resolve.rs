@@ -43,8 +43,7 @@ fn merge_opt<T: PartialEq + std::fmt::Display>(
 /// Resolved configuration — CLI args merged with config file values.
 /// All required values are concrete (no Options except genuinely optional ones).
 pub struct ResolvedConfig {
-    pub rounds: Option<usize>,
-    pub judgements: Option<usize>,
+    pub judgements_per_item: usize,
     pub judgement_distribution: JudgementDistribution,
     /// Number of items in each judged lineup: 2 or 3.
     pub lineup_size: usize,
@@ -67,7 +66,7 @@ pub struct ResolvedConfig {
     /// probability that every item sits on its side of the anchor (the
     /// product of the per-item side probabilities) reaches this value. In
     /// (0.5, 1.0) when set. `None` = no early stop (the run always uses its
-    /// full round budget) — there is deliberately no default.
+    /// full budget) — there is deliberately no default.
     pub stop_confidence: Option<f64>,
     pub retries: usize,
     pub analysis_length: String,
@@ -78,11 +77,11 @@ pub struct ResolvedConfig {
     pub bias_prior_logit: f64,
     pub matchmaking_sharpness: f64,
     pub min_uniform_edges: usize,
-    pub refits_per_round: usize,
+    pub judgements_per_refit: Option<usize>,
     pub prior_tau2: f64,
     pub bias_prior_tau2: f64,
     pub live_top: Option<usize>,
-    pub emit_round_rankings: bool,
+    pub emit_interim_rankings: bool,
     pub save_judgements: Option<PathBuf>,
     pub output_format: OutputFormat,
     pub verbose: bool,
@@ -324,14 +323,12 @@ pub fn resolve_judges(
 /// Resolve CLI args + config file + defaults into final config.
 /// Judge-specific settings (endpoint, model, temperature, etc.) are handled by resolve_judges().
 pub fn resolve_config(shared: &ConfigArgs, cfg: &config::NanojudgeConfig) -> ResolvedConfig {
-    let rounds = merge_opt(shared.rounds, cfg.rounds, "rounds");
-    let judgements = merge_opt(shared.judgements, cfg.judgements, "judgements");
-
-    if rounds.is_some() && judgements.is_some() {
-        bail("Specify --rounds or --judgements, not both.");
-    }
-    if rounds == Some(0) {
-        bail("--rounds must be at least 1");
+    let judgements_per_item = merge_opt(shared.judgements_per_item, cfg.judgements_per_item, "judgements-per-item")
+        .unwrap_or_else(|| {
+            bail("--judgements-per-item is required (set it on the CLI or in the config file)");
+        });
+    if judgements_per_item == 0 {
+        bail("--judgements-per-item must be at least 1");
     }
 
     let judgement_distribution_str = merge_opt(shared.judgement_distribution.clone(), cfg.judgement_distribution.clone(), "judgement-distribution")
@@ -380,7 +377,7 @@ pub fn resolve_config(shared: &ConfigArgs, cfg: &config::NanojudgeConfig) -> Res
         bail(format!("target-prior-edges={target_prior_edges}, must be finite and >= 0 (0 disables the blend)"));
     }
     // Early stop has deliberately no default: absent means the run always uses
-    // its full round budget.
+    // its full budget.
     let stop_confidence = merge_opt(shared.stop_confidence, cfg.stop_confidence, "stop-confidence");
     if let Some(c) = stop_confidence {
         if !c.is_finite() || c <= 0.5 || c >= 1.0 {
@@ -416,13 +413,12 @@ pub fn resolve_config(shared: &ConfigArgs, cfg: &config::NanojudgeConfig) -> Res
         .unwrap_or(2);
     if min_uniform_edges == 0 {
         // 0 would let top-heavy pairing start before any results exist —
-        // selection weights are only derived after a completed round.
+        // selection weights are only derived after a completed refit.
         bail("min-uniform-edges must be at least 1");
     }
-    let refits_per_round = merge_opt(shared.refits_per_round, cfg.refits_per_round, "refits-per-round")
-        .unwrap_or(1);
-    if refits_per_round == 0 {
-        bail("refits-per-round must be at least 1");
+    let judgements_per_refit = merge_opt(shared.judgements_per_refit, cfg.judgements_per_refit, "judgements-per-refit");
+    if judgements_per_refit == Some(0) {
+        bail("--judgements-per-refit must be at least 1");
     }
     let prior_tau2 = merge_opt(shared.prior_tau2, cfg.prior_tau2, "prior-tau2")
         .unwrap_or(10.0);
@@ -435,7 +431,7 @@ pub fn resolve_config(shared: &ConfigArgs, cfg: &config::NanojudgeConfig) -> Res
         bail(format!("bias-prior-tau2={bias_prior_tau2}, must be finite and > 0"));
     }
     let live_top = merge_opt(shared.live_top, cfg.live_top, "live-top");
-    let emit_round_rankings = shared.emit_round_rankings.unwrap_or(false);
+    let emit_interim_rankings = shared.emit_interim_rankings.unwrap_or(false);
     let save_judgements = match (shared.save_judgements.clone(), cfg.save_judgements.clone()) {
         (Some(c), Some(f)) => {
             if c != f {
@@ -508,8 +504,7 @@ pub fn resolve_config(shared: &ConfigArgs, cfg: &config::NanojudgeConfig) -> Res
     };
 
     ResolvedConfig {
-        rounds,
-        judgements,
+        judgements_per_item,
         judgement_distribution,
         lineup_size,
         selection_sharpness,
@@ -527,11 +522,11 @@ pub fn resolve_config(shared: &ConfigArgs, cfg: &config::NanojudgeConfig) -> Res
         bias_prior_logit,
         matchmaking_sharpness,
         min_uniform_edges,
-        refits_per_round,
+        judgements_per_refit,
         prior_tau2,
         bias_prior_tau2,
         live_top,
-        emit_round_rankings,
+        emit_interim_rankings,
         save_judgements,
         output_format,
         verbose,
@@ -549,8 +544,7 @@ mod tests {
         ConfigArgs {
             api_key: None,
             logprobs: None,
-            rounds: None,
-            judgements: None,
+            judgements_per_item: None,
             concurrency: None,
             min_logprob_coverage: None,
             verdict_temperature: None,
@@ -571,11 +565,11 @@ mod tests {
             bias_prior: None,
             matchmaking_sharpness: None,
             min_uniform_edges: None,
-            refits_per_round: None,
+            judgements_per_refit: None,
             prior_tau2: None,
             bias_prior_tau2: None,
             live_top: None,
-            emit_round_rankings: None,
+            emit_interim_rankings: None,
             save_judgements: None,
             output_format: None,
             verbose: None,
@@ -755,9 +749,15 @@ mod tests {
         assert!(!judges[0].logprobs);
     }
 
+    fn cli_with_budget() -> ConfigArgs {
+        let mut cli = default_cli();
+        cli.judgements_per_item = Some(10);
+        cli
+    }
+
     #[test]
     fn test_reasoning_from_cli() {
-        let mut cli = default_cli();
+        let mut cli = cli_with_budget();
         cli.reasoning = Some(false);
         let cfg = NanojudgeConfig::default();
         let resolved = resolve_config(&cli, &cfg);
@@ -766,7 +766,7 @@ mod tests {
 
     #[test]
     fn test_reasoning_cli_overrides_config() {
-        let mut cli = default_cli();
+        let mut cli = cli_with_budget();
         cli.reasoning = Some(true);
         let cfg = NanojudgeConfig { reasoning_enabled: Some(false), ..Default::default() };
         let resolved = resolve_config(&cli, &cfg);
@@ -775,24 +775,31 @@ mod tests {
 
     #[test]
     fn test_reasoning_from_config() {
-        let cli = default_cli();
-        let cfg = NanojudgeConfig { reasoning_enabled: Some(false), ..Default::default() };
+        let cli = cli_with_budget();
+        let cfg = NanojudgeConfig { reasoning_enabled: Some(false), judgements_per_item: Some(10), ..Default::default() };
         let resolved = resolve_config(&cli, &cfg);
         assert!(!resolved.reasoning_enabled);
     }
 
     #[test]
     fn test_stop_confidence_absent_means_no_early_stop() {
-        // No default: absent everywhere resolves to None (full round budget).
-        let cli = default_cli();
+        let cli = cli_with_budget();
         let cfg = NanojudgeConfig::default();
         let resolved = resolve_config(&cli, &cfg);
         assert_eq!(resolved.stop_confidence, None);
     }
 
     #[test]
+    fn test_judgements_per_refit_is_literal() {
+        let mut cli = cli_with_budget();
+        cli.judgements_per_refit = Some(3);
+        let resolved = resolve_config(&cli, &NanojudgeConfig::default());
+        assert_eq!(resolved.judgements_per_refit, Some(3));
+    }
+
+    #[test]
     fn test_stop_confidence_from_cli_with_top_heavy() {
-        let mut cli = default_cli();
+        let mut cli = cli_with_budget();
         cli.judgement_distribution = Some("top-heavy".into());
         cli.stop_confidence = Some(0.95);
         let cfg = NanojudgeConfig::default();
@@ -802,7 +809,7 @@ mod tests {
 
     #[test]
     fn test_stop_confidence_cli_overrides_config() {
-        let mut cli = default_cli();
+        let mut cli = cli_with_budget();
         cli.judgement_distribution = Some("top-heavy".into());
         cli.stop_confidence = Some(0.99);
         let cfg = NanojudgeConfig { stop_confidence: Some(0.9), ..Default::default() };
