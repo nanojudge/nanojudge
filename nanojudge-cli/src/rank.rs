@@ -352,7 +352,10 @@ pub async fn run(args: RankArgs) {
         let cancelled = cancelled.clone();
         tokio::spawn(async move {
             let _ = tokio::signal::ctrl_c().await;
+            eprintln!("\nCancelling... (press Ctrl-C again to force quit)");
             cancelled.store(true, Ordering::Relaxed);
+            let _ = tokio::signal::ctrl_c().await;
+            std::process::exit(130);
         });
     }
 
@@ -978,7 +981,10 @@ async fn run_lineup_judgements(
         let cancelled = cancelled.clone();
         tokio::spawn(async move {
             let _ = tokio::signal::ctrl_c().await;
+            eprintln!("\nCancelling... (press Ctrl-C again to force quit)");
             cancelled.store(true, Ordering::Relaxed);
+            let _ = tokio::signal::ctrl_c().await;
+            std::process::exit(130);
         });
     }
 
