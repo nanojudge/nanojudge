@@ -484,9 +484,11 @@ pub async fn run(args: RankArgs) {
                 continue;
             }
             let cancelled_ref = &cancelled;
+            let abort_handle = handle.abort_handle();
             let result = tokio::select! {
                 r = handle => r,
                 _ = async { while !cancelled_ref.load(Ordering::Relaxed) { tokio::time::sleep(std::time::Duration::from_millis(50)).await; } } => {
+                    abort_handle.abort();
                     judge_aborted[handle_judge_idx] += 1;
                     continue;
                 }
@@ -1101,9 +1103,11 @@ async fn run_lineup_judgements(
                 continue;
             }
             let cancelled_ref = &cancelled;
+            let abort_handle = handle.abort_handle();
             let result = tokio::select! {
                 r = handle => r,
                 _ = async { while !cancelled_ref.load(Ordering::Relaxed) { tokio::time::sleep(std::time::Duration::from_millis(50)).await; } } => {
+                    abort_handle.abort();
                     judge_aborted[handle_judge_idx] += 1;
                     continue;
                 }
