@@ -9,6 +9,19 @@ use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
+pub(crate) enum LlmError {
+    Retryable(String),
+    Permanent(String),
+}
+
+impl std::fmt::Display for LlmError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            LlmError::Retryable(s) | LlmError::Permanent(s) => f.write_str(s),
+        }
+    }
+}
+
 fn truncate_for_log(s: &str, max: usize) -> String {
     if s.len() <= max {
         return s.to_string();
@@ -159,7 +172,7 @@ async fn send_chat_raw(
     client: &Client,
     config: &LlmConfig,
     prompt: &str,
-) -> Result<(String, Vec<LogprobContent>, Option<Usage>, bool), String> {
+) -> Result<(String, Vec<LogprobContent>, Option<Usage>, bool), LlmError> {
     let request = ChatCompletionRequest {
         model: config.model.clone(),
         messages: vec![ChatMessage {
@@ -187,24 +200,29 @@ async fn send_chat_raw(
         req_builder = req_builder.bearer_auth(key);
     }
 
-    let resp = req_builder.send().await.map_err(|e| format!("HTTP request failed: {e}"))?;
+    let resp = req_builder.send().await.map_err(|e| LlmError::Retryable(format!("HTTP request failed: {e}")))?;
 
     if !resp.status().is_success() {
         let status = resp.status();
         let body = resp.text().await.unwrap_or_default();
-        return Err(format!("LLM API returned {status}: {}", truncate_for_log(&body, 500)));
+        let msg = format!("LLM API returned {status}: {}", truncate_for_log(&body, 500));
+        return Err(if matches!(status.as_u16(), 408 | 409 | 425 | 429) || status.is_server_error() {
+            LlmError::Retryable(msg)
+        } else {
+            LlmError::Permanent(msg)
+        });
     }
 
     let data: ChatCompletionResponse = resp
         .json()
         .await
-        .map_err(|e| format!("Failed to parse LLM response JSON: {e}"))?;
+        .map_err(|e| LlmError::Retryable(format!("Failed to parse LLM response JSON: {e}")))?;
 
     let choice = data
         .choices
         .into_iter()
         .next()
-        .ok_or("No choices in LLM response")?;
+        .ok_or(LlmError::Retryable("No choices in LLM response".into()))?;
 
     let content = choice.message.content.unwrap_or_default();
     let hit_max_tokens = choice.finish_reason.as_deref() == Some("length");
@@ -230,7 +248,7 @@ pub async fn send_pair_judgement_request(
     config: &LlmConfig,
     prompt: &str,
     min_logprob_coverage: f64,
-) -> Result<(ParseResult, String, Option<Usage>, bool), String> {
+) -> Result<(ParseResult, String, Option<Usage>, bool), LlmError> {
     let (content, logprobs, usage, hit_max_tokens) = send_chat_raw(client, config, prompt).await?;
 
     let parse_result = if config.logprobs {
@@ -281,7 +299,10 @@ pub async fn judge_pair(
                     hit_max_tokens,
                 });
             }
-            Err(e) => {
+            Err(LlmError::Permanent(e)) => {
+                return Err(e);
+            }
+            Err(LlmError::Retryable(e)) => {
                 last_err = e;
                 if attempt < max_retries {
                     if verbose {
@@ -326,7 +347,7 @@ async fn send_lineup_judgement_request(
     prompt: &str,
     lineup_size: usize,
     min_logprob_coverage: f64,
-) -> Result<(Option<Vec<f64>>, String, Option<Usage>, bool), String> {
+) -> Result<(Option<Vec<f64>>, String, Option<Usage>, bool), LlmError> {
     let (content, logprobs, usage, hit_max_tokens) = send_chat_raw(client, config, prompt).await?;
 
     let winner_dist = if config.logprobs {
@@ -378,7 +399,10 @@ pub async fn judge_lineup(
                     hit_max_tokens,
                 });
             }
-            Err(e) => {
+            Err(LlmError::Permanent(e)) => {
+                return Err(e);
+            }
+            Err(LlmError::Retryable(e)) => {
                 last_err = e;
                 if attempt < max_retries {
                     if verbose {

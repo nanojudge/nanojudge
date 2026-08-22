@@ -575,8 +575,8 @@ pub async fn run(args: RankArgs) {
                     failed_http += 1;
                     if resolved.verbose {
                         eprintln!(
-                            "  Error [{}] (after exhausting {} retries): {e}",
-                            judge_display_names[judge_idx], max_retries,
+                            "  Error [{}]: {e}",
+                            judge_display_names[judge_idx],
                         );
                     }
                 }
@@ -729,7 +729,7 @@ pub async fn run(args: RankArgs) {
             eprintln!("HTTP retries: {total_retries}");
         }
         if failed_http > 0 {
-            eprintln!("HTTP failures (after exhausting retries): {failed_http}");
+            eprintln!("HTTP failures: {failed_http}");
         }
         if failed_parse > 0 {
             eprintln!("Unparseable responses: {failed_parse}");
@@ -1197,8 +1197,8 @@ async fn run_lineup_judgements(
                     failed_http += 1;
                     if resolved.verbose {
                         eprintln!(
-                            "  Error [{}] (after exhausting {} retries): {e}",
-                            judge_display_names[judge_idx], max_retries,
+                            "  Error [{}]: {e}",
+                            judge_display_names[judge_idx],
                         );
                     }
                 }
@@ -1336,7 +1336,7 @@ async fn run_lineup_judgements(
             eprintln!("HTTP retries: {total_retries}");
         }
         if failed_http > 0 {
-            eprintln!("HTTP failures (after exhausting retries): {failed_http}");
+            eprintln!("HTTP failures: {failed_http}");
         }
         if failed_parse > 0 {
             eprintln!("Unparseable rankings: {failed_parse}");
