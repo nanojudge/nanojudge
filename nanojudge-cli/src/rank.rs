@@ -44,16 +44,16 @@ fn resolve_save_path(path: &Path, prefix: &str) -> PathBuf {
     }
 }
 
-/// Temper a parsed verdict distribution before it becomes edges:
-/// q_i ← q_i^(1/temperature), renormalized — equivalent to dividing each
-/// derived edge's log-odds by `temperature`. Values > 1 pull overconfident
-/// verdicts toward uniform; 1.0 is the identity. One-hot (text-mode) verdicts
-/// are fixed points, so only logprob-derived verdicts are affected.
 /// Output tokens to allow per ranking line in no-reasoning mode. A line reads
 /// "First place is Option A" — about 7 tokens; 16 leaves room for tokenizer
 /// variation across models.
 const TOKENS_PER_RANKING_LINE: u32 = 16;
 
+/// Temper a parsed verdict distribution before it becomes edges:
+/// q_i ← q_i^(1/temperature), renormalized — equivalent to dividing each
+/// derived edge's log-odds by `temperature`. Values > 1 pull overconfident
+/// verdicts toward uniform; 1.0 is the identity. One-hot (text-mode) verdicts
+/// are fixed points, so only logprob-derived verdicts are affected.
 fn temper_verdict<const N: usize>(mut dist: [f64; N], temperature: f64) -> [f64; N] {
     temper_verdict_in_place(&mut dist, temperature);
     dist

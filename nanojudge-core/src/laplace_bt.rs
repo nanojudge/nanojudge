@@ -576,7 +576,7 @@ mod tests {
             edges.push((1, 0, 0.9, 0, 0, 1, 1.0)); // item1=1 wins 90% (same first-position edge)
         }
         let f = fit_default(2, 1, &edges);
-        assert!(f.bias_means[0] > 0.5, "first-position edge → positive bias, got {}", f.bias_means[0]);
+        assert!(f.bias_means[0] > 0.5, "first-position edge → positive logit bias (> 0.5), got {}", f.bias_means[0]);
         // With the position edge explained by bias, strengths stay ~equal.
         assert!((f.means[0] - f.means[1]).abs() < 0.2, "strengths should stay close: {:?}", f.means);
     }

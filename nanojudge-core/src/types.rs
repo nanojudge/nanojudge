@@ -43,8 +43,8 @@ pub struct Edge {
     /// Likelihood weight for this edge. Two-item judgements use 1.0. Edges
     /// decomposed from a lineup judgement use `df / k` where `k` is the
     /// number of surviving edges and `df` depends on verdict provenance:
-    /// 2 for logprobs (full winner-distribution), 1 for text mode (winner
-    /// only). See `lineup::winner_dist_to_edges` for the full table.
+    /// `size - 1` for logprobs (full winner-distribution), 1 for text mode
+    /// (winner only). See `lineup::winner_dist_to_edges` for details.
     pub weight: f64,
 }
 
@@ -213,8 +213,8 @@ pub type Lineup = Vec<i64>;
 /// Internal indexed edge (usize indices, not caller IDs).
 /// (item1_idx, item2_idx, win_prob, judge_internal_idx, slot1, slot2, weight)
 ///
-/// `win_prob` is P(item1 wins), collapsed from the 4-category distribution:
-/// `probs[0] + probs[1]` (clear win + narrow win). `slot1`/`slot2` are the
+/// `win_prob` is P(item1 wins), taken directly from `category_probs[0]`.
+/// `slot1`/`slot2` are the
 /// presentation slots the two items occupied (for per-slot bias correction).
 /// `weight` scales this edge's contribution to the likelihood.
 pub(crate) type IndexedEdge = (usize, usize, f64, usize, u8, u8, f64);
