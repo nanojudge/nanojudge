@@ -282,10 +282,15 @@ impl RankingEngine {
 ///
 /// # Panics
 ///
-/// Panics if `lineup_size` is outside the supported range of 2 to 9, or if
-/// `judgements_per_item * num_items` overflows `usize`.
+/// Panics if `lineup_size` is outside the supported range of 2 to 9, if
+/// `num_items < lineup_size`, or if `judgements_per_item * num_items`
+/// overflows `usize`.
 pub fn calculate_budget(num_items: usize, judgements_per_item: usize, lineup_size: usize) -> usize {
     assert_lineup_size(lineup_size);
+    assert!(
+        num_items >= lineup_size,
+        "need at least {lineup_size} items to fill a lineup of that size, got {num_items}"
+    );
     judgements_per_item
         .checked_mul(num_items)
         .expect("judgement budget calculation overflow")
@@ -342,6 +347,12 @@ mod tests {
     #[should_panic(expected = "lineup_size must be between 2 and 9, got 0")]
     fn test_calculate_budget_rejects_zero_lineup_size() {
         let _ = calculate_budget(10, 4, 0);
+    }
+
+    #[test]
+    #[should_panic(expected = "need at least 9 items to fill a lineup of that size, got 5")]
+    fn test_calculate_budget_rejects_too_few_items() {
+        let _ = calculate_budget(5, 10, 9);
     }
 
     #[test]
