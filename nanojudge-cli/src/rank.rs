@@ -277,7 +277,7 @@ pub async fn run(args: RankArgs) {
     }
 
     // Set up judgement saving if requested
-    let save_file = if let Some(ref save_path) = resolved.save_judgements {
+    let save_file = if let Some(ref save_path) = resolved.save_successful_judgements {
         let path = resolve_save_path(save_path, "judgements");
 
         let file = std::fs::OpenOptions::new()
@@ -287,16 +287,17 @@ pub async fn run(args: RankArgs) {
             .unwrap_or_else(|e| bail(format!("Failed to open {}: {e}", path.display())));
 
         if resolved.verbose {
-            eprintln!("Saving judgements to {}", path.display());
+            eprintln!("Saving successful judgements to {}", path.display());
         }
 
         Some(std::sync::Mutex::new(file))
     } else {
         None
     };
+    let include_successful_prompts = resolved.include_successful_prompts;
 
     // Set up failure saving if requested
-    let failures_file = if let Some(ref save_path) = resolved.save_failures {
+    let failures_file = if let Some(ref save_path) = resolved.save_failed_judgements {
         let path = resolve_save_path(save_path, "failures");
 
         let file = std::fs::OpenOptions::new()
@@ -306,7 +307,7 @@ pub async fn run(args: RankArgs) {
             .unwrap_or_else(|e| bail(format!("Failed to open {}: {e}", path.display())));
 
         if resolved.verbose {
-            eprintln!("Saving failures to {}", path.display());
+            eprintln!("Saving failed judgements to {}", path.display());
         }
 
         Some(std::sync::Mutex::new(file))
@@ -477,7 +478,7 @@ pub async fn run(args: RankArgs) {
         let mut judge_last_finish: Vec<Option<std::time::Instant>> = vec![None; judges.len()];
         let mut judge_aborted: Vec<usize> = vec![0; judges.len()];
 
-        for (handle, handle_judge_idx) in handles {
+        for (pair_result_idx, (handle, handle_judge_idx)) in handles.into_iter().enumerate() {
             if cancelled.load(Ordering::Relaxed) {
                 handle.abort();
                 judge_aborted[handle_judge_idx] += 1;
@@ -495,6 +496,8 @@ pub async fn run(args: RankArgs) {
             };
             match result {
                 Ok((Ok(result), assigned_judge_id, judge_idx, finished_at)) => {
+                    let actual_temperature = precomputed_temperatures[pair_result_idx];
+                    let criterion = &criteria[criterion_assignments[pair_result_idx]];
                     // Track latest finish time per judge before this refit.
                     let entry = &mut judge_last_finish[judge_idx];
                     if entry.is_none() || finished_at > entry.unwrap() {
@@ -511,15 +514,30 @@ pub async fn run(args: RankArgs) {
                     }
                     if let Some(category_probs) = result.parse_result.category_probs {
                         if let Some(ref file_mutex) = save_file {
-                            let line = serde_json::json!({
+                            let mut line = serde_json::json!({
                                 "refit": refits_run,
                                 "item1": titles[result.item1_id as usize],
                                 "item2": titles[result.item2_id as usize],
                                 "category_probs": category_probs,
                                 "judge_model": judge_models[judge_idx],
                                 "judge_endpoint": judge_endpoints[judge_idx],
-                                "response": result.response_text,
+                                "temperature": actual_temperature,
+                                "verdict_temperature": judge_verdict_temperatures[judge_idx],
+                                "criterion": criterion,
+                                "logprobs": logprobs_mode,
+                                "retries_used": result.retries_used,
+                                "hit_max_tokens": result.hit_max_tokens,
                             });
+                            if let Some(ref usage) = result.usage {
+                                line["usage"] = serde_json::json!({
+                                    "prompt_tokens": usage.prompt_tokens,
+                                    "completion_tokens": usage.completion_tokens,
+                                });
+                            }
+                            if include_successful_prompts {
+                                line["prompt"] = serde_json::json!(result.prompt);
+                                line["response"] = serde_json::json!(result.response_text);
+                            }
                             let mut f = file_mutex.lock().unwrap();
                             let _ = writeln!(f, "{}", line);
                             let _ = f.flush();
@@ -536,15 +554,27 @@ pub async fn run(args: RankArgs) {
                     } else {
                         failed_parse += 1;
                         if let Some(ref file_mutex) = failures_file {
-                            let line = serde_json::json!({
+                            let mut line = serde_json::json!({
                                 "refit": refits_run,
                                 "item1": titles[result.item1_id as usize],
                                 "item2": titles[result.item2_id as usize],
                                 "judge_model": judge_models[judge_idx],
                                 "judge_endpoint": judge_endpoints[judge_idx],
+                                "temperature": actual_temperature,
+                                "verdict_temperature": judge_verdict_temperatures[judge_idx],
+                                "criterion": criterion,
+                                "logprobs": logprobs_mode,
+                                "retries_used": result.retries_used,
+                                "hit_max_tokens": result.hit_max_tokens,
                                 "prompt": result.prompt,
                                 "response": result.response_text,
                             });
+                            if let Some(ref usage) = result.usage {
+                                line["usage"] = serde_json::json!({
+                                    "prompt_tokens": usage.prompt_tokens,
+                                    "completion_tokens": usage.completion_tokens,
+                                });
+                            }
                             let mut f = file_mutex.lock().unwrap();
                             let _ = writeln!(f, "{}", line);
                             let _ = f.flush();
@@ -929,22 +959,26 @@ async fn run_lineup_judgements(
         }
     }
 
-    let save_file = if let Some(ref save_path) = resolved.save_judgements {
+    let save_file = if let Some(ref save_path) = resolved.save_successful_judgements {
         let path = resolve_save_path(save_path, "judgements");
         let file = std::fs::OpenOptions::new().create(true).append(true).open(&path)
             .unwrap_or_else(|e| bail(format!("Failed to open {}: {e}", path.display())));
         if resolved.verbose {
-            eprintln!("Saving judgements to {}", path.display());
+            eprintln!("Saving successful judgements to {}", path.display());
         }
         Some(std::sync::Mutex::new(file))
     } else {
         None
     };
+    let include_successful_prompts = resolved.include_successful_prompts;
 
-    let failures_file = if let Some(ref save_path) = resolved.save_failures {
+    let failures_file = if let Some(ref save_path) = resolved.save_failed_judgements {
         let path = resolve_save_path(save_path, "failures");
         let file = std::fs::OpenOptions::new().create(true).append(true).open(&path)
             .unwrap_or_else(|e| bail(format!("Failed to open {}: {e}", path.display())));
+        if resolved.verbose {
+            eprintln!("Saving failed judgements to {}", path.display());
+        }
         Some(std::sync::Mutex::new(file))
     } else {
         None
@@ -1096,7 +1130,7 @@ async fn run_lineup_judgements(
         let mut judge_last_finish: Vec<Option<std::time::Instant>> = vec![None; judges.len()];
         let mut judge_aborted: Vec<usize> = vec![0; judges.len()];
 
-        for (handle, handle_judge_idx) in handles {
+        for (lineup_result_idx, (handle, handle_judge_idx)) in handles.into_iter().enumerate() {
             if cancelled.load(Ordering::Relaxed) {
                 handle.abort();
                 judge_aborted[handle_judge_idx] += 1;
@@ -1114,6 +1148,8 @@ async fn run_lineup_judgements(
             };
             match result {
                 Ok((Ok(tw), assigned_judge_id, judge_idx, finished_at)) => {
+                    let actual_temperature = precomputed_temperatures[lineup_result_idx];
+                    let criterion = &criteria[criterion_assignments[lineup_result_idx]];
                     let entry = &mut judge_last_finish[judge_idx];
                     if entry.is_none() || finished_at > entry.unwrap() {
                         *entry = Some(finished_at);
@@ -1134,14 +1170,29 @@ async fn run_lineup_judgements(
                                 .iter()
                                 .map(|&id| titles[id as usize].as_str())
                                 .collect();
-                            let line = serde_json::json!({
+                            let mut line = serde_json::json!({
                                 "refit": refits_run,
                                 "items": lineup_titles,
                                 "winner_dist": winner_dist,
                                 "judge_model": judge_models[judge_idx],
                                 "judge_endpoint": judge_endpoints[judge_idx],
-                                "response": tw.response_text,
+                                "temperature": actual_temperature,
+                                "verdict_temperature": judge_verdict_temperatures[judge_idx],
+                                "criterion": criterion,
+                                "logprobs": logprobs_mode,
+                                "retries_used": tw.retries_used,
+                                "hit_max_tokens": tw.hit_max_tokens,
                             });
+                            if let Some(ref usage) = tw.usage {
+                                line["usage"] = serde_json::json!({
+                                    "prompt_tokens": usage.prompt_tokens,
+                                    "completion_tokens": usage.completion_tokens,
+                                });
+                            }
+                            if include_successful_prompts {
+                                line["prompt"] = serde_json::json!(tw.prompt);
+                                line["response"] = serde_json::json!(tw.response_text);
+                            }
                             let mut f = file_mutex.lock().unwrap();
                             let _ = writeln!(f, "{}", line);
                             let _ = f.flush();
@@ -1165,14 +1216,26 @@ async fn run_lineup_judgements(
                                 .iter()
                                 .map(|&id| titles[id as usize].as_str())
                                 .collect();
-                            let line = serde_json::json!({
+                            let mut line = serde_json::json!({
                                 "refit": refits_run,
                                 "items": lineup_titles,
                                 "judge_model": judge_models[judge_idx],
                                 "judge_endpoint": judge_endpoints[judge_idx],
+                                "temperature": actual_temperature,
+                                "verdict_temperature": judge_verdict_temperatures[judge_idx],
+                                "criterion": criterion,
+                                "logprobs": logprobs_mode,
+                                "retries_used": tw.retries_used,
+                                "hit_max_tokens": tw.hit_max_tokens,
                                 "prompt": tw.prompt,
                                 "response": tw.response_text,
                             });
+                            if let Some(ref usage) = tw.usage {
+                                line["usage"] = serde_json::json!({
+                                    "prompt_tokens": usage.prompt_tokens,
+                                    "completion_tokens": usage.completion_tokens,
+                                });
+                            }
                             let mut f = file_mutex.lock().unwrap();
                             let _ = writeln!(f, "{}", line);
                             let _ = f.flush();

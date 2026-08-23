@@ -64,10 +64,11 @@ pub struct NanojudgeConfig {
     pub min_logprob_coverage: Option<f64>,
     pub verdict_temperature: Option<f64>,
     pub live_top: Option<usize>,
-    pub save_judgements: Option<PathBuf>,
+    pub save_successful_judgements: Option<PathBuf>,
+    pub include_successful_prompts: Option<bool>,
     pub output_format: Option<OutputFormat>,
     pub verbose: Option<bool>,
-    pub save_failures: Option<PathBuf>,
+    pub save_failed_judgements: Option<PathBuf>,
     pub seed: Option<u64>,
     /// Judge panel configuration. At least one [[judge]] block is required.
     pub judge: Option<Vec<JudgeConfig>>,
@@ -171,11 +172,16 @@ const DEFAULT_CONFIG_TEMPLATE: &str = "\
 # Omit or comment out to disable.
 # live_top = 10
 
-# Save all judgements to a JSONL file. Value is a path.
+# Save successful judgements to a JSONL file. Value is a path.
 # Use \".\" for the current directory (auto-generates judgements-{timestamp}.jsonl).
 # A directory path auto-generates a filename inside it.
+# By default saves metadata and verdicts but not prompts/responses.
 # Omit or comment out to disable.
-# save_judgements = \".\"
+# save_successful_judgements = \".\"
+
+# Include full prompts and responses in saved successful judgements.
+# Only meaningful when save_successful_judgements is set.
+# include_successful_prompts = false
 
 # Output format for final results: \"table\" or \"json\".
 # output_format = \"table\"
@@ -186,8 +192,9 @@ const DEFAULT_CONFIG_TEMPLATE: &str = "\
 # Save failed judgements (unparseable responses) to a JSONL file. Value is a path.
 # Use \".\" for the current directory (auto-generates failures-{timestamp}.jsonl).
 # A directory path auto-generates a filename inside it.
+# Always includes prompts and responses for debugging.
 # Omit or comment out to disable.
-# save_failures = \".\"
+# save_failed_judgements = \".\"
 
 # Max retries per judgement on HTTP errors. 0 = no retries. Default: 3.
 # retries = 3

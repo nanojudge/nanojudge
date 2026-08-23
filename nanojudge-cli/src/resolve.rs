@@ -82,10 +82,11 @@ pub struct ResolvedConfig {
     pub bias_prior_tau2: f64,
     pub live_top: Option<usize>,
     pub emit_interim_rankings: bool,
-    pub save_judgements: Option<PathBuf>,
+    pub save_successful_judgements: Option<PathBuf>,
+    pub include_successful_prompts: bool,
     pub output_format: OutputFormat,
     pub verbose: bool,
-    pub save_failures: Option<PathBuf>,
+    pub save_failed_judgements: Option<PathBuf>,
     pub seed: Option<u64>,
 }
 
@@ -432,10 +433,10 @@ pub fn resolve_config(shared: &ConfigArgs, cfg: &config::NanojudgeConfig) -> Res
     }
     let live_top = merge_opt(shared.live_top, cfg.live_top, "live-top");
     let emit_interim_rankings = shared.emit_interim_rankings.unwrap_or(false);
-    let save_judgements = match (shared.save_judgements.clone(), cfg.save_judgements.clone()) {
+    let save_successful_judgements = match (shared.save_successful_judgements.clone(), cfg.save_successful_judgements.clone()) {
         (Some(c), Some(f)) => {
             if c != f {
-                eprintln!("Warning: --save-judgements ({}) overrides config file value ({})",
+                eprintln!("Warning: --save-successful-judgements ({}) overrides config file value ({})",
                     c.display(), f.display());
             }
             Some(c)
@@ -443,6 +444,11 @@ pub fn resolve_config(shared: &ConfigArgs, cfg: &config::NanojudgeConfig) -> Res
         (c @ Some(_), None) => c,
         (None, f) => f,
     };
+    let include_successful_prompts = merge_opt(shared.include_successful_prompts, cfg.include_successful_prompts, "include-successful-prompts")
+        .unwrap_or(false);
+    if include_successful_prompts && save_successful_judgements.is_none() {
+        bail("--include-successful-prompts requires --save-successful-judgements");
+    }
     let output_format = merge_opt(shared.output_format, cfg.output_format, "output-format").unwrap_or_else(|| {
         if std::io::IsTerminal::is_terminal(&std::io::stdout()) {
             OutputFormat::Table
@@ -451,10 +457,10 @@ pub fn resolve_config(shared: &ConfigArgs, cfg: &config::NanojudgeConfig) -> Res
         }
     });
     let verbose = merge_opt(shared.verbose, cfg.verbose, "verbose").unwrap_or(false);
-    let save_failures = match (shared.save_failures.clone(), cfg.save_failures.clone()) {
+    let save_failed_judgements = match (shared.save_failed_judgements.clone(), cfg.save_failed_judgements.clone()) {
         (Some(c), Some(f)) => {
             if c != f {
-                eprintln!("Warning: --save-failures ({}) overrides config file value ({})",
+                eprintln!("Warning: --save-failed-judgements ({}) overrides config file value ({})",
                     c.display(), f.display());
             }
             Some(c)
@@ -527,10 +533,11 @@ pub fn resolve_config(shared: &ConfigArgs, cfg: &config::NanojudgeConfig) -> Res
         bias_prior_tau2,
         live_top,
         emit_interim_rankings,
-        save_judgements,
+        save_successful_judgements,
+        include_successful_prompts,
         output_format,
         verbose,
-        save_failures,
+        save_failed_judgements,
         seed,
     }
 }
@@ -570,10 +577,11 @@ mod tests {
             bias_prior_tau2: None,
             live_top: None,
             emit_interim_rankings: None,
-            save_judgements: None,
+            save_successful_judgements: None,
+            include_successful_prompts: None,
             output_format: None,
             verbose: None,
-            save_failures: None,
+            save_failed_judgements: None,
             seed: None,
         }
     }

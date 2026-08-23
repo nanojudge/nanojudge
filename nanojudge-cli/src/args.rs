@@ -204,11 +204,17 @@ pub struct ConfigArgs {
     #[arg(long, num_args = 0..=1, default_missing_value = "true")]
     pub emit_interim_rankings: Option<bool>,
 
-    /// Save all judgements to a JSONL file.
+    /// Save successful judgements to a JSONL file.
     /// Bare flag: saves to judgements-{timestamp}.jsonl in the current directory.
     /// With a path: saves to that file (or auto-generates a name if path is a directory).
+    /// By default saves metadata and verdicts but not prompts/responses.
     #[arg(long, num_args = 0..=1, default_missing_value = ".")]
-    pub save_judgements: Option<PathBuf>,
+    pub save_successful_judgements: Option<PathBuf>,
+
+    /// Include full prompts and responses in saved successful judgements.
+    /// Only meaningful when --save-successful-judgements is set.
+    #[arg(long, num_args = 0..=1, default_missing_value = "true")]
+    pub include_successful_prompts: Option<bool>,
 
     /// Output format for final results: "table" or "json". Default: table.
     #[arg(long, value_enum)]
@@ -221,8 +227,9 @@ pub struct ConfigArgs {
     /// Save failed judgements (unparseable responses) to a JSONL file.
     /// Bare flag: saves to failures-{timestamp}.jsonl in the current directory.
     /// With a path: saves to that file (or auto-generates a name if path is a directory).
+    /// Always includes prompts and responses for debugging.
     #[arg(long, num_args = 0..=1, default_missing_value = ".")]
-    pub save_failures: Option<PathBuf>,
+    pub save_failed_judgements: Option<PathBuf>,
 
     /// RNG seed for reproducible runs. Omit for OS entropy.
     #[arg(long)]

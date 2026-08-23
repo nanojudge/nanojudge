@@ -106,19 +106,29 @@ Add `--output-format json` for machine-readable output. Add `-v` for progress du
 
 ### Saving judgements for inspection
 
-Save all LLM responses to a JSONL file for spot-checking or live monitoring with `tail -f`:
+Save judgements to JSONL files for spot-checking or live monitoring with `tail -f`:
 
 ```bash
-# Save to judgements-{timestamp}.jsonl in the current directory
-nanojudge rank ... --save-judgements
+# Save successful judgements to judgements-{timestamp}.jsonl in the current directory
+nanojudge rank ... --save-successful-judgements
 
 # Save to a specific file
-nanojudge rank ... --save-judgements results.jsonl
+nanojudge rank ... --save-successful-judgements results.jsonl
+
+# Also save failed judgements (unparseable responses) for debugging
+nanojudge rank ... --save-successful-judgements --save-failed-judgements
+
+# Include full prompts and responses in successful records (always included in failures)
+nanojudge rank ... --save-successful-judgements --include-successful-prompts
 ```
 
-Each line is a JSON object with `refit`, `item1`, `item2`, `category_probs`, `judge_model`, `judge_endpoint`, and `response` (the raw LLM text). Lines are flushed immediately so you can `tail -f` during a run.
+Each successful record is a JSON object with `refit`, `item1`, `item2`, `category_probs`, `judge_model`, `judge_endpoint`, `temperature` (the actual value sent to the API, after jitter), `verdict_temperature`, `criterion`, `logprobs`, `retries_used`, `hit_max_tokens`, and `usage` (token counts, when the endpoint provides them). Prompts and responses are omitted by default; add `--include-successful-prompts` to include them.
 
-Runs with `lineup_size` above 2 write a different shape, since a lineup has no fixed number of members: `item1`/`item2` are replaced by an `items` array holding the lineup in presentation order, and `category_probs` by `winner_dist`, the judge's probability that each member of that array won. `refit`, `judge_model`, `judge_endpoint`, and `response` are unchanged. Pairwise runs are unaffected — a reader written against the two-item shape keeps working for `lineup_size = 2`.
+Failed records always include `prompt` and `response` for debugging, plus the same metadata fields.
+
+Lines are flushed immediately so you can `tail -f` during a run.
+
+Runs with `lineup_size` above 2 write a different shape, since a lineup has no fixed number of members: `item1`/`item2` are replaced by an `items` array holding the lineup in presentation order, and `category_probs` by `winner_dist`, the judge's probability that each member of that array won. Pairwise runs are unaffected — a reader written against the two-item shape keeps working for `lineup_size = 2`.
 
 ## Config file
 
@@ -133,9 +143,9 @@ Key settings:
 | `lineup_size` | Items in each judgement. `2` (default) is the pairwise mode everything else is tuned around; up to `9` is supported, where one call ranks the whole lineup. |
 | `logprobs` | `true` to extract logprobs for continuous confidence (requires endpoint support, e.g. vLLM). `false` for text-based verdict parsing (works everywhere, but needs more judgements). |
 | `judgement_distribution` | `"uniform"` (default) or `"top-heavy"`. Top-heavy concentrates judgements on the contenders for the top spots. |
-| `selection_sharpness` / `cutoff` | Top-heavy tuning. Each item's pairing weight is its uncertainty ratio around the anchor — min/max of the probability of sitting above vs below the anchor, integrated over both the item's and the anchor's posterior uncertainty: `1` when the item straddles the anchor, near `0` once it's confidently on either side — raised to `selection_sharpness` (lower = flatter = more exploration; default `0.7`). `cutoff` drops items whose ratio is below it, keeping the two highest regardless (`[0,1)`, default `0` — no cutoff; sharpness does the shaping). The first item of each judgement is drawn from these weights; its opponent is then picked by info-gain matchmaking from a rating window around it, with the win probability integrated over both items' posterior uncertainty so matchups that *might* be close also score well — so the contested boundary gets the judgements. |
-| `anchor_index` | Which rank anchors top-heavy selection, 0-based into the ranking sorted best-first (default `0` — the current leader). `9` anchors on the 10th-best: right for "find the top ten, order within them doesn't matter", since judgements concentrate on the boundary around rank 10 while items confidently inside or outside the top ten shed weight. Fractional values interpolate between adjacent ranks (`0.5` targets the midpoint of the 1st and 2nd items). Must be at most the number of items minus 1. |
-| `stop_confidence` | Early stop for top-heavy runs. After each interim fit, the run ends early once the probability that every item sits on its side of the anchor — the product of the per-item side probabilities — reaches this value; final scoring then runs on the judgements collected so far. Items far from the anchor contribute ~1 to the product, so the criterion is governed by the few stragglers at the boundary. In `(0.5, 1.0)`, e.g. `0.95`. No default: when unset, the run always uses its full budget. The `judgements_per_item` budget stays the hard cap — a boundary too crowded to ever resolve simply runs to the cap. Rejected with the uniform distribution (no anchor to measure against). |
+| `selection_sharpness` / `cutoff` | Top-heavy tuning. `selection_sharpness` controls how sharply pairing weight concentrates on items near the anchor (lower = more exploration; default `0.7`). `cutoff` drops items below a minimum uncertainty ratio, keeping at least two (`[0,1)`, default `0` = off). |
+| `anchor_index` | Which rank anchors top-heavy selection, 0-based best-first (default `0` = leader). `9` = 10th-best, for "find the top ten." Fractional values interpolate between adjacent ranks. |
+| `stop_confidence` | Early stop for top-heavy runs: end once the probability that every item is on its correct side of the anchor reaches this value. In `(0.5, 1.0)`, e.g. `0.95`. No default = always use full budget. Top-heavy only. |
 
 Per-judge settings (in `[[judge]]` blocks):
 
