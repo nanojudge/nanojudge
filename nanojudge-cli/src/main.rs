@@ -8,6 +8,7 @@ mod parse;
 mod prompt;
 mod rank;
 mod resolve;
+mod score;
 
 use clap::Parser;
 
@@ -28,6 +29,7 @@ async fn main() {
 
     match cli.command {
         Commands::Rank(args) => rank::run(args).await,
+        Commands::Score(args) => score::run(args),
         Commands::Benchmark(args) => run_benchmark_cmd(args).await,
         Commands::Init => {
             let path = config::create_default_config();

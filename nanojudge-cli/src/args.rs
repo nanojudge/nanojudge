@@ -31,6 +31,8 @@ pub struct Cli {
 pub enum Commands {
     /// Run ranking on a list of items
     Rank(RankArgs),
+    /// Score a saved JSONL judgements file (no API calls)
+    Score(ScoreArgs),
     /// Benchmark an LLM endpoint for throughput, latency, and reliability
     Benchmark(BenchmarkArgs),
     /// Create a default config file at ~/.config/nanojudge/config.toml
@@ -234,6 +236,37 @@ pub struct ConfigArgs {
     /// RNG seed for reproducible runs. Omit for OS entropy.
     #[arg(long)]
     pub seed: Option<u64>,
+}
+
+#[derive(Parser)]
+pub struct ScoreArgs {
+    /// Path to a JSONL file of saved successful judgements.
+    pub file: PathBuf,
+
+    /// Confidence interval level (e.g. 0.95 for 95%). Default: 0.95.
+    #[arg(long)]
+    pub confidence_level: Option<f64>,
+
+    /// Ghost player regularization strength. Default: 0.01.
+    #[arg(long)]
+    pub regularization_strength: Option<f64>,
+
+    /// Prior variance on log-strengths. Default: 10.0.
+    #[arg(long)]
+    pub prior_tau2: Option<f64>,
+
+    /// Prior variance on positional bias (logit space). Default: 2.0.
+    #[arg(long)]
+    pub bias_prior_tau2: Option<f64>,
+
+    /// Positional bias prior in probability space (0.0-1.0 exclusive).
+    /// 0.5 = no bias (default). >0.5 = model tends to favor item listed first.
+    #[arg(long)]
+    pub bias_prior: Option<f64>,
+
+    /// Output format for final results: "table" or "json". Default: table.
+    #[arg(long, value_enum)]
+    pub output_format: Option<OutputFormat>,
 }
 
 #[derive(Parser)]

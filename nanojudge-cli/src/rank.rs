@@ -54,14 +54,14 @@ const TOKENS_PER_RANKING_LINE: u32 = 16;
 /// derived edge's log-odds by `temperature`. Values > 1 pull overconfident
 /// verdicts toward uniform; 1.0 is the identity. One-hot (text-mode) verdicts
 /// are fixed points, so only logprob-derived verdicts are affected.
-fn temper_verdict<const N: usize>(mut dist: [f64; N], temperature: f64) -> [f64; N] {
+pub(crate) fn temper_verdict<const N: usize>(mut dist: [f64; N], temperature: f64) -> [f64; N] {
     temper_verdict_in_place(&mut dist, temperature);
     dist
 }
 
 /// `temper_verdict` over a verdict distribution of any width — lineups carry
 /// one entry per option, so their width is only known at runtime.
-fn temper_verdict_in_place(dist: &mut [f64], temperature: f64) {
+pub(crate) fn temper_verdict_in_place(dist: &mut [f64], temperature: f64) {
     if temperature == 1.0 {
         return;
     }
@@ -518,6 +518,8 @@ pub async fn run(args: RankArgs) {
                                 "refit": refits_run,
                                 "item1": titles[result.item1_id as usize],
                                 "item2": titles[result.item2_id as usize],
+                                "item1_id": result.item1_id,
+                                "item2_id": result.item2_id,
                                 "category_probs": category_probs,
                                 "judge_model": judge_models[judge_idx],
                                 "judge_endpoint": judge_endpoints[judge_idx],
@@ -558,6 +560,8 @@ pub async fn run(args: RankArgs) {
                                 "refit": refits_run,
                                 "item1": titles[result.item1_id as usize],
                                 "item2": titles[result.item2_id as usize],
+                                "item1_id": result.item1_id,
+                                "item2_id": result.item2_id,
                                 "judge_model": judge_models[judge_idx],
                                 "judge_endpoint": judge_endpoints[judge_idx],
                                 "temperature": actual_temperature,
@@ -1173,6 +1177,7 @@ async fn run_lineup_judgements(
                             let mut line = serde_json::json!({
                                 "refit": refits_run,
                                 "items": lineup_titles,
+                                "item_ids": tw.item_ids,
                                 "winner_dist": winner_dist,
                                 "judge_model": judge_models[judge_idx],
                                 "judge_endpoint": judge_endpoints[judge_idx],
@@ -1219,6 +1224,7 @@ async fn run_lineup_judgements(
                             let mut line = serde_json::json!({
                                 "refit": refits_run,
                                 "items": lineup_titles,
+                                "item_ids": tw.item_ids,
                                 "judge_model": judge_models[judge_idx],
                                 "judge_endpoint": judge_endpoints[judge_idx],
                                 "temperature": actual_temperature,
