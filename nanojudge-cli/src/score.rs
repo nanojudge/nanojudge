@@ -3,6 +3,7 @@ use std::io::BufRead;
 use std::path::Path;
 
 use nanojudge_core::{
+    constants::{MAX_LINEUP_SIZE, MIN_LINEUP_SIZE},
     run_scoring, stable_hash, winner_dist_to_edges, Edge, JudgeInfo, ScoringOptions,
 };
 
@@ -152,15 +153,24 @@ fn load_edges(
             .unwrap_or_else(|| bail(format!("{}:{}: missing judge_endpoint", path.display(), line_num)));
         let judge_id = stable_hash(&format!("{judge_endpoint}\0{judge_model}"));
 
-        let verdict_temperature = record["verdict_temperature"].as_f64().unwrap_or(1.0);
-        if !verdict_temperature.is_finite() || verdict_temperature <= 0.0 {
-            eprintln!("Warning: {}:{}: invalid verdict_temperature {verdict_temperature}, skipping", path.display(), line_num);
-            continue;
-        }
-        let line_logprobs = record["logprobs"].as_bool().unwrap_or(false);
-        if line_logprobs {
-            logprobs_mode = true;
-        }
+        let verdict_temperature = match record["verdict_temperature"].as_f64() {
+            Some(t) if t.is_finite() && t > 0.0 => t,
+            Some(t) => {
+                eprintln!("Warning: {}:{}: invalid verdict_temperature {t}, skipping", path.display(), line_num);
+                continue;
+            }
+            None => {
+                eprintln!("Warning: {}:{}: missing verdict_temperature, skipping", path.display(), line_num);
+                continue;
+            }
+        };
+        let line_logprobs = match record["logprobs"].as_bool() {
+            Some(b) => b,
+            None => {
+                eprintln!("Warning: {}:{}: missing logprobs, skipping", path.display(), line_num);
+                continue;
+            }
+        };
 
         if let Some(items_arr) = record["items"].as_array() {
             // Lineup record
@@ -172,33 +182,69 @@ fn load_edges(
                 }
             };
 
-            let original_ids = record["item_ids"].as_array();
-            let item_ids: Vec<i64> = items_arr.iter().enumerate().map(|(i, v)| {
-                let name = v.as_str()
-                    .unwrap_or_else(|| bail(format!("{}:{}: non-string item name", path.display(), line_num)));
-                let key = original_ids
-                    .and_then(|arr| arr.get(i))
-                    .and_then(|v| v.as_i64())
-                    .map(|id| id.to_string())
-                    .unwrap_or_else(|| name.to_string());
-                get_or_insert_item(&mut item_to_id, &mut item_names, &key, name)
-            }).collect();
+            if items_arr.len() != winner_dist_arr.len() {
+                eprintln!("Warning: {}:{}: items/winner_dist length mismatch, skipping", path.display(), line_num);
+                continue;
+            }
+            if !(MIN_LINEUP_SIZE..=MAX_LINEUP_SIZE).contains(&items_arr.len()) {
+                eprintln!("Warning: {}:{}: lineup size {} out of range ({}..={}), skipping", path.display(), line_num, items_arr.len(), MIN_LINEUP_SIZE, MAX_LINEUP_SIZE);
+                continue;
+            }
 
             let mut winner_dist: Vec<f64> = winner_dist_arr.iter().map(|v| {
                 v.as_f64()
                     .unwrap_or_else(|| bail(format!("{}:{}: non-numeric winner_dist entry", path.display(), line_num)))
             }).collect();
 
-            if item_ids.len() != winner_dist.len() {
-                eprintln!("Warning: {}:{}: items/winner_dist length mismatch, skipping", path.display(), line_num);
+            let wd_sum: f64 = winner_dist.iter().sum();
+            if !wd_sum.is_finite() || wd_sum <= 0.0 || winner_dist.iter().any(|&p| p < 0.0) {
+                eprintln!("Warning: {}:{}: invalid winner_dist, skipping", path.display(), line_num);
                 continue;
             }
+
+            let valid_hashes: Option<Vec<u64>> = record["item_text_hashes"].as_array()
+                .and_then(|arr| {
+                    if arr.len() != items_arr.len() { return None; }
+                    arr.iter().map(|v| v.as_u64()).collect()
+                });
+            if record.get("item_text_hashes").is_some() && valid_hashes.is_none() {
+                eprintln!("Warning: {}:{}: malformed item_text_hashes, skipping", path.display(), line_num);
+                continue;
+            }
+
+            let keys_and_names: Vec<(String, &str)> = items_arr.iter().enumerate().map(|(i, v)| {
+                let name = v.as_str()
+                    .unwrap_or_else(|| bail(format!("{}:{}: non-string item name", path.display(), line_num)));
+                let key = valid_hashes.as_ref()
+                    .map(|hashes| format!("h:{}", hashes[i]))
+                    .unwrap_or_else(|| format!("t:{name}"));
+                (key, name)
+            }).collect();
+
+            let mut has_dup = false;
+            for (i, (a, _)) in keys_and_names.iter().enumerate() {
+                for (b, _) in &keys_and_names[i + 1..] {
+                    if a == b { has_dup = true; break; }
+                }
+                if has_dup { break; }
+            }
+            if has_dup {
+                eprintln!("Warning: {}:{}: lineup contains duplicate items after identity resolution, skipping", path.display(), line_num);
+                continue;
+            }
+
+            let item_ids: Vec<i64> = keys_and_names.iter().map(|(key, name)| {
+                get_or_insert_item(&mut item_to_id, &mut item_names, key, name)
+            }).collect();
 
             temper_verdict_in_place(&mut winner_dist, verdict_temperature);
 
             if !judge_id_set.contains(&judge_id) {
                 judge_id_set.push(judge_id);
                 judge_display_names.push(format!("{judge_model} @ {judge_endpoint}"));
+            }
+            if line_logprobs {
+                logprobs_mode = true;
             }
 
             let lineup_edges = winner_dist_to_edges(&item_ids, &winner_dist, judge_id, line_logprobs);
@@ -230,18 +276,46 @@ fn load_edges(
                     .unwrap_or_else(|| bail(format!("{}:{}: non-numeric category_probs", path.display(), line_num))),
             ];
 
-            let key1 = record["item1_id"].as_i64()
-                .map(|id| id.to_string())
-                .unwrap_or_else(|| item1_name.to_string());
-            let key2 = record["item2_id"].as_i64()
-                .map(|id| id.to_string())
-                .unwrap_or_else(|| item2_name.to_string());
+            let sum = probs[0] + probs[1];
+            if !sum.is_finite() || sum <= 0.0 || probs[0] < 0.0 || probs[1] < 0.0 {
+                eprintln!("Warning: {}:{}: invalid category_probs {:?}, skipping", path.display(), line_num, probs);
+                continue;
+            }
+
+            let key1 = match record.get("item1_text_hash") {
+                Some(v) => match v.as_u64() {
+                    Some(h) => format!("h:{h}"),
+                    None => {
+                        eprintln!("Warning: {}:{}: malformed item1_text_hash, skipping", path.display(), line_num);
+                        continue;
+                    }
+                },
+                None => format!("t:{item1_name}"),
+            };
+            let key2 = match record.get("item2_text_hash") {
+                Some(v) => match v.as_u64() {
+                    Some(h) => format!("h:{h}"),
+                    None => {
+                        eprintln!("Warning: {}:{}: malformed item2_text_hash, skipping", path.display(), line_num);
+                        continue;
+                    }
+                },
+                None => format!("t:{item2_name}"),
+            };
+            if key1 == key2 {
+                eprintln!("Warning: {}:{}: pairwise items resolve to same identity, skipping", path.display(), line_num);
+                continue;
+            }
+
             let id1 = get_or_insert_item(&mut item_to_id, &mut item_names, &key1, item1_name);
             let id2 = get_or_insert_item(&mut item_to_id, &mut item_names, &key2, item2_name);
 
             if !judge_id_set.contains(&judge_id) {
                 judge_id_set.push(judge_id);
                 judge_display_names.push(format!("{judge_model} @ {judge_endpoint}"));
+            }
+            if line_logprobs {
+                logprobs_mode = true;
             }
 
             let tempered = temper_verdict(probs, verdict_temperature);
@@ -347,16 +421,158 @@ mod tests {
     }
 
     #[test]
-    fn test_item_ids_used_for_identity() {
+    fn test_text_hashes_used_for_identity() {
         let f = write_jsonl(&[
-            r#"{"refit":0,"item1":"Long title trun...","item2":"B","item1_id":0,"item2_id":1,"category_probs":[0.7,0.3],"judge_model":"m","judge_endpoint":"http://e","verdict_temperature":1.0,"logprobs":false}"#,
-            r#"{"refit":0,"item1":"Long title trun...","item2":"B","item1_id":2,"item2_id":1,"category_probs":[0.6,0.4],"judge_model":"m","judge_endpoint":"http://e","verdict_temperature":1.0,"logprobs":false}"#,
+            r#"{"refit":0,"item1":"Long title trun...","item2":"B","item1_text_hash":111,"item2_text_hash":222,"category_probs":[0.7,0.3],"judge_model":"m","judge_endpoint":"http://e","verdict_temperature":1.0,"logprobs":false}"#,
+            r#"{"refit":0,"item1":"Long title trun...","item2":"B","item1_text_hash":333,"item2_text_hash":222,"category_probs":[0.6,0.4],"judge_model":"m","judge_endpoint":"http://e","verdict_temperature":1.0,"logprobs":false}"#,
         ]);
         let (edges, names, _, _, total, _) = load_edges(f.path());
         assert_eq!(total, 2);
         assert_eq!(names.len(), 3);
         assert_eq!(edges[0].item1, 0);
         assert_eq!(edges[1].item1, 2);
+    }
+
+    #[test]
+    fn test_lineup_size_out_of_range_skipped() {
+        let f = write_jsonl(&[
+            r#"{"refit":0,"items":["X"],"winner_dist":[1.0],"judge_model":"m","judge_endpoint":"http://e","verdict_temperature":1.0,"logprobs":true}"#,
+            r#"{"refit":0,"item1":"A","item2":"B","category_probs":[0.7,0.3],"judge_model":"m","judge_endpoint":"http://e","verdict_temperature":1.0,"logprobs":true}"#,
+        ]);
+        let (edges, names, _, _, total, _) = load_edges(f.path());
+        assert_eq!(total, 1);
+        assert_eq!(names, vec!["A", "B"]);
+        assert_eq!(edges.len(), 1);
+    }
+
+    #[test]
+    fn test_invalid_category_probs_skipped() {
+        let f = write_jsonl(&[
+            r#"{"refit":0,"item1":"A","item2":"B","category_probs":[0.0,0.0],"judge_model":"m","judge_endpoint":"http://e","verdict_temperature":1.0,"logprobs":true}"#,
+            r#"{"refit":0,"item1":"C","item2":"D","category_probs":[0.6,0.4],"judge_model":"m","judge_endpoint":"http://e","verdict_temperature":1.0,"logprobs":true}"#,
+        ]);
+        let (edges, names, _, _, total, _) = load_edges(f.path());
+        assert_eq!(total, 1);
+        assert_eq!(names, vec!["C", "D"]);
+        assert_eq!(edges.len(), 1);
+    }
+
+    #[test]
+    fn test_invalid_winner_dist_skipped() {
+        let f = write_jsonl(&[
+            r#"{"refit":0,"items":["X","Y","Z"],"winner_dist":[0.0,0.0,0.0],"judge_model":"m","judge_endpoint":"http://e","verdict_temperature":1.0,"logprobs":true}"#,
+            r#"{"refit":0,"item1":"A","item2":"B","category_probs":[0.7,0.3],"judge_model":"m","judge_endpoint":"http://e","verdict_temperature":1.0,"logprobs":true}"#,
+        ]);
+        let (edges, names, _, _, total, _) = load_edges(f.path());
+        assert_eq!(total, 1);
+        assert_eq!(names, vec!["A", "B"]);
+        assert_eq!(edges.len(), 1);
+    }
+
+    #[test]
+    fn test_missing_verdict_temperature_skipped() {
+        let f = write_jsonl(&[
+            r#"{"refit":0,"item1":"A","item2":"B","category_probs":[0.7,0.3],"judge_model":"m","judge_endpoint":"http://e","logprobs":true}"#,
+            r#"{"refit":0,"item1":"C","item2":"D","category_probs":[0.6,0.4],"judge_model":"m","judge_endpoint":"http://e","verdict_temperature":1.0,"logprobs":true}"#,
+        ]);
+        let (edges, names, _, _, total, _) = load_edges(f.path());
+        assert_eq!(total, 1);
+        assert_eq!(names, vec!["C", "D"]);
+        assert_eq!(edges.len(), 1);
+    }
+
+    #[test]
+    fn test_missing_logprobs_skipped() {
+        let f = write_jsonl(&[
+            r#"{"refit":0,"item1":"A","item2":"B","category_probs":[0.7,0.3],"judge_model":"m","judge_endpoint":"http://e","verdict_temperature":1.0}"#,
+            r#"{"refit":0,"item1":"C","item2":"D","category_probs":[0.6,0.4],"judge_model":"m","judge_endpoint":"http://e","verdict_temperature":1.0,"logprobs":true}"#,
+        ]);
+        let (edges, names, _, _, total, _) = load_edges(f.path());
+        assert_eq!(total, 1);
+        assert_eq!(names, vec!["C", "D"]);
+        assert_eq!(edges.len(), 1);
+    }
+
+    #[test]
+    fn test_skipped_record_leaves_no_phantom_items() {
+        let f = write_jsonl(&[
+            r#"{"refit":0,"items":["Ghost1","Ghost2","Ghost3"],"winner_dist":[0.5,0.3],"judge_model":"m","judge_endpoint":"http://e","verdict_temperature":1.0,"logprobs":true}"#,
+            r#"{"refit":0,"item1":"A","item2":"B","category_probs":[0.7,0.3],"judge_model":"m","judge_endpoint":"http://e","verdict_temperature":1.0,"logprobs":true}"#,
+        ]);
+        let (edges, names, _, _, total, _) = load_edges(f.path());
+        assert_eq!(total, 1);
+        assert_eq!(names, vec!["A", "B"]);
+        assert_eq!(edges.len(), 1);
+    }
+
+    #[test]
+    fn test_skipped_record_leaves_no_phantom_judges() {
+        let f = write_jsonl(&[
+            r#"{"refit":0,"item1":"A","item2":"B","category_probs":[0.0,0.0],"judge_model":"phantom","judge_endpoint":"http://phantom","verdict_temperature":1.0,"logprobs":true}"#,
+            r#"{"refit":0,"item1":"A","item2":"B","category_probs":[0.7,0.3],"judge_model":"real","judge_endpoint":"http://real","verdict_temperature":1.0,"logprobs":true}"#,
+        ]);
+        let (_, _, judges, display_names, total, _) = load_edges(f.path());
+        assert_eq!(total, 1);
+        assert_eq!(judges.len(), 1);
+        assert!(display_names[0].contains("real"));
+    }
+
+    #[test]
+    fn test_malformed_lineup_hashes_skipped() {
+        let f = write_jsonl(&[
+            r#"{"refit":0,"items":["X","Y","Z"],"item_text_hashes":[111,null,333],"winner_dist":[0.5,0.3,0.2],"judge_model":"m","judge_endpoint":"http://e","verdict_temperature":1.0,"logprobs":true}"#,
+            r#"{"refit":0,"item1":"A","item2":"B","category_probs":[0.7,0.3],"judge_model":"m","judge_endpoint":"http://e","verdict_temperature":1.0,"logprobs":true}"#,
+        ]);
+        let (edges, names, _, _, total, _) = load_edges(f.path());
+        assert_eq!(total, 1);
+        assert_eq!(names, vec!["A", "B"]);
+        assert_eq!(edges.len(), 1);
+    }
+
+    #[test]
+    fn test_duplicate_lineup_items_skipped() {
+        let f = write_jsonl(&[
+            r#"{"refit":0,"items":["Same","Same","Other"],"item_text_hashes":[100,100,200],"winner_dist":[0.5,0.3,0.2],"judge_model":"m","judge_endpoint":"http://e","verdict_temperature":1.0,"logprobs":true}"#,
+            r#"{"refit":0,"item1":"A","item2":"B","category_probs":[0.7,0.3],"judge_model":"m","judge_endpoint":"http://e","verdict_temperature":1.0,"logprobs":true}"#,
+        ]);
+        let (edges, names, _, _, total, _) = load_edges(f.path());
+        assert_eq!(total, 1);
+        assert_eq!(names, vec!["A", "B"]);
+        assert_eq!(edges.len(), 1);
+    }
+
+    #[test]
+    fn test_pairwise_self_edge_skipped() {
+        let f = write_jsonl(&[
+            r#"{"refit":0,"item1":"A","item2":"A","item1_text_hash":100,"item2_text_hash":100,"category_probs":[0.7,0.3],"judge_model":"m","judge_endpoint":"http://e","verdict_temperature":1.0,"logprobs":true}"#,
+            r#"{"refit":0,"item1":"C","item2":"D","category_probs":[0.6,0.4],"judge_model":"m","judge_endpoint":"http://e","verdict_temperature":1.0,"logprobs":true}"#,
+        ]);
+        let (edges, names, _, _, total, _) = load_edges(f.path());
+        assert_eq!(total, 1);
+        assert_eq!(names, vec!["C", "D"]);
+        assert_eq!(edges.len(), 1);
+    }
+
+    #[test]
+    fn test_malformed_pairwise_hash_skipped() {
+        let f = write_jsonl(&[
+            r#"{"refit":0,"item1":"A","item2":"B","item1_text_hash":"not_a_number","item2_text_hash":222,"category_probs":[0.7,0.3],"judge_model":"m","judge_endpoint":"http://e","verdict_temperature":1.0,"logprobs":true}"#,
+            r#"{"refit":0,"item1":"C","item2":"D","category_probs":[0.6,0.4],"judge_model":"m","judge_endpoint":"http://e","verdict_temperature":1.0,"logprobs":true}"#,
+        ]);
+        let (edges, names, _, _, total, _) = load_edges(f.path());
+        assert_eq!(total, 1);
+        assert_eq!(names, vec!["C", "D"]);
+        assert_eq!(edges.len(), 1);
+    }
+
+    #[test]
+    fn test_logprobs_mode_not_set_by_skipped_records() {
+        let f = write_jsonl(&[
+            r#"{"refit":0,"item1":"A","item2":"B","category_probs":[0.0,0.0],"judge_model":"m","judge_endpoint":"http://e","verdict_temperature":1.0,"logprobs":true}"#,
+            r#"{"refit":0,"item1":"C","item2":"D","category_probs":[0.6,0.4],"judge_model":"m","judge_endpoint":"http://e","verdict_temperature":1.0,"logprobs":false}"#,
+        ]);
+        let (_, _, _, _, _, logprobs) = load_edges(f.path());
+        assert!(!logprobs);
     }
 
     #[test]

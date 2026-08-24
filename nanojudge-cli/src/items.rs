@@ -123,6 +123,19 @@ pub fn load_items(args: &RankArgs) -> (Vec<String>, Vec<String>) {
         titles = texts.iter().map(|t| title_from_text(t)).collect();
     }
 
+    let mut seen: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
+    for (i, text) in texts.iter().enumerate() {
+        if let Some(&first) = seen.get(text.as_str()) {
+            bail(format!(
+                "Duplicate item text: \"{}\" appears at positions {} and {} (1-indexed)",
+                title_from_text(text),
+                first + 1,
+                i + 1,
+            ));
+        }
+        seen.insert(text, i);
+    }
+
     if texts.len() < 2 {
         bail(format!("Need at least 2 items to rank, got {}", texts.len()));
     }

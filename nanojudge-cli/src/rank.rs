@@ -1,7 +1,7 @@
 use nanojudge_core::{
     Edge, EngineConfig, JudgeInfo, RankingEngine, ScoringOptions,
     JudgementDistribution, calculate_budget,
-    judgements_needed_for_every_item_to_appear_once, run_scoring, winner_dist_to_edges,
+    judgements_needed_for_every_item_to_appear_once, run_scoring, stable_hash, winner_dist_to_edges,
 };
 use nanojudge_core::seed;
 use rand::seq::SliceRandom;
@@ -153,6 +153,7 @@ pub async fn run(args: RankArgs) {
 
     let (titles, texts) = load_items(&args);
     let item_ids: Vec<i64> = (0..texts.len() as i64).collect();
+    let text_hashes: Vec<u64> = texts.iter().map(|t| stable_hash(t)).collect();
 
     // The anchor rank must exist: fail here, before any LLM spend, rather than
     // at the first scoring pass. Only top-heavy uses the anchor.
@@ -518,8 +519,8 @@ pub async fn run(args: RankArgs) {
                                 "refit": refits_run,
                                 "item1": titles[result.item1_id as usize],
                                 "item2": titles[result.item2_id as usize],
-                                "item1_id": result.item1_id,
-                                "item2_id": result.item2_id,
+                                "item1_text_hash": text_hashes[result.item1_id as usize],
+                                "item2_text_hash": text_hashes[result.item2_id as usize],
                                 "category_probs": category_probs,
                                 "judge_model": judge_models[judge_idx],
                                 "judge_endpoint": judge_endpoints[judge_idx],
@@ -560,8 +561,8 @@ pub async fn run(args: RankArgs) {
                                 "refit": refits_run,
                                 "item1": titles[result.item1_id as usize],
                                 "item2": titles[result.item2_id as usize],
-                                "item1_id": result.item1_id,
-                                "item2_id": result.item2_id,
+                                "item1_text_hash": text_hashes[result.item1_id as usize],
+                                "item2_text_hash": text_hashes[result.item2_id as usize],
                                 "judge_model": judge_models[judge_idx],
                                 "judge_endpoint": judge_endpoints[judge_idx],
                                 "temperature": actual_temperature,
@@ -871,6 +872,7 @@ async fn run_lineup_judgements(
 
     let (titles, texts) = load_items(args);
     let item_ids: Vec<i64> = (0..texts.len() as i64).collect();
+    let text_hashes: Vec<u64> = texts.iter().map(|t| stable_hash(t)).collect();
 
     if texts.len() < resolved.lineup_size {
         bail(format!(
@@ -1174,10 +1176,14 @@ async fn run_lineup_judgements(
                                 .iter()
                                 .map(|&id| titles[id as usize].as_str())
                                 .collect();
+                            let lineup_hashes: Vec<u64> = tw.item_ids
+                                .iter()
+                                .map(|&id| text_hashes[id as usize])
+                                .collect();
                             let mut line = serde_json::json!({
                                 "refit": refits_run,
                                 "items": lineup_titles,
-                                "item_ids": tw.item_ids,
+                                "item_text_hashes": lineup_hashes,
                                 "winner_dist": winner_dist,
                                 "judge_model": judge_models[judge_idx],
                                 "judge_endpoint": judge_endpoints[judge_idx],
@@ -1221,10 +1227,14 @@ async fn run_lineup_judgements(
                                 .iter()
                                 .map(|&id| titles[id as usize].as_str())
                                 .collect();
+                            let lineup_hashes: Vec<u64> = tw.item_ids
+                                .iter()
+                                .map(|&id| text_hashes[id as usize])
+                                .collect();
                             let mut line = serde_json::json!({
                                 "refit": refits_run,
                                 "items": lineup_titles,
-                                "item_ids": tw.item_ids,
+                                "item_text_hashes": lineup_hashes,
                                 "judge_model": judge_models[judge_idx],
                                 "judge_endpoint": judge_endpoints[judge_idx],
                                 "temperature": actual_temperature,
