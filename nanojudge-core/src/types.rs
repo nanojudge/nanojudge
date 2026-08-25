@@ -1,17 +1,23 @@
 use std::collections::HashMap;
 
-/// Deterministic FNV-1a hash. Same input → same u64, always.
-///
-/// Rust's `DefaultHasher` (SipHash) is randomized per process to prevent HashDoS,
-/// which means it produces different hashes across runs. We need stable hashes for
-/// judge identity in saved edges, so we use FNV-1a instead.
-pub fn stable_hash(input: &str) -> u64 {
-    let mut hash: u64 = 0xcbf29ce484222325; // FNV offset basis
-    for byte in input.as_bytes() {
-        hash ^= *byte as u64;
-        hash = hash.wrapping_mul(0x100000001b3); // FNV prime
-    }
-    hash
+use crate::sha256::sha256;
+
+fn truncated_sha256(input: &[u8]) -> u64 {
+    let digest = sha256(input);
+    u64::from_be_bytes([
+        digest[0], digest[1], digest[2], digest[3],
+        digest[4], digest[5], digest[6], digest[7],
+    ])
+}
+
+/// Stable identity hash for item text. Truncated SHA-256.
+pub fn item_hash(text: &str) -> u64 {
+    truncated_sha256(format!("item:{text}").as_bytes())
+}
+
+/// Stable identity hash for a judge (endpoint + model). Truncated SHA-256.
+pub fn judge_hash(endpoint: &str, model: &str) -> u64 {
+    truncated_sha256(format!("judge:{endpoint}\0{model}").as_bytes())
 }
 
 /// One edge consumed by the Bradley–Terry scoring model.

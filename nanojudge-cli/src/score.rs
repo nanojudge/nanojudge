@@ -4,7 +4,7 @@ use std::path::Path;
 
 use nanojudge_core::{
     constants::{MAX_LINEUP_SIZE, MIN_LINEUP_SIZE},
-    run_scoring, stable_hash, winner_dist_to_edges, Edge, JudgeInfo, ScoringOptions,
+    run_scoring, judge_hash, winner_dist_to_edges, Edge, JudgeInfo, ScoringOptions,
 };
 
 use crate::args::{OutputFormat, ScoreArgs};
@@ -151,7 +151,7 @@ fn load_edges(
             .unwrap_or_else(|| bail(format!("{}:{}: missing judge_model", path.display(), line_num)));
         let judge_endpoint = record["judge_endpoint"].as_str()
             .unwrap_or_else(|| bail(format!("{}:{}: missing judge_endpoint", path.display(), line_num)));
-        let judge_id = stable_hash(&format!("{judge_endpoint}\0{judge_model}"));
+        let judge_id = judge_hash(judge_endpoint, judge_model);
 
         let verdict_temperature = match record["verdict_temperature"].as_f64() {
             Some(t) if t.is_finite() && t > 0.0 => t,

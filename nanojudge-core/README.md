@@ -9,10 +9,10 @@ Takes edge win probabilities and produces ranked items with confidence intervals
 Items are identified by `i64` IDs — any unique numbers you want. The crate handles internal index mapping.
 
 ```rust
-use nanojudge_core::{run_scoring, Edge, ScoringOptions, JudgeInfo, stable_hash};
+use nanojudge_core::{run_scoring, Edge, ScoringOptions, JudgeInfo, judge_hash};
 
 let item_ids = vec![100, 200, 300];
-let judge_id = stable_hash("my-endpoint/my-model");
+let judge_id = judge_hash("my-endpoint", "my-model");
 
 // category_probs = [P(item1 wins), P(item2 wins)]. new() records that
 // item1 was shown first and item2 second, so scoring can correct for
@@ -49,12 +49,12 @@ For iterative ranking (compare, score, choose the next judgements, repeat):
 ```rust
 use nanojudge_core::{
     RankingEngine, EngineConfig, JudgementDistribution,
-    Edge, run_scoring, ScoringOptions, JudgeInfo, stable_hash,
+    Edge, run_scoring, ScoringOptions, JudgeInfo, judge_hash,
     judgements_needed_for_every_item_to_appear_once, calculate_budget,
 };
 
 let item_ids: Vec<i64> = vec![10, 20, 30, 40];
-let judge_id = stable_hash("my-endpoint/my-model");
+let judge_id = judge_hash("my-endpoint", "my-model");
 let judge_info = JudgeInfo { judge_ids: vec![judge_id], logprobs_mode: false };
 
 let config = EngineConfig {

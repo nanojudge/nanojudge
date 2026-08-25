@@ -18,10 +18,10 @@
 //! # Quick start
 //!
 //! ```rust
-//! use nanojudge_core::{run_scoring, Edge, JudgeInfo, ScoringOptions, stable_hash};
+//! use nanojudge_core::{run_scoring, Edge, JudgeInfo, ScoringOptions, judge_hash};
 //!
 //! let item_ids = vec![100, 200, 300]; // your IDs — any i64 values
-//! let judge_id = stable_hash("http://localhost:8000\0my-model");
+//! let judge_id = judge_hash("http://localhost:8000", "my-model");
 //!
 //! // category_probs = [P(item1 wins), P(item2 wins)]
 //! let edges = vec![
@@ -65,6 +65,7 @@ pub mod laplace_bt;
 pub mod pairing;
 pub mod scoring;
 pub mod seed;
+mod sha256;
 pub mod lineup;
 pub mod types;
 
@@ -81,6 +82,6 @@ pub use pairing::{
 pub use scoring::run_scoring;
 pub use lineup::winner_dist_to_edges;
 pub use types::{
-    stable_hash, Edge, JudgeAnalytics, JudgeInfo, Pair, RankedItem,
+    item_hash, judge_hash, Edge, JudgeAnalytics, JudgeInfo, Pair, RankedItem,
     ScoringOptions, ScoringResult,
 };

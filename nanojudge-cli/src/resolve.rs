@@ -2,7 +2,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use nanojudge_core::constants::{MAX_LINEUP_SIZE, MIN_LINEUP_SIZE};
-use nanojudge_core::{JudgementDistribution, stable_hash};
+use nanojudge_core::{JudgementDistribution, judge_hash};
 
 use crate::args::{ConfigArgs, OutputFormat};
 use crate::bail;
@@ -256,7 +256,7 @@ pub fn resolve_judges(
             jc.model.clone()
         };
 
-        let judge_id = stable_hash(&format!("{}\0{}", jc.endpoint, jc.model));
+        let judge_id = judge_hash(&jc.endpoint, &jc.model);
         let weight = jc.weight.unwrap_or(1.0);
         if !weight.is_finite() || weight <= 0.0 {
             bail(format!("Judge {} has non-positive weight {}. All weights must be > 0.", jc.model, weight));

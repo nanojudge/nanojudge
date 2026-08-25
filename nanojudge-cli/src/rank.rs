@@ -1,7 +1,7 @@
 use nanojudge_core::{
     Edge, EngineConfig, JudgeInfo, RankingEngine, ScoringOptions,
     JudgementDistribution, calculate_budget,
-    judgements_needed_for_every_item_to_appear_once, run_scoring, stable_hash, winner_dist_to_edges,
+    judgements_needed_for_every_item_to_appear_once, run_scoring, item_hash, winner_dist_to_edges,
 };
 use nanojudge_core::seed;
 use rand::seq::SliceRandom;
@@ -153,7 +153,7 @@ pub async fn run(args: RankArgs) {
 
     let (titles, texts) = load_items(&args);
     let item_ids: Vec<i64> = (0..texts.len() as i64).collect();
-    let text_hashes: Vec<u64> = texts.iter().map(|t| stable_hash(t)).collect();
+    let text_hashes: Vec<u64> = texts.iter().map(|t| item_hash(t)).collect();
 
     // The anchor rank must exist: fail here, before any LLM spend, rather than
     // at the first scoring pass. Only top-heavy uses the anchor.
@@ -872,7 +872,7 @@ async fn run_lineup_judgements(
 
     let (titles, texts) = load_items(args);
     let item_ids: Vec<i64> = (0..texts.len() as i64).collect();
-    let text_hashes: Vec<u64> = texts.iter().map(|t| stable_hash(t)).collect();
+    let text_hashes: Vec<u64> = texts.iter().map(|t| item_hash(t)).collect();
 
     if texts.len() < resolved.lineup_size {
         bail(format!(

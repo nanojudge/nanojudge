@@ -122,7 +122,7 @@ nanojudge rank ... --save-successful-judgements --save-failed-judgements
 nanojudge rank ... --save-successful-judgements --include-successful-prompts
 ```
 
-Each successful record is a JSON object with `refit`, `item1`, `item2`, `item1_text_hash`, `item2_text_hash`, `category_probs`, `judge_model`, `judge_endpoint`, `temperature` (the actual value sent to the API, after jitter), `verdict_temperature`, `criterion`, `logprobs`, `retries_used`, `hit_max_tokens`, and `usage` (token counts, when the endpoint provides them). The `item*_text_hash` fields are FNV-1a hashes of the full item text, used as stable identity keys by `nanojudge score`. Prompts and responses are omitted by default; add `--include-successful-prompts` to include them.
+Each successful record is a JSON object with `refit`, `item1`, `item2`, `item1_text_hash`, `item2_text_hash`, `category_probs`, `judge_model`, `judge_endpoint`, `temperature` (the actual value sent to the API, after jitter), `verdict_temperature`, `criterion`, `logprobs`, `retries_used`, `hit_max_tokens`, and `usage` (token counts, when the endpoint provides them). The `item*_text_hash` fields are SHA-256 hashes (truncated to 64 bits) of the full item text, used as stable identity keys by `nanojudge score`. Prompts and responses are omitted by default; add `--include-successful-prompts` to include them.
 
 Failed records always include `prompt` and `response` for debugging, plus the same metadata fields.
 
