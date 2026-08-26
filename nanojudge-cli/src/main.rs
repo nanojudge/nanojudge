@@ -18,6 +18,12 @@ use crate::resolve::{resolve_config, resolve_judges};
 
 const DEFAULT_BENCHMARK_PAIRS: &str = "100";
 
+const DEFAULT_CONFIDENCE_LEVEL: f64 = 0.95;
+const DEFAULT_REGULARIZATION_STRENGTH: f64 = 0.01;
+const DEFAULT_PRIOR_TAU2: f64 = 10.0;
+const DEFAULT_BIAS_PRIOR_TAU2: f64 = 2.0;
+const DEFAULT_BIAS_PRIOR: f64 = 0.5;
+
 pub fn bail(msg: impl std::fmt::Display) -> ! {
     eprintln!("Error: {msg}");
     std::process::exit(1);

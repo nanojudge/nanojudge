@@ -76,6 +76,31 @@ pub(crate) fn temper_verdict_in_place(dist: &mut [f64], temperature: f64) {
     }
 }
 
+fn sort_and_dedup_items(
+    titles: Vec<String>,
+    texts: Vec<String>,
+) -> (Vec<String>, Vec<String>, Vec<String>) {
+    let text_hashes: Vec<String> = texts.iter().map(|t| format!("{:016x}", item_hash(t))).collect();
+
+    let mut order: Vec<usize> = (0..texts.len()).collect();
+    order.sort_by(|&a, &b| text_hashes[a].cmp(&text_hashes[b]));
+    let titles: Vec<String> = order.iter().map(|&i| titles[i].clone()).collect();
+    let texts: Vec<String> = order.iter().map(|&i| texts[i].clone()).collect();
+    let text_hashes: Vec<String> = order.iter().map(|&i| text_hashes[i].clone()).collect();
+
+    for i in 1..text_hashes.len() {
+        if text_hashes[i] == text_hashes[i - 1] {
+            let (a, b) = (order[i - 1] + 1, order[i] + 1);
+            bail(format!(
+                "Items {} and {} have identical text (hash {}). Remove the duplicate.",
+                a.min(b), a.max(b), text_hashes[i],
+            ));
+        }
+    }
+
+    (titles, texts, text_hashes)
+}
+
 /// Parse a criterion file into a list of criteria, splitting on ---CRITERION---.
 fn parse_criteria(content: &str) -> Vec<String> {
     content
@@ -152,8 +177,9 @@ pub async fn run(args: RankArgs) {
     }
 
     let (titles, texts) = load_items(&args);
+    let (titles, texts, text_hashes) = sort_and_dedup_items(titles, texts);
+
     let item_ids: Vec<i64> = (0..texts.len() as i64).collect();
-    let text_hashes: Vec<String> = texts.iter().map(|t| format!("{:016x}", item_hash(t))).collect();
 
     // The anchor rank must exist: fail here, before any LLM spend, rather than
     // at the first scoring pass. Only top-heavy uses the anchor.
@@ -227,11 +253,11 @@ pub async fn run(args: RankArgs) {
     if prompt_template.contains("$name1") || prompt_template.contains("$name2") {
         let mut seen = HashMap::new();
         for (i, title) in titles.iter().enumerate() {
-            if let Some(prev) = seen.insert(title.as_str(), i) {
+            if let Some(_prev) = seen.insert(title.as_str(), i) {
                 bail(format!(
-                    "Template uses $name1/$name2 but items {} and {} have the same name {:?}. \
+                    "Template uses $name1/$name2 but multiple items have the same name {:?}. \
                      Rename one so the LLM can distinguish them in verdict lines.",
-                    prev + 1, i + 1, title,
+                    title,
                 ));
             }
         }
@@ -687,12 +713,12 @@ pub async fn run(args: RankArgs) {
                 &judge_info,
             );
             if resolved.emit_interim_rankings {
-                let order: Vec<String> = interim
+                let ranked_names: Vec<String> = interim
                     .rankings
                     .iter()
                     .map(|r| titles[r.item as usize].clone())
                     .collect();
-                interim_rankings.push((total_judgements, order));
+                interim_rankings.push((total_judgements, ranked_names));
             }
             if matches!(judgement_distribution, JudgementDistribution::TopHeavy) {
                 engine.set_current_posterior(&interim.item_means, &interim.item_stds);
@@ -871,8 +897,9 @@ async fn run_lineup_judgements(
     }
 
     let (titles, texts) = load_items(args);
+    let (titles, texts, text_hashes) = sort_and_dedup_items(titles, texts);
+
     let item_ids: Vec<i64> = (0..texts.len() as i64).collect();
-    let text_hashes: Vec<String> = texts.iter().map(|t| format!("{:016x}", item_hash(t))).collect();
 
     if texts.len() < resolved.lineup_size {
         bail(format!(
@@ -1347,10 +1374,10 @@ async fn run_lineup_judgements(
                 &judge_info,
             );
             if resolved.emit_interim_rankings {
-                let order: Vec<String> = interim.rankings.iter()
+                let ranked_names: Vec<String> = interim.rankings.iter()
                     .map(|r| titles[r.item as usize].clone())
                     .collect();
-                interim_rankings.push((total_judgements, order));
+                interim_rankings.push((total_judgements, ranked_names));
             }
             if matches!(judgement_distribution, JudgementDistribution::TopHeavy) {
                 engine.set_current_posterior(&interim.item_means, &interim.item_stds);

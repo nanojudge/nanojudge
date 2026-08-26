@@ -245,6 +245,10 @@ fn compute_selection_weights(
 /// `item_ids` is the full list of item IDs being ranked. The returned
 /// `selection_weights` (when requested) is in the same order as `item_ids`.
 ///
+/// `judge_info.judge_ids` are sorted internally by value so the internal
+/// index assignment is deterministic regardless of input order. The returned
+/// `judge_analytics` is in ascending `judge_id` order.
+///
 /// # Panics
 ///
 /// Panics if caller-supplied data violates the input contract:
@@ -268,15 +272,22 @@ pub fn run_scoring(
     let id_map = IdMap::from_ids(item_ids);
     let num_items = id_map.len();
 
-    // Build judge_id -> internal index mapping
-    let mut judge_id_to_idx: HashMap<u64, usize> = HashMap::with_capacity(judge_info.judge_ids.len());
-    for (idx, &id) in judge_info.judge_ids.iter().enumerate() {
+    // Sort judge ids so internal index assignment is deterministic regardless
+    // of the order callers supply them.
+    let mut sorted_judge_ids = judge_info.judge_ids.clone();
+    sorted_judge_ids.sort();
+    let mut judge_id_to_idx: HashMap<u64, usize> = HashMap::with_capacity(sorted_judge_ids.len());
+    for (idx, &id) in sorted_judge_ids.iter().enumerate() {
         judge_id_to_idx.insert(id, idx);
     }
 
     let indexed = id_map.convert_edges(edges, &judge_id_to_idx);
 
-    build_scoring_result(&id_map, num_items, &indexed, options, judge_info)
+    let sorted_judge_info = JudgeInfo {
+        judge_ids: sorted_judge_ids,
+        logprobs_mode: judge_info.logprobs_mode,
+    };
+    build_scoring_result(&id_map, num_items, &indexed, options, &sorted_judge_info)
 }
 
 /// Inverse standard-normal CDF for a confidence level, via bisection on

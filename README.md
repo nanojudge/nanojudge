@@ -78,28 +78,28 @@ CLI flags like `--judgements-per-item` override config file values.
 Output with criterion "Which of these fruits is healthiest?":
 
 ```
- # | Item          |   Score | 95% CI Low | 95% CI High | Edges | ID
----|---------------|---------|------------|-------------|-------|----
- 1 | guava         |  6.0797 |       5.54 |        6.73 |    13 | 11
- 2 | raspberries   |  5.3125 |       4.73 |        5.91 |    13 | 14
- 3 | blueberries   |  5.2954 |       4.72 |        5.85 |    11 |  1
- 4 | kiwi          |  3.5773 |       3.02 |        4.15 |    13 |  4
- 5 | pomegranate   |  2.9892 |       2.41 |        3.51 |    13 |  5
- 6 | passion fruit |  2.4649 |       1.90 |        2.99 |    13 |  8
- 7 | mango         |  1.2804 |       0.67 |        1.90 |    12 |  0
- 8 | persimmon     |  0.7152 |       0.17 |        1.21 |    14 | 15
- 9 | pineapple     | -0.0699 |      -0.67 |        0.50 |    13 | 18
-10 | figs          | -0.8494 |      -1.42 |       -0.29 |    13 |  7
-11 | dragon fruit  | -1.2148 |      -1.74 |       -0.65 |    14 |  9
-12 | tangerines    | -1.4400 |      -1.95 |       -0.93 |    13 | 17
-13 | bananas       | -1.7869 |      -2.41 |       -1.21 |    12 | 13
-14 | cherimoya     | -1.9670 |      -2.45 |       -1.43 |    14 | 19
-15 | watermelon    | -2.0843 |      -2.63 |       -1.54 |    13 |  3
-16 | durian        | -2.3493 |      -2.91 |       -1.72 |    14 |  2
-17 | peaches       | -3.2823 |      -3.90 |       -2.65 |    11 | 10
-18 | lychees       | -3.9726 |      -4.51 |       -3.43 |    14 |  6
-19 | coconut       | -4.2377 |      -4.77 |       -3.73 |    14 | 16
-20 | starfruit     | -4.4602 |      -5.00 |       -3.85 |    13 | 12
+ # | Item          |   Score | 95% CI Low | 95% CI High | Edges
+---|---------------|---------|------------|-------------|------
+ 1 | guava         |  6.0797 |       5.54 |        6.73 |    13
+ 2 | raspberries   |  5.3125 |       4.73 |        5.91 |    13
+ 3 | blueberries   |  5.2954 |       4.72 |        5.85 |    11
+ 4 | kiwi          |  3.5773 |       3.02 |        4.15 |    13
+ 5 | pomegranate   |  2.9892 |       2.41 |        3.51 |    13
+ 6 | passion fruit |  2.4649 |       1.90 |        2.99 |    13
+ 7 | mango         |  1.2804 |       0.67 |        1.90 |    12
+ 8 | persimmon     |  0.7152 |       0.17 |        1.21 |    14
+ 9 | pineapple     | -0.0699 |      -0.67 |        0.50 |    13
+10 | figs          | -0.8494 |      -1.42 |       -0.29 |    13
+11 | dragon fruit  | -1.2148 |      -1.74 |       -0.65 |    14
+12 | tangerines    | -1.4400 |      -1.95 |       -0.93 |    13
+13 | bananas       | -1.7869 |      -2.41 |       -1.21 |    12
+14 | cherimoya     | -1.9670 |      -2.45 |       -1.43 |    14
+15 | watermelon    | -2.0843 |      -2.63 |       -1.54 |    13
+16 | durian        | -2.3493 |      -2.91 |       -1.72 |    14
+17 | peaches       | -3.2823 |      -3.90 |       -2.65 |    11
+18 | lychees       | -3.9726 |      -4.51 |       -3.43 |    14
+19 | coconut       | -4.2377 |      -4.77 |       -3.73 |    14
+20 | starfruit     | -4.4602 |      -5.00 |       -3.85 |    13
 ```
 
 Add `--output-format json` for machine-readable output. Add `-v` for progress during execution.
@@ -122,7 +122,7 @@ nanojudge rank ... --save-successful-judgements --save-failed-judgements
 nanojudge rank ... --save-successful-judgements --include-successful-prompts
 ```
 
-Each successful record is a JSON object with `refit`, `item1`, `item2`, `item1_text_hash`, `item2_text_hash`, `category_probs`, `judge_model`, `judge_endpoint`, `temperature` (the actual value sent to the API, after jitter), `verdict_temperature`, `criterion`, `logprobs`, `retries_used`, `hit_max_tokens`, and `usage` (token counts, when the endpoint provides them). The `item*_text_hash` fields are SHA-256 hashes (truncated to 64 bits) of the full item text, used as stable identity keys by `nanojudge score`. Prompts and responses are omitted by default; add `--include-successful-prompts` to include them.
+Each successful record is a JSON object with `refit`, `item1`, `item2`, `item1_text_hash`, `item2_text_hash`, `category_probs`, `judge_model`, `judge_endpoint`, `temperature` (the actual value sent to the API, after jitter), `verdict_temperature`, `criterion`, `logprobs`, `retries_used`, `hit_max_tokens`, and `usage` (token counts, when the endpoint provides them). The `item*_text_hash` fields are SHA-256 hashes (truncated to 64 bits) of the full item text; `nanojudge score` requires them as identity keys and will reject records without them. Prompts and responses are omitted by default; add `--include-successful-prompts` to include them.
 
 Failed records always include `prompt` and `response` for debugging, plus the same metadata fields.
 

@@ -6,7 +6,6 @@ use std::collections::HashMap;
 #[derive(Serialize)]
 struct JsonRankedItem {
     rank: usize,
-    id: i64,
     name: String,
     score: f64,
     lower_bound: f64,
@@ -69,13 +68,13 @@ pub fn print_table(
 
     // Header
     println!(
-        " # | {:<name_width$} |   Score | {:>10} | {:>11} | Edges | ID",
+        " # | {:<name_width$} |   Score | {:>10} | {:>11} | Edges",
         "Item",
         format!("{} Low", ci_label),
         format!("{} High", ci_label),
     );
     println!(
-        "---|-{}-|---------|------------|-------------|-------|----",
+        "---|-{}-|---------|------------|-------------|------",
         "-".repeat(name_width)
     );
 
@@ -84,14 +83,13 @@ pub fn print_table(
         let name = &names[r.item as usize];
         let edges = edge_counts[r.item as usize];
         println!(
-            "{:>2} | {:<name_width$} | {:>7.4} | {:>10.2} | {:>11.2} | {:>5} | {:>2}",
+            "{:>2} | {:<name_width$} | {:>7.4} | {:>10.2} | {:>11.2} | {:>5}",
             i + 1,
             name,
             r.score,
             r.lower_bound,
             r.upper_bound,
             edges,
-            r.item,
         );
     }
 
@@ -305,7 +303,6 @@ fn build_json(
         .enumerate()
         .map(|(i, r)| JsonRankedItem {
             rank: i + 1,
-            id: r.item,
             name: names[r.item as usize].clone(),
             score: r.score,
             lower_bound: r.lower_bound,
@@ -439,12 +436,11 @@ mod tests {
         assert_eq!(items.len(), 3);
 
         assert_eq!(items[0]["rank"], 1);
-        assert_eq!(items[0]["id"], 2);
         assert_eq!(items[0]["name"], "Mango");
         assert_eq!(items[0]["score"], 1.58);
         assert_eq!(items[0]["lower_bound"], 1.20);
         assert_eq!(items[0]["upper_bound"], 1.97);
-        assert_eq!(items[0]["edges"], 33); // item id 2 -> edge_counts[2]
+        assert_eq!(items[0]["edges"], 33);
 
         assert_eq!(items[2]["rank"], 3);
         assert_eq!(items[2]["name"], "Banana");

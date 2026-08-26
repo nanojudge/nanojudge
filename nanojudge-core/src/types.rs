@@ -196,7 +196,7 @@ pub struct ScoringResult {
     /// Together with `item_means`, this feeds uncertainty-integrated matchmaking
     /// via `RankingEngine::set_current_posterior`.
     pub item_stds: Vec<f64>,
-    /// Per-judge analytics. One entry per judge, same order as `JudgeInfo.judge_ids`.
+    /// Per-judge analytics. One entry per judge, in ascending `judge_id` order.
     pub judge_analytics: Vec<JudgeAnalytics>,
     /// Panel-level positional bias: edge-count-weighted average of the
     /// judges' estimated bias probabilities (equal weights when there are no

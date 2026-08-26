@@ -259,7 +259,7 @@ pub async fn run(
 
 /// Render the CLI's JSON `items` array into a human-readable ranking table,
 /// mirroring the CLI's own table columns (rank, item, score, 95% CI, per-item
-/// edge count, id).
+/// edge count).
 fn render_ranking_table(items: &[serde_json::Value]) -> String {
     let name_width = items
         .iter()
@@ -270,23 +270,22 @@ fn render_ranking_table(items: &[serde_json::Value]) -> String {
 
     let mut out = String::new();
     out.push_str(&format!(
-        " # | {:<name_width$} |   Score | 95% CI Low | 95% CI High | Edges | ID\n",
+        " # | {:<name_width$} |   Score | 95% CI Low | 95% CI High | Edges\n",
         "Item",
     ));
     out.push_str(&format!(
-        "---|-{}-|---------|------------|-------------|-------|----\n",
+        "---|-{}-|---------|------------|-------------|------\n",
         "-".repeat(name_width)
     ));
     for it in items {
         out.push_str(&format!(
-            "{:>2} | {:<name_width$} | {:>7.4} | {:>10.2} | {:>11.2} | {:>5} | {:>2}\n",
+            "{:>2} | {:<name_width$} | {:>7.4} | {:>10.2} | {:>11.2} | {:>5}\n",
             it["rank"].as_u64().unwrap_or(0),
             it["name"].as_str().unwrap_or(""),
             it["score"].as_f64().unwrap_or(0.0),
             it["lower_bound"].as_f64().unwrap_or(0.0),
             it["upper_bound"].as_f64().unwrap_or(0.0),
             it["edges"].as_u64().unwrap_or(0),
-            it["id"].as_i64().unwrap_or(0),
         ));
     }
     out

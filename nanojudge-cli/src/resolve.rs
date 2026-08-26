@@ -9,11 +9,16 @@ use crate::bail;
 use crate::config;
 use crate::parse;
 use crate::prompt;
+use crate::{
+    DEFAULT_BIAS_PRIOR, DEFAULT_BIAS_PRIOR_TAU2, DEFAULT_CONFIDENCE_LEVEL, DEFAULT_PRIOR_TAU2,
+    DEFAULT_REGULARIZATION_STRENGTH,
+};
 
 const DEFAULT_CONCURRENCY: usize = 16;
 const DEFAULT_TEMPERATURE_JITTER: f64 = 0.0;
 const DEFAULT_MAX_RETRIES: usize = 3;
 const DEFAULT_ANALYSIS_LENGTH: &str = "2 paragraphs";
+const DEFAULT_TARGET_PRIOR_EDGES: f64 = 5.0;
 // A verdict token written after a reasoning analysis is near-deterministic, so
 // its logprobs read overconfident and get decompressed by default. Without
 // reasoning, the verdict token is the model's first expression of preference
@@ -373,7 +378,7 @@ pub fn resolve_config(shared: &ConfigArgs, cfg: &config::NanojudgeConfig) -> Res
         bail(format!("coverage={selection_coverage}, must be finite and >= 0 (0 disables it)"));
     }
     let target_prior_edges = merge_opt(shared.target_prior_edges, cfg.target_prior_edges, "target-prior-edges")
-        .unwrap_or(5.0);
+        .unwrap_or(DEFAULT_TARGET_PRIOR_EDGES);
     if !target_prior_edges.is_finite() || target_prior_edges < 0.0 {
         bail(format!("target-prior-edges={target_prior_edges}, must be finite and >= 0 (0 disables the blend)"));
     }
@@ -394,14 +399,14 @@ pub fn resolve_config(shared: &ConfigArgs, cfg: &config::NanojudgeConfig) -> Res
         .unwrap_or_else(|| DEFAULT_ANALYSIS_LENGTH.to_string());
 
     let confidence_level = merge_opt(shared.confidence_level, cfg.confidence_level, "confidence-level")
-        .unwrap_or(0.95);
+        .unwrap_or(DEFAULT_CONFIDENCE_LEVEL);
     if !confidence_level.is_finite() || confidence_level <= 0.0 || confidence_level >= 1.0 {
         bail(format!(
             "confidence-level={confidence_level}, must be between 0.0 and 1.0 (exclusive)"
         ));
     }
     let regularization_strength = merge_opt(shared.regularization_strength, cfg.regularization_strength, "regularization-strength")
-        .unwrap_or(0.01);
+        .unwrap_or(DEFAULT_REGULARIZATION_STRENGTH);
     if !regularization_strength.is_finite() || regularization_strength <= 0.0 {
         bail(format!("regularization-strength={regularization_strength}, must be finite and > 0"));
     }
@@ -422,12 +427,12 @@ pub fn resolve_config(shared: &ConfigArgs, cfg: &config::NanojudgeConfig) -> Res
         bail("--judgements-per-refit must be at least 1");
     }
     let prior_tau2 = merge_opt(shared.prior_tau2, cfg.prior_tau2, "prior-tau2")
-        .unwrap_or(10.0);
+        .unwrap_or(DEFAULT_PRIOR_TAU2);
     if !prior_tau2.is_finite() || prior_tau2 <= 0.0 {
         bail(format!("prior-tau2={prior_tau2}, must be finite and > 0"));
     }
     let bias_prior_tau2 = merge_opt(shared.bias_prior_tau2, cfg.bias_prior_tau2, "bias-prior-tau2")
-        .unwrap_or(2.0);
+        .unwrap_or(DEFAULT_BIAS_PRIOR_TAU2);
     if !bias_prior_tau2.is_finite() || bias_prior_tau2 <= 0.0 {
         bail(format!("bias-prior-tau2={bias_prior_tau2}, must be finite and > 0"));
     }
@@ -473,7 +478,7 @@ pub fn resolve_config(shared: &ConfigArgs, cfg: &config::NanojudgeConfig) -> Res
 
     // bias_prior: user specifies in probability space, we convert to logit
     let bias_prior = merge_opt(shared.bias_prior, cfg.bias_prior, "bias-prior")
-        .unwrap_or(0.5);
+        .unwrap_or(DEFAULT_BIAS_PRIOR);
     if !bias_prior.is_finite() || bias_prior <= 0.0 || bias_prior >= 1.0 {
         bail("--bias-prior must be greater than 0.0 and less than 1.0");
     }
