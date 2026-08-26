@@ -153,7 +153,7 @@ pub async fn run(args: RankArgs) {
 
     let (titles, texts) = load_items(&args);
     let item_ids: Vec<i64> = (0..texts.len() as i64).collect();
-    let text_hashes: Vec<u64> = texts.iter().map(|t| item_hash(t)).collect();
+    let text_hashes: Vec<String> = texts.iter().map(|t| format!("{:016x}", item_hash(t))).collect();
 
     // The anchor rank must exist: fail here, before any LLM spend, rather than
     // at the first scoring pass. Only top-heavy uses the anchor.
@@ -872,7 +872,7 @@ async fn run_lineup_judgements(
 
     let (titles, texts) = load_items(args);
     let item_ids: Vec<i64> = (0..texts.len() as i64).collect();
-    let text_hashes: Vec<u64> = texts.iter().map(|t| item_hash(t)).collect();
+    let text_hashes: Vec<String> = texts.iter().map(|t| format!("{:016x}", item_hash(t))).collect();
 
     if texts.len() < resolved.lineup_size {
         bail(format!(
@@ -1176,9 +1176,9 @@ async fn run_lineup_judgements(
                                 .iter()
                                 .map(|&id| titles[id as usize].as_str())
                                 .collect();
-                            let lineup_hashes: Vec<u64> = tw.item_ids
+                            let lineup_hashes: Vec<&str> = tw.item_ids
                                 .iter()
-                                .map(|&id| text_hashes[id as usize])
+                                .map(|&id| text_hashes[id as usize].as_str())
                                 .collect();
                             let mut line = serde_json::json!({
                                 "refit": refits_run,
@@ -1227,9 +1227,9 @@ async fn run_lineup_judgements(
                                 .iter()
                                 .map(|&id| titles[id as usize].as_str())
                                 .collect();
-                            let lineup_hashes: Vec<u64> = tw.item_ids
+                            let lineup_hashes: Vec<&str> = tw.item_ids
                                 .iter()
-                                .map(|&id| text_hashes[id as usize])
+                                .map(|&id| text_hashes[id as usize].as_str())
                                 .collect();
                             let mut line = serde_json::json!({
                                 "refit": refits_run,

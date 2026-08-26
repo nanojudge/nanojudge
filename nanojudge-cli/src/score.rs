@@ -202,10 +202,10 @@ fn load_edges(
                 continue;
             }
 
-            let valid_hashes: Option<Vec<u64>> = record["item_text_hashes"].as_array()
+            let valid_hashes: Option<Vec<&str>> = record["item_text_hashes"].as_array()
                 .and_then(|arr| {
                     if arr.len() != items_arr.len() { return None; }
-                    arr.iter().map(|v| v.as_u64()).collect()
+                    arr.iter().map(|v| v.as_str()).collect()
                 });
             if record.get("item_text_hashes").is_some() && valid_hashes.is_none() {
                 eprintln!("Warning: {}:{}: malformed item_text_hashes, skipping", path.display(), line_num);
@@ -283,7 +283,7 @@ fn load_edges(
             }
 
             let key1 = match record.get("item1_text_hash") {
-                Some(v) => match v.as_u64() {
+                Some(v) => match v.as_str() {
                     Some(h) => format!("h:{h}"),
                     None => {
                         eprintln!("Warning: {}:{}: malformed item1_text_hash, skipping", path.display(), line_num);
@@ -293,7 +293,7 @@ fn load_edges(
                 None => format!("t:{item1_name}"),
             };
             let key2 = match record.get("item2_text_hash") {
-                Some(v) => match v.as_u64() {
+                Some(v) => match v.as_str() {
                     Some(h) => format!("h:{h}"),
                     None => {
                         eprintln!("Warning: {}:{}: malformed item2_text_hash, skipping", path.display(), line_num);
@@ -423,8 +423,8 @@ mod tests {
     #[test]
     fn test_text_hashes_used_for_identity() {
         let f = write_jsonl(&[
-            r#"{"refit":0,"item1":"Long title trun...","item2":"B","item1_text_hash":111,"item2_text_hash":222,"category_probs":[0.7,0.3],"judge_model":"m","judge_endpoint":"http://e","verdict_temperature":1.0,"logprobs":false}"#,
-            r#"{"refit":0,"item1":"Long title trun...","item2":"B","item1_text_hash":333,"item2_text_hash":222,"category_probs":[0.6,0.4],"judge_model":"m","judge_endpoint":"http://e","verdict_temperature":1.0,"logprobs":false}"#,
+            r#"{"refit":0,"item1":"Long title trun...","item2":"B","item1_text_hash":"00000000000000ab","item2_text_hash":"00000000000000cd","category_probs":[0.7,0.3],"judge_model":"m","judge_endpoint":"http://e","verdict_temperature":1.0,"logprobs":false}"#,
+            r#"{"refit":0,"item1":"Long title trun...","item2":"B","item1_text_hash":"00000000000000ef","item2_text_hash":"00000000000000cd","category_probs":[0.6,0.4],"judge_model":"m","judge_endpoint":"http://e","verdict_temperature":1.0,"logprobs":false}"#,
         ]);
         let (edges, names, _, _, total, _) = load_edges(f.path());
         assert_eq!(total, 2);
@@ -520,7 +520,7 @@ mod tests {
     #[test]
     fn test_malformed_lineup_hashes_skipped() {
         let f = write_jsonl(&[
-            r#"{"refit":0,"items":["X","Y","Z"],"item_text_hashes":[111,null,333],"winner_dist":[0.5,0.3,0.2],"judge_model":"m","judge_endpoint":"http://e","verdict_temperature":1.0,"logprobs":true}"#,
+            r#"{"refit":0,"items":["X","Y","Z"],"item_text_hashes":["00000000000000ab",null,"00000000000000cd"],"winner_dist":[0.5,0.3,0.2],"judge_model":"m","judge_endpoint":"http://e","verdict_temperature":1.0,"logprobs":true}"#,
             r#"{"refit":0,"item1":"A","item2":"B","category_probs":[0.7,0.3],"judge_model":"m","judge_endpoint":"http://e","verdict_temperature":1.0,"logprobs":true}"#,
         ]);
         let (edges, names, _, _, total, _) = load_edges(f.path());
@@ -532,7 +532,7 @@ mod tests {
     #[test]
     fn test_duplicate_lineup_items_skipped() {
         let f = write_jsonl(&[
-            r#"{"refit":0,"items":["Same","Same","Other"],"item_text_hashes":[100,100,200],"winner_dist":[0.5,0.3,0.2],"judge_model":"m","judge_endpoint":"http://e","verdict_temperature":1.0,"logprobs":true}"#,
+            r#"{"refit":0,"items":["Same","Same","Other"],"item_text_hashes":["00000000000000ab","00000000000000ab","00000000000000cd"],"winner_dist":[0.5,0.3,0.2],"judge_model":"m","judge_endpoint":"http://e","verdict_temperature":1.0,"logprobs":true}"#,
             r#"{"refit":0,"item1":"A","item2":"B","category_probs":[0.7,0.3],"judge_model":"m","judge_endpoint":"http://e","verdict_temperature":1.0,"logprobs":true}"#,
         ]);
         let (edges, names, _, _, total, _) = load_edges(f.path());
@@ -544,7 +544,7 @@ mod tests {
     #[test]
     fn test_pairwise_self_edge_skipped() {
         let f = write_jsonl(&[
-            r#"{"refit":0,"item1":"A","item2":"A","item1_text_hash":100,"item2_text_hash":100,"category_probs":[0.7,0.3],"judge_model":"m","judge_endpoint":"http://e","verdict_temperature":1.0,"logprobs":true}"#,
+            r#"{"refit":0,"item1":"A","item2":"A","item1_text_hash":"00000000000000ab","item2_text_hash":"00000000000000ab","category_probs":[0.7,0.3],"judge_model":"m","judge_endpoint":"http://e","verdict_temperature":1.0,"logprobs":true}"#,
             r#"{"refit":0,"item1":"C","item2":"D","category_probs":[0.6,0.4],"judge_model":"m","judge_endpoint":"http://e","verdict_temperature":1.0,"logprobs":true}"#,
         ]);
         let (edges, names, _, _, total, _) = load_edges(f.path());
@@ -556,7 +556,7 @@ mod tests {
     #[test]
     fn test_malformed_pairwise_hash_skipped() {
         let f = write_jsonl(&[
-            r#"{"refit":0,"item1":"A","item2":"B","item1_text_hash":"not_a_number","item2_text_hash":222,"category_probs":[0.7,0.3],"judge_model":"m","judge_endpoint":"http://e","verdict_temperature":1.0,"logprobs":true}"#,
+            r#"{"refit":0,"item1":"A","item2":"B","item1_text_hash":111,"item2_text_hash":"00000000000000cd","category_probs":[0.7,0.3],"judge_model":"m","judge_endpoint":"http://e","verdict_temperature":1.0,"logprobs":true}"#,
             r#"{"refit":0,"item1":"C","item2":"D","category_probs":[0.6,0.4],"judge_model":"m","judge_endpoint":"http://e","verdict_temperature":1.0,"logprobs":true}"#,
         ]);
         let (edges, names, _, _, total, _) = load_edges(f.path());
