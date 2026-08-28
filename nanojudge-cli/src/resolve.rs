@@ -23,8 +23,8 @@ const DEFAULT_TARGET_PRIOR_EDGES: f64 = 5.0;
 // its logprobs read overconfident and get decompressed by default. Without
 // reasoning, the verdict token is the model's first expression of preference
 // and its logprobs are left untouched.
-const DEFAULT_VERDICT_TEMPERATURE_REASONING: f64 = 3.0;
-const DEFAULT_VERDICT_TEMPERATURE_NO_REASONING: f64 = 1.0;
+pub(crate) const DEFAULT_VERDICT_TEMPERATURE_REASONING: f64 = 3.0;
+pub(crate) const DEFAULT_VERDICT_TEMPERATURE_NO_REASONING: f64 = 1.0;
 
 /// Merge a CLI value with a config file value. CLI wins.
 /// Warns to stderr if both are set and differ.

@@ -264,6 +264,21 @@ pub struct ScoreArgs {
     #[arg(long)]
     pub bias_prior: Option<f64>,
 
+    /// Temperature applied to each verdict distribution before scoring:
+    /// q^(1/T), which divides every edge's log-odds by T. 1.0 = off;
+    /// values above 1 pull overconfident verdicts toward 50/50; below 1
+    /// sharpens. Default: 3.0 with reasoning, 1.0 without (inferred from
+    /// the JSONL file's reasoning field). Must be finite and > 0.
+    /// Overridden per-judge by --judge-verdict-temperature.
+    #[arg(long)]
+    pub verdict_temperature: Option<f64>,
+
+    /// Per-judge verdict temperature override (repeatable). Format:
+    /// MODEL@ENDPOINT=TEMPERATURE. Overrides --verdict-temperature for
+    /// edges from the matching judge. Must be finite and > 0.
+    #[arg(long)]
+    pub judge_verdict_temperature: Vec<String>,
+
     /// Output format for final results: "table" or "json". Default: table.
     #[arg(long, value_enum)]
     pub output_format: Option<OutputFormat>,
