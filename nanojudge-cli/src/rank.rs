@@ -786,16 +786,22 @@ pub async fn run(args: RankArgs) {
         &judge_info,
     );
 
-    if resolved.verbose {
-        if total_retries > 0 {
-            eprintln!("HTTP retries: {total_retries}");
-        }
-        if failed_http > 0 {
-            eprintln!("HTTP failures: {failed_http}");
-        }
-        if failed_parse > 0 {
-            eprintln!("Unparseable responses: {failed_parse}");
-        }
+    // Failure summary: always printed, not verbose-gated. A degraded run
+    // must be distinguishable from a clean one without extra flags.
+    if judgements_done > 0 {
+        eprintln!(
+            "{} of {} judgements succeeded",
+            total_judgements, judgements_done
+        );
+    }
+    if total_retries > 0 {
+        eprintln!("HTTP retries: {total_retries}");
+    }
+    if failed_http > 0 {
+        eprintln!("HTTP failures: {failed_http}");
+    }
+    if failed_parse > 0 {
+        eprintln!("Unparseable responses: {failed_parse}");
     }
 
     // Print max_tokens warnings (always, not just verbose)
@@ -1439,16 +1445,22 @@ async fn run_lineup_judgements(
         &judge_info,
     );
 
-    if resolved.verbose {
-        if total_retries > 0 {
-            eprintln!("HTTP retries: {total_retries}");
-        }
-        if failed_http > 0 {
-            eprintln!("HTTP failures: {failed_http}");
-        }
-        if failed_parse > 0 {
-            eprintln!("Unparseable rankings: {failed_parse}");
-        }
+    // Failure summary: always printed, not verbose-gated. A degraded run
+    // must be distinguishable from a clean one without extra flags.
+    if judgements_done > 0 {
+        eprintln!(
+            "{} of {} judgements succeeded",
+            total_judgements, judgements_done
+        );
+    }
+    if total_retries > 0 {
+        eprintln!("HTTP retries: {total_retries}");
+    }
+    if failed_http > 0 {
+        eprintln!("HTTP failures: {failed_http}");
+    }
+    if failed_parse > 0 {
+        eprintln!("Unparseable rankings: {failed_parse}");
     }
 
     let judge_names: HashMap<u64, String> = judges.iter()
