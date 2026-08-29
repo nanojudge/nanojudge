@@ -357,6 +357,7 @@ pub async fn run(args: RankArgs) {
         judgement_distribution,
         matchmaking_sharpness: resolved.matchmaking_sharpness,
         min_uniform_edges: resolved.min_uniform_edges,
+        regularization_strength: resolved.regularization_strength,
         seed: resolved.seed,
     };
     let mut engine = RankingEngine::new(&item_ids, engine_config);
@@ -1027,6 +1028,7 @@ async fn run_lineup_judgements(
         judgement_distribution,
         matchmaking_sharpness: resolved.matchmaking_sharpness,
         min_uniform_edges: resolved.min_uniform_edges,
+        regularization_strength: resolved.regularization_strength,
         seed: resolved.seed,
     };
     let mut engine = RankingEngine::new(&item_ids, engine_config);

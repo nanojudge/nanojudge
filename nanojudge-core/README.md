@@ -61,6 +61,7 @@ let config = EngineConfig {
     judgement_distribution: JudgementDistribution::TopHeavy,
     matchmaking_sharpness: 1.0,
     min_uniform_edges: 2,
+    regularization_strength: 0.01,
     seed: None, // Some(n) for reproducible pairing
 };
 

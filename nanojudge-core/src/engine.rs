@@ -29,6 +29,10 @@ pub struct EngineConfig {
     pub judgement_distribution: JudgementDistribution,
     pub matchmaking_sharpness: f64,
     pub min_uniform_edges: usize,
+    /// Ghost-player regularization for the interim BT MLE refits that drive
+    /// uniform-mode matchmaking. Set it to the same value passed to
+    /// `run_scoring` so pairing and scoring regularize alike.
+    pub regularization_strength: f64,
     pub seed: Option<u64>,
 }
 
@@ -233,7 +237,7 @@ impl RankingEngine {
         let indexed: Vec<(usize, usize, f64)> = self.completed_edges.iter().map(|c| {
             (self.id_map.to_idx(c.item1), self.id_map.to_idx(c.item2), matchmaking_win_prob(&c.category_probs))
         }).collect();
-        let mut bt = BradleyTerry::new(num_items, &indexed, 0.01);
+        let mut bt = BradleyTerry::new(num_items, &indexed, self.config.regularization_strength);
         bt.calculate_scores(30);
 
         for i in 0..num_items {
@@ -379,6 +383,7 @@ mod tests {
             judgement_distribution: JudgementDistribution::Uniform,
             matchmaking_sharpness: 1.0,
             min_uniform_edges: 3,
+            regularization_strength: 0.01,
             seed: None,
         };
 
@@ -413,6 +418,7 @@ mod tests {
             judgement_distribution: JudgementDistribution::Uniform,
             matchmaking_sharpness: 1.0,
             min_uniform_edges: 2,
+            regularization_strength: 0.01,
             seed: Some(7),
         };
         let mut engine = RankingEngine::new(&item_ids, config);
@@ -430,6 +436,7 @@ mod tests {
             judgement_distribution: JudgementDistribution::TopHeavy,
             matchmaking_sharpness: 1.0,
             min_uniform_edges: 1,
+            regularization_strength: 0.01,
             seed: Some(11),
         };
         let mut engine = RankingEngine::new(&item_ids, config);
@@ -451,6 +458,7 @@ mod tests {
             judgement_distribution: JudgementDistribution::Uniform,
             matchmaking_sharpness: 1.0,
             min_uniform_edges: 2,
+            regularization_strength: 0.01,
             seed: Some(13),
         };
         let mut engine = RankingEngine::new(&item_ids, config);
@@ -480,6 +488,7 @@ mod tests {
             judgement_distribution: JudgementDistribution::Uniform,
             matchmaking_sharpness: 1.0,
             min_uniform_edges: 3,
+            regularization_strength: 0.01,
             seed: None,
         };
         let mut engine = RankingEngine::new(&item_ids, config);
@@ -504,6 +513,7 @@ mod tests {
             judgement_distribution: JudgementDistribution::Uniform,
             matchmaking_sharpness: 1.0,
             min_uniform_edges: 3,
+            regularization_strength: 0.01,
             seed: None,
         };
         let mut engine = RankingEngine::new(&[1, 2, 3], config);
@@ -517,6 +527,7 @@ mod tests {
             judgement_distribution: JudgementDistribution::Uniform,
             matchmaking_sharpness: 1.0,
             min_uniform_edges: 3,
+            regularization_strength: 0.01,
             seed: None,
         };
         let _ = RankingEngine::new(&[1], config);
@@ -532,6 +543,7 @@ mod tests {
             judgement_distribution: JudgementDistribution::Uniform,
             matchmaking_sharpness: 1.0,
             min_uniform_edges: 3,
+            regularization_strength: 0.01,
             seed: None,
         };
         let mut engine = RankingEngine::new(&item_ids, config);
@@ -546,6 +558,7 @@ mod tests {
             judgement_distribution: JudgementDistribution::Uniform,
             matchmaking_sharpness: 1.0,
             min_uniform_edges: 3,
+            regularization_strength: 0.01,
             seed: None,
         };
         let mut engine = RankingEngine::new(&item_ids, config);
@@ -563,6 +576,7 @@ mod tests {
             judgement_distribution: JudgementDistribution::Uniform,
             matchmaking_sharpness: 1.0,
             min_uniform_edges: 3,
+            regularization_strength: 0.01,
             seed: None,
         };
 
@@ -598,6 +612,7 @@ mod tests {
             judgement_distribution: JudgementDistribution::Uniform,
             matchmaking_sharpness: 1.0,
             min_uniform_edges: 3,
+            regularization_strength: 0.01,
             seed: None,
         };
         let _ = RankingEngine::new(&[1, 2, 1], config);
