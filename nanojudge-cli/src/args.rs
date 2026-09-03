@@ -75,7 +75,7 @@ pub struct ConfigArgs {
     #[arg(long)]
     pub verdict_temperature: Option<f64>,
 
-    /// Judgement distribution: "uniform" or "top-heavy"
+    /// Judgement distribution: "uniform" or "top-heavy". Default: top-heavy.
     #[arg(long)]
     pub judgement_distribution: Option<String>,
 

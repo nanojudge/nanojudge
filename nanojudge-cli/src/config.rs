@@ -106,7 +106,7 @@ const DEFAULT_CONFIG_TEMPLATE: &str = "\
 
 # Judgement distribution: \"uniform\" or \"top-heavy\".
 # Uniform gives equal attention to all items. Top-heavy focuses on contenders.
-# judgement_distribution = \"uniform\"
+# judgement_distribution = \"top-heavy\"
 
 # Number of items in each judged lineup: 2 (default) up to 9.
 # Above 2, each judgement ranks the whole lineup and is folded into one edge per

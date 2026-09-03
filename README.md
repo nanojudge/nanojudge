@@ -141,10 +141,10 @@ Key settings:
 | Setting | Description |
 |---|---|
 | `judgements_per_item` | Average judgements per item. Total budget = `ceil(judgements_per_item * num_items / lineup_size)`. |
-| `judgements_per_refit` | Literal number of judgement attempts scheduled between scoring refits, including during uniform pairing. Defaults to enough scheduled judgements for every item to appear at least once. |
-| `lineup_size` | Items in each judgement. `2` (default) is the pairwise mode everything else is tuned around; up to `9` is supported, where one call ranks the whole lineup. |
-| `logprobs` | `true` to extract logprobs for continuous confidence (requires endpoint support, e.g. vLLM). `false` for text-based verdict parsing (works everywhere, but needs more judgements). |
-| `judgement_distribution` | `"uniform"` (default) or `"top-heavy"`. Top-heavy concentrates judgements on the contenders for the top spots. |
+| `judgements_per_refit` | Number of judgement attempts scheduled between scoring refits, including during uniform pairing. The lower this number is, the more efficient comparisons are, at the cost of slower results (due to having to use a lower number of simultaneous endpoint requests). |
+| `lineup_size` | Items in each judgement. `2` is the default pairwise mode, and up to `9` is supported. |
+| `logprobs` | `true` to extract logprobs for continuous confidence (requires endpoint support, e.g. a local vLLM). `false` for text-based verdict parsing. Use this when available as it gives more information for NanoJudge to estimate strengths with. |
+| `judgement_distribution` | `"uniform"` or `"top-heavy"`. Top-heavy concentrates judgements on the contenders for the top spots. |
 | `selection_sharpness` / `cutoff` | Top-heavy tuning. `selection_sharpness` controls how sharply pairing weight concentrates on items near the anchor (lower = more exploration; default `0.7`). `cutoff` drops items below a minimum uncertainty ratio, keeping at least two (`[0,1)`, default `0` = off). |
 | `anchor_index` | Which rank anchors top-heavy selection, 0-based best-first (default `0` = leader). `9` = 10th-best, for "find the top ten." Fractional values interpolate between adjacent ranks. |
 | `stop_confidence` | Early stop for top-heavy runs: end once the probability that every item is on its correct side of the anchor reaches this value. In `(0.5, 1.0)`, e.g. `0.95`. No default = always use full budget. Top-heavy only. |
@@ -166,24 +166,27 @@ Per-judge settings (in `[[judge]]` blocks):
 
 ## How it works
 
-1. **Lineup judgements** — the engine iteratively selects which lineups to present. A lineup is a pair by default; `lineup_size` can widen it to as many as nine items, in which case the judge ranks them all in one call and the ranking is folded back into pairwise edges. Each judge in the panel evaluates its assigned lineups. With `logprobs = true`, token logprobs give continuous confidence. With `logprobs = false`, verdicts are parsed from the response text.
+Think of it as a tournament. Say you want to rank foods by "which is healthiest?"
 
-2. **Bradley-Terry scoring** — all edge probabilities are combined into global scores using deterministic Laplace inference. Newton-CG finds the posterior mode, while matrix-free inverse-Hessian probes estimate correlation-aware credible intervals without dense O(n²) matrices.
+1. **Every item is a competitor.** Your list of eggs, butter, spinach, olive oil, and the rest enters as players.
 
-3. **Adaptive pairing** — the engine uses previous judgements to select the next lineups, maximizing information gain. Two judgement distributions:
-   - **Uniform**: every item gets equal judgement time (good for full rankings)
-   - **Top-heavy**: focuses judgements on top contenders (good for large lists where you mainly want the best items)
+2. **They face off head-to-head.** NanoJudge puts two items in front of the LLM at a time and asks one focused question: *"Which is healthier, eggs or butter?"* The judge reasons it through and picks a winner. A single run is potentially thousands of these matchups.
 
-4. **Positional bias correction** — LLMs tend to favor whichever option is shown first. The Bradley-Terry fit jointly estimates this bias and corrects for it automatically.
+3. **The matchups are chosen intelligently.** NanoJudge doesn't compare every pair blindly. It uses the results so far to decide what to ask next, spending comparisons where they actually change the outcome. By default it concentrates on sorting the top of the list, since that's usually what you care about. You can switch it to give every item equal attention when you want the whole list ordered evenly.
+
+4. **Wins become a ranking.** All those individual verdicts are combined into one ranking using Bradley-Terry statistics, the method used to rank chess players and sports teams from head-to-head results. It comes with confidence intervals showing how sure it is about each position. Keep winning and you rise; keep losing and you settle to the bottom.
+
+5. **Bias is handled.** LLMs tend to favour whichever option they see first. NanoJudge measures that tendency across the whole run and corrects for it automatically.
 
 ## Recommended models
 
-NanoJudge works with any instruct-tuned model served over an OpenAI-compatible API. These two score near GPT-5 on [Artificial Analysis](https://artificialanalysis.ai) at a fraction of the price:
-
 | Model | Input per 1M | Output per 1M |
 |---|---|---|
-| `deepseek/deepseek-v4-flash` | $0.10 | $0.20 |
+| `deepseek/deepseek-v4-flash-0731` | $0.10 | $0.20 |
 | `google/gemma-4-31b-it` | $0.12 | $0.37 |
+| `z-ai/glm-5.3-flash` | $0.075 | $0.25 |
+| `xiaomi/mimo-v2.5` | $0.119 | $0.238 |
+| `qwen/qwen3.5-9b` | $0.10 | $0.15 |
 
 ## Workspace structure
 
@@ -203,11 +206,11 @@ Computer science already has sorting algorithms for numerical data (e.g. QuickSo
 
 What we've been missing is an engine for subjective criteria - a way to programmatically sort lists by "which is more rewatchable," "which aged the best," or "which code is cleaner."
 
-NanoJudge is **LLM-Sort**. It takes the chaotic, inherently subjective opinions of small, cheap LLMs, runs optimized two-item judgements, and uses Bayesian inference. It is a general-purpose algorithm that turns fuzzy "vibes" into statistically rigorous rankings.
+NanoJudge is **LLM-Sort**. It takes the chaotic, inherently subjective opinions of small, cheap LLMs, runs optimized two-item judgements, and uses Bayesian inference. It is a general-purpose algorithm that turns fuzzy "vibes" into quantified rankings.
 
 ### A coprocessor for agentic systems
 
-This is a fundamental building block for AI architectures. When a large LLM needs to choose between 100+ options, stuffing them into a massive context window is expensive, slow, and prone to "lost in the middle" failures.
+NanoJudge is a fundamental building block for AI. When a large LLM needs to choose between 100+ options, stuffing them into a massive context window is expensive, slow, and prone to "lost in the middle" failures.
 
 Instead, the main LLM can act as the orchestrator: it fetches the candidates, passes the list and the subjective criteria to NanoJudge, uses a much smaller efficient LLM to judge the lineups, and gets back a mathematically grounded ranking.
 

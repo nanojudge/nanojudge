@@ -338,7 +338,7 @@ pub fn resolve_config(shared: &ConfigArgs, cfg: &config::NanojudgeConfig) -> Res
     }
 
     let judgement_distribution_str = merge_opt(shared.judgement_distribution.clone(), cfg.judgement_distribution.clone(), "judgement-distribution")
-        .unwrap_or_else(|| "uniform".to_string());
+        .unwrap_or_else(|| "top-heavy".to_string());
     let judgement_distribution = match judgement_distribution_str.as_str() {
         "uniform" => JudgementDistribution::Uniform,
         "top-heavy" => JudgementDistribution::TopHeavy,
@@ -828,5 +828,13 @@ mod tests {
         let cfg = NanojudgeConfig { stop_confidence: Some(0.9), ..Default::default() };
         let resolved = resolve_config(&cli, &cfg);
         assert_eq!(resolved.stop_confidence, Some(0.99));
+    }
+
+    #[test]
+    fn test_judgement_distribution_defaults_to_top_heavy() {
+        let cli = cli_with_budget();
+        let cfg = NanojudgeConfig::default();
+        let resolved = resolve_config(&cli, &cfg);
+        assert_eq!(resolved.judgement_distribution, JudgementDistribution::TopHeavy);
     }
 }
