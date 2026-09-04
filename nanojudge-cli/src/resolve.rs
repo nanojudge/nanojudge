@@ -263,8 +263,8 @@ pub fn resolve_judges(
 
         let judge_id = judge_hash(&jc.endpoint, &jc.model);
         let weight = jc.weight.unwrap_or(1.0);
-        if !weight.is_finite() || weight <= 0.0 {
-            bail(format!("Judge {} has non-positive weight {}. All weights must be > 0.", jc.model, weight));
+        if !weight.is_finite() || weight < 0.0 {
+            bail(format!("Judge {} has invalid weight {}. Weights must be finite and >= 0.", jc.model, weight));
         }
 
         let min_logprob_coverage = jc.min_logprob_coverage.unwrap_or(global_min_logprob_coverage);
@@ -310,6 +310,10 @@ pub fn resolve_judges(
             judge_id,
             display_name,
         });
+    }
+
+    if judges.iter().map(|j| j.weight).sum::<f64>() <= 0.0 {
+        bail("At least one judge must have positive weight.".to_string());
     }
 
     if !reasoning_enabled {

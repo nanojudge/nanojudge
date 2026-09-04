@@ -319,6 +319,15 @@ pub struct RankArgs {
     #[arg(long = "item")]
     pub inline_items: Vec<String>,
 
+    /// Load a previously saved successful-judgements JSONL file and seed its
+    /// edges before collecting new ones, so new pairings and the final ranking
+    /// build on the prior run. The file must match this run's lineup size and
+    /// logprobs mode, and every judge in it must be a configured judge here (add
+    /// a judge with weight 0 to reuse its data without drawing new comparisons
+    /// from it). The budget still refers to new judgements only.
+    #[arg(long)]
+    pub load_judgements: Option<PathBuf>,
+
     /// Path to config file (default: ~/.config/nanojudge/config.toml)
     #[arg(long)]
     pub config: Option<PathBuf>,

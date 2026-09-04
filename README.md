@@ -128,6 +128,19 @@ Failed records always include `prompt` and `response` for debugging, plus the sa
 
 Lines are flushed immediately so you can `tail -f` during a run.
 
+### Reusing saved judgements
+
+Feed a saved successful-judgements file back into a new run to seed its comparisons before any new ones are collected. The prior edges count toward coverage and matchmaking, so new pairings and the final ranking build on the loaded data:
+
+```bash
+# Seed this run with judgements saved from an earlier one
+nanojudge rank ... --load-judgements results.jsonl
+```
+
+Loaded records are matched to this run by item text hash, so the file's items must be the same as the run's items. Every judge that appears in the file must also be a judge in this run, and a lineup file must match the run's lineup size — mismatches are rejected rather than silently dropped. Edges that reference items not in the run are skipped with a count printed to stderr. If the loaded judgements already satisfy `--stop-confidence`, the run stops before collecting anything and scores the seed directly.
+
+To reuse a judge's saved data without drawing any new comparisons from it, give that judge `weight = 0` in the config: its loaded edges still seed the engine, but it is assigned no new work. At least one judge must have positive weight.
+
 JSONL files store raw verdict probabilities; verdict tempering is applied at scoring time. When re-scoring with `nanojudge score`, pass `--verdict-temperature` to control tempering globally (default: 3.0 with reasoning, 1.0 without, inferred from the file's `reasoning` field), or `--judge-verdict-temperature "model@endpoint=T"` to set per-judge values. Use `--verdict-temperature 1.0` for untempered raw probabilities. If `rank` used a non-default `verdict_temperature` (globally or per-judge), re-pass those values to `score` to reproduce the original ranking — the JSONL does not record them. JSONL files produced before the `reasoning` field was added require `--verdict-temperature` to be passed explicitly.
 
 Runs with `lineup_size` above 2 write a different shape, since a lineup has no fixed number of members: `item1`/`item2` are replaced by an `items` array holding the lineup in presentation order, `item1_text_hash`/`item2_text_hash` by `item_text_hashes`, and `category_probs` by `winner_dist`, the judge's probability that each member of that array won. Pairwise runs are unaffected — a reader written against the two-item shape keeps working for `lineup_size = 2`.

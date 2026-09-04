@@ -81,8 +81,8 @@ pub fn run(args: ScoreArgs) {
         }
     });
 
-    let (edges, item_names, judge_ids, judge_display_names, judge_flag_keys, total_judgements, logprobs_mode, judge_temps_used) =
-        load_edges(path, args.verdict_temperature, &per_judge_temps);
+    let (edges, item_names, judge_ids, judge_display_names, judge_flag_keys, total_judgements, logprobs_mode, judge_temps_used, _) =
+        load_edges(path, args.verdict_temperature, &per_judge_temps, None);
 
     if edges.is_empty() {
         bail("No valid judgements found in the file");
@@ -213,11 +213,16 @@ fn resolve_edge_temperature(
     }
 }
 
-fn load_edges(
+/// `expected_lineup_size`: when `Some(k)`, every record must describe a
+/// `k`-item judgement (pairwise = 2); a differing size is a hard error. This is
+/// how `rank --load-judgements` enforces "loaded file must match the run's
+/// lineup size". `None` (the `score` path) accepts any mix of sizes unchanged.
+pub(crate) fn load_edges(
     path: &Path,
     global_verdict_temperature: Option<f64>,
     per_judge_verdict_temperatures: &HashMap<String, f64>,
-) -> (Vec<Edge>, Vec<String>, Vec<u64>, Vec<String>, Vec<String>, usize, bool, HashMap<u64, f64>) {
+    expected_lineup_size: Option<usize>,
+) -> (Vec<Edge>, Vec<String>, Vec<u64>, Vec<String>, Vec<String>, usize, bool, HashMap<u64, f64>, Vec<String>) {
     let file = std::fs::File::open(path)
         .unwrap_or_else(|e| bail(format!("Failed to open {}: {e}", path.display())));
     let reader = std::io::BufReader::new(file);
@@ -278,6 +283,14 @@ fn load_edges(
             if !(MIN_LINEUP_SIZE..=MAX_LINEUP_SIZE).contains(&items_arr.len()) {
                 eprintln!("Warning: {}:{}: lineup size {} out of range ({}..={}), skipping", path.display(), line_num, items_arr.len(), MIN_LINEUP_SIZE, MAX_LINEUP_SIZE);
                 continue;
+            }
+            if let Some(expected) = expected_lineup_size
+                && items_arr.len() != expected
+            {
+                bail(format!(
+                    "{}:{}: file has a {}-item lineup judgement but this run uses lineup size {}; a loaded file must match the run's lineup size",
+                    path.display(), line_num, items_arr.len(), expected
+                ));
             }
 
             let mut winner_dist: Vec<f64> = winner_dist_arr.iter().map(|v| {
@@ -351,6 +364,14 @@ fn load_edges(
             total_judgements += 1;
         } else if record.get("item1").is_some() {
             // Pairwise record
+            if let Some(expected) = expected_lineup_size
+                && expected != 2
+            {
+                bail(format!(
+                    "{}:{}: file has a pairwise (2-item) judgement but this run uses lineup size {}; a loaded file must match the run's lineup size",
+                    path.display(), line_num, expected
+                ));
+            }
             let item1_name = record["item1"].as_str()
                 .unwrap_or_else(|| bail(format!("{}:{}: missing item1", path.display(), line_num)));
             let item2_name = record["item2"].as_str()
@@ -437,16 +458,26 @@ fn load_edges(
 
     let mut remap = vec![0i64; n];
     let mut sorted_names = Vec::with_capacity(n);
+    let mut sorted_hash_keys = Vec::with_capacity(n);
     for (new_id, &old_id) in order.iter().enumerate() {
         remap[old_id] = new_id as i64;
         sorted_names.push(item_names[old_id].clone());
+        // Identity keys are always "h:{hash}" (see get_or_insert callers). Hand
+        // back the bare hash, in the same order as the returned names/edges, so
+        // `rank` can match loaded items against its own text_hashes.
+        sorted_hash_keys.push(
+            item_keys[old_id]
+                .strip_prefix("h:")
+                .expect("item identity key is always h:-prefixed")
+                .to_string(),
+        );
     }
     for edge in &mut edges {
         edge.item1 = remap[edge.item1 as usize];
         edge.item2 = remap[edge.item2 as usize];
     }
 
-    (edges, sorted_names, judge_id_set, judge_display_names, judge_flag_keys, total_judgements, logprobs_mode, judge_temps_used)
+    (edges, sorted_names, judge_id_set, judge_display_names, judge_flag_keys, total_judgements, logprobs_mode, judge_temps_used, sorted_hash_keys)
 }
 
 fn get_or_insert_item(
@@ -486,7 +517,7 @@ mod tests {
             r#"{"refit":0,"item1":"A","item2":"B","item1_text_hash":"34482beefb0cc992","item2_text_hash":"b0e6004ac03e61d2","category_probs":[0.7,0.3],"judge_model":"m","judge_endpoint":"http://e","logprobs":true}"#,
             r#"{"refit":0,"item1":"B","item2":"C","item1_text_hash":"b0e6004ac03e61d2","item2_text_hash":"9188835ed6d49e09","category_probs":[0.6,0.4],"judge_model":"m","judge_endpoint":"http://e","logprobs":true}"#,
         ]);
-        let (edges, names, judges, _, _, total, logprobs, _) = load_edges(f.path(), Some(1.0), &HashMap::new());
+        let (edges, names, judges, _, _, total, logprobs, _, _) = load_edges(f.path(), Some(1.0), &HashMap::new(), None);
         assert_eq!(edges.len(), 2);
         assert_eq!(names, vec!["A", "C", "B"]);
         assert_eq!(judges.len(), 1);
@@ -496,11 +527,28 @@ mod tests {
     }
 
     #[test]
+    fn test_hash_keys_align_with_names() {
+        let f = write_jsonl(&[
+            r#"{"refit":0,"item1":"A","item2":"B","item1_text_hash":"34482beefb0cc992","item2_text_hash":"b0e6004ac03e61d2","category_probs":[0.7,0.3],"judge_model":"m","judge_endpoint":"http://e","logprobs":true}"#,
+            r#"{"refit":0,"item1":"B","item2":"C","item1_text_hash":"b0e6004ac03e61d2","item2_text_hash":"9188835ed6d49e09","category_probs":[0.6,0.4],"judge_model":"m","judge_endpoint":"http://e","logprobs":true}"#,
+        ]);
+        let (_, names, _, _, _, _, _, _, hash_keys) = load_edges(f.path(), Some(1.0), &HashMap::new(), None);
+        // Names come back hash-sorted (A, C, B); the hash keys must be in that
+        // same order and bare (no "h:" prefix), so an index into one indexes the
+        // other. This is what `rank` relies on to remap loaded items.
+        assert_eq!(names, vec!["A", "C", "B"]);
+        assert_eq!(
+            hash_keys,
+            vec!["34482beefb0cc992", "9188835ed6d49e09", "b0e6004ac03e61d2"]
+        );
+    }
+
+    #[test]
     fn test_load_lineup_edges() {
         let f = write_jsonl(&[
             r#"{"refit":0,"items":["X","Y","Z"],"item_text_hashes":["1e53ad202eec08bb","aed6adde9f66ae60","efbff0fd345d4a0d"],"winner_dist":[0.5,0.3,0.2],"judge_model":"m","judge_endpoint":"http://e","logprobs":true}"#,
         ]);
-        let (edges, names, _, _, _, total, _, _) = load_edges(f.path(), Some(1.0), &HashMap::new());
+        let (edges, names, _, _, _, total, _, _, _) = load_edges(f.path(), Some(1.0), &HashMap::new(), None);
         assert_eq!(names, vec!["X", "Y", "Z"]);
         assert_eq!(total, 1);
         assert!(edges.len() >= 2);
@@ -512,7 +560,7 @@ mod tests {
             r#"{"refit":0,"item1":"A","item2":"B","item1_text_hash":"34482beefb0cc992","item2_text_hash":"b0e6004ac03e61d2","category_probs":[0.7,0.3],"judge_model":"m1","judge_endpoint":"http://e1","logprobs":false}"#,
             r#"{"refit":0,"item1":"A","item2":"B","item1_text_hash":"34482beefb0cc992","item2_text_hash":"b0e6004ac03e61d2","category_probs":[0.4,0.6],"judge_model":"m2","judge_endpoint":"http://e2","logprobs":false}"#,
         ]);
-        let (edges, _, judges, display_names, _, _, _, _) = load_edges(f.path(), Some(1.0), &HashMap::new());
+        let (edges, _, judges, display_names, _, _, _, _, _) = load_edges(f.path(), Some(1.0), &HashMap::new(), None);
         assert_eq!(edges.len(), 2);
         assert_eq!(judges.len(), 2);
         assert_ne!(judges[0], judges[1]);
@@ -525,7 +573,7 @@ mod tests {
         let f = write_jsonl(&[
             r#"{"refit":0,"item1":"A","item2":"B","item1_text_hash":"34482beefb0cc992","item2_text_hash":"b0e6004ac03e61d2","category_probs":[0.9,0.1],"judge_model":"m","judge_endpoint":"http://e","logprobs":true}"#,
         ]);
-        let (edges, _, _, _, _, _, _, _) = load_edges(f.path(), Some(3.0), &HashMap::new());
+        let (edges, _, _, _, _, _, _, _, _) = load_edges(f.path(), Some(3.0), &HashMap::new(), None);
         assert!(edges[0].category_probs[0] < 0.9);
         assert!(edges[0].category_probs[0] > 0.5);
     }
@@ -537,7 +585,7 @@ mod tests {
             r#"{"refit":0,"item1":"A","item2":"B","item1_text_hash":"34482beefb0cc992","item2_text_hash":"b0e6004ac03e61d2","category_probs":[0.7,0.3],"judge_model":"m","judge_endpoint":"http://e","logprobs":false}"#,
             "",
         ]);
-        let (edges, _, _, _, _, total, _, _) = load_edges(f.path(), Some(1.0), &HashMap::new());
+        let (edges, _, _, _, _, total, _, _, _) = load_edges(f.path(), Some(1.0), &HashMap::new(), None);
         assert_eq!(edges.len(), 1);
         assert_eq!(total, 1);
     }
@@ -548,7 +596,7 @@ mod tests {
             r#"{"refit":0,"item1":"Long title trun...","item2":"B","item1_text_hash":"00000000000000ab","item2_text_hash":"00000000000000cd","category_probs":[0.7,0.3],"judge_model":"m","judge_endpoint":"http://e","logprobs":false}"#,
             r#"{"refit":0,"item1":"Long title trun...","item2":"B","item1_text_hash":"00000000000000ef","item2_text_hash":"00000000000000cd","category_probs":[0.6,0.4],"judge_model":"m","judge_endpoint":"http://e","logprobs":false}"#,
         ]);
-        let (edges, names, _, _, _, total, _, _) = load_edges(f.path(), Some(1.0), &HashMap::new());
+        let (edges, names, _, _, _, total, _, _, _) = load_edges(f.path(), Some(1.0), &HashMap::new(), None);
         assert_eq!(total, 2);
         assert_eq!(names.len(), 3);
         assert_eq!(edges[0].item1, 0);
@@ -561,7 +609,7 @@ mod tests {
             r#"{"refit":0,"items":["X"],"winner_dist":[1.0],"judge_model":"m","judge_endpoint":"http://e","logprobs":true}"#,
             r#"{"refit":0,"item1":"A","item2":"B","item1_text_hash":"34482beefb0cc992","item2_text_hash":"b0e6004ac03e61d2","category_probs":[0.7,0.3],"judge_model":"m","judge_endpoint":"http://e","logprobs":true}"#,
         ]);
-        let (edges, names, _, _, _, total, _, _) = load_edges(f.path(), Some(1.0), &HashMap::new());
+        let (edges, names, _, _, _, total, _, _, _) = load_edges(f.path(), Some(1.0), &HashMap::new(), None);
         assert_eq!(total, 1);
         assert_eq!(names, vec!["A", "B"]);
         assert_eq!(edges.len(), 1);
@@ -573,7 +621,7 @@ mod tests {
             r#"{"refit":0,"item1":"A","item2":"B","category_probs":[0.0,0.0],"judge_model":"m","judge_endpoint":"http://e","logprobs":true}"#,
             r#"{"refit":0,"item1":"C","item2":"D","item1_text_hash":"9188835ed6d49e09","item2_text_hash":"3cec0b494074c4b1","category_probs":[0.6,0.4],"judge_model":"m","judge_endpoint":"http://e","logprobs":true}"#,
         ]);
-        let (edges, names, _, _, _, total, _, _) = load_edges(f.path(), Some(1.0), &HashMap::new());
+        let (edges, names, _, _, _, total, _, _, _) = load_edges(f.path(), Some(1.0), &HashMap::new(), None);
         assert_eq!(total, 1);
         assert_eq!(names, vec!["D", "C"]);
         assert_eq!(edges.len(), 1);
@@ -585,7 +633,7 @@ mod tests {
             r#"{"refit":0,"items":["X","Y","Z"],"winner_dist":[0.0,0.0,0.0],"judge_model":"m","judge_endpoint":"http://e","logprobs":true}"#,
             r#"{"refit":0,"item1":"A","item2":"B","item1_text_hash":"34482beefb0cc992","item2_text_hash":"b0e6004ac03e61d2","category_probs":[0.7,0.3],"judge_model":"m","judge_endpoint":"http://e","logprobs":true}"#,
         ]);
-        let (edges, names, _, _, _, total, _, _) = load_edges(f.path(), Some(1.0), &HashMap::new());
+        let (edges, names, _, _, _, total, _, _, _) = load_edges(f.path(), Some(1.0), &HashMap::new(), None);
         assert_eq!(total, 1);
         assert_eq!(names, vec!["A", "B"]);
         assert_eq!(edges.len(), 1);
@@ -597,7 +645,7 @@ mod tests {
             r#"{"refit":0,"item1":"A","item2":"B","category_probs":[0.7,0.3],"judge_model":"m","judge_endpoint":"http://e"}"#,
             r#"{"refit":0,"item1":"C","item2":"D","item1_text_hash":"9188835ed6d49e09","item2_text_hash":"3cec0b494074c4b1","category_probs":[0.6,0.4],"judge_model":"m","judge_endpoint":"http://e","logprobs":true}"#,
         ]);
-        let (edges, names, _, _, _, total, _, _) = load_edges(f.path(), Some(1.0), &HashMap::new());
+        let (edges, names, _, _, _, total, _, _, _) = load_edges(f.path(), Some(1.0), &HashMap::new(), None);
         assert_eq!(total, 1);
         assert_eq!(names, vec!["D", "C"]);
         assert_eq!(edges.len(), 1);
@@ -609,7 +657,7 @@ mod tests {
             r#"{"refit":0,"items":["Ghost1","Ghost2","Ghost3"],"winner_dist":[0.5,0.3],"judge_model":"m","judge_endpoint":"http://e","logprobs":true}"#,
             r#"{"refit":0,"item1":"A","item2":"B","item1_text_hash":"34482beefb0cc992","item2_text_hash":"b0e6004ac03e61d2","category_probs":[0.7,0.3],"judge_model":"m","judge_endpoint":"http://e","logprobs":true}"#,
         ]);
-        let (edges, names, _, _, _, total, _, _) = load_edges(f.path(), Some(1.0), &HashMap::new());
+        let (edges, names, _, _, _, total, _, _, _) = load_edges(f.path(), Some(1.0), &HashMap::new(), None);
         assert_eq!(total, 1);
         assert_eq!(names, vec!["A", "B"]);
         assert_eq!(edges.len(), 1);
@@ -621,7 +669,7 @@ mod tests {
             r#"{"refit":0,"item1":"A","item2":"B","category_probs":[0.0,0.0],"judge_model":"phantom","judge_endpoint":"http://phantom","logprobs":true}"#,
             r#"{"refit":0,"item1":"A","item2":"B","item1_text_hash":"34482beefb0cc992","item2_text_hash":"b0e6004ac03e61d2","category_probs":[0.7,0.3],"judge_model":"real","judge_endpoint":"http://real","logprobs":true}"#,
         ]);
-        let (_, _, judges, display_names, _, total, _, _) = load_edges(f.path(), Some(1.0), &HashMap::new());
+        let (_, _, judges, display_names, _, total, _, _, _) = load_edges(f.path(), Some(1.0), &HashMap::new(), None);
         assert_eq!(total, 1);
         assert_eq!(judges.len(), 1);
         assert!(display_names[0].contains("real"));
@@ -633,7 +681,7 @@ mod tests {
             r#"{"refit":0,"items":["Same","Same","Other"],"item_text_hashes":["4b40ab569b4eb741","4b40ab569b4eb741","2d12788030f6dda9"],"winner_dist":[0.5,0.3,0.2],"judge_model":"m","judge_endpoint":"http://e","logprobs":true}"#,
             r#"{"refit":0,"item1":"A","item2":"B","item1_text_hash":"34482beefb0cc992","item2_text_hash":"b0e6004ac03e61d2","category_probs":[0.7,0.3],"judge_model":"m","judge_endpoint":"http://e","logprobs":true}"#,
         ]);
-        let (edges, names, _, _, _, total, _, _) = load_edges(f.path(), Some(1.0), &HashMap::new());
+        let (edges, names, _, _, _, total, _, _, _) = load_edges(f.path(), Some(1.0), &HashMap::new(), None);
         assert_eq!(total, 1);
         assert_eq!(names, vec!["A", "B"]);
         assert_eq!(edges.len(), 1);
@@ -645,7 +693,7 @@ mod tests {
             r#"{"refit":0,"item1":"A","item2":"A","item1_text_hash":"34482beefb0cc992","item2_text_hash":"34482beefb0cc992","category_probs":[0.7,0.3],"judge_model":"m","judge_endpoint":"http://e","logprobs":true}"#,
             r#"{"refit":0,"item1":"C","item2":"D","item1_text_hash":"9188835ed6d49e09","item2_text_hash":"3cec0b494074c4b1","category_probs":[0.6,0.4],"judge_model":"m","judge_endpoint":"http://e","logprobs":true}"#,
         ]);
-        let (edges, names, _, _, _, total, _, _) = load_edges(f.path(), Some(1.0), &HashMap::new());
+        let (edges, names, _, _, _, total, _, _, _) = load_edges(f.path(), Some(1.0), &HashMap::new(), None);
         assert_eq!(total, 1);
         assert_eq!(names, vec!["D", "C"]);
         assert_eq!(edges.len(), 1);
@@ -657,7 +705,7 @@ mod tests {
             r#"{"refit":0,"item1":"A","item2":"B","category_probs":[0.0,0.0],"judge_model":"m","judge_endpoint":"http://e","logprobs":true}"#,
             r#"{"refit":0,"item1":"C","item2":"D","item1_text_hash":"9188835ed6d49e09","item2_text_hash":"3cec0b494074c4b1","category_probs":[0.6,0.4],"judge_model":"m","judge_endpoint":"http://e","logprobs":false}"#,
         ]);
-        let (_, _, _, _, _, _, logprobs, _) = load_edges(f.path(), Some(1.0), &HashMap::new());
+        let (_, _, _, _, _, _, logprobs, _, _) = load_edges(f.path(), Some(1.0), &HashMap::new(), None);
         assert!(!logprobs);
     }
 
@@ -681,7 +729,7 @@ mod tests {
         let f = write_jsonl(&[
             r#"{"refit":0,"item1":"A","item2":"B","item1_text_hash":"34482beefb0cc992","item2_text_hash":"b0e6004ac03e61d2","category_probs":[0.9,0.1],"judge_model":"m","judge_endpoint":"http://e","logprobs":true,"reasoning":true}"#,
         ]);
-        let (edges, _, _, _, _, _, _, temps) = load_edges(f.path(), None, &HashMap::new());
+        let (edges, _, _, _, _, _, _, temps, _) = load_edges(f.path(), None, &HashMap::new(), None);
         assert!(temps.values().all(|&t| t == 3.0));
         assert!(edges[0].category_probs[0] < 0.9);
     }
@@ -691,7 +739,7 @@ mod tests {
         let f = write_jsonl(&[
             r#"{"refit":0,"item1":"A","item2":"B","item1_text_hash":"34482beefb0cc992","item2_text_hash":"b0e6004ac03e61d2","category_probs":[0.9,0.1],"judge_model":"m","judge_endpoint":"http://e","logprobs":true,"reasoning":false}"#,
         ]);
-        let (edges, _, _, _, _, _, _, temps) = load_edges(f.path(), None, &HashMap::new());
+        let (edges, _, _, _, _, _, _, temps, _) = load_edges(f.path(), None, &HashMap::new(), None);
         assert!(temps.values().all(|&t| t == 1.0));
         assert!((edges[0].category_probs[0] - 0.9).abs() < 1e-9);
     }
@@ -705,7 +753,7 @@ mod tests {
         let mut per_judge = HashMap::new();
         per_judge.insert("m1@http://e1".to_string(), 1.0);
         per_judge.insert("m2@http://e2".to_string(), 3.0);
-        let (edges, _, judges, _, _, _, _, temps) = load_edges(f.path(), None, &per_judge);
+        let (edges, _, judges, _, _, _, _, temps, _) = load_edges(f.path(), None, &per_judge, None);
         assert_eq!(judges.len(), 2);
         let j1 = judge_hash("http://e1", "m1");
         let j2 = judge_hash("http://e2", "m2");
@@ -725,7 +773,7 @@ mod tests {
         ]);
         let mut per_judge = HashMap::new();
         per_judge.insert("m1@http://e1".to_string(), 1.0);
-        let (_, _, _, _, _, _, _, temps) = load_edges(f.path(), Some(3.0), &per_judge);
+        let (_, _, _, _, _, _, _, temps, _) = load_edges(f.path(), Some(3.0), &per_judge, None);
         let j1 = judge_hash("http://e1", "m1");
         let j2 = judge_hash("http://e2", "m2");
         assert_eq!(temps[&j1], 1.0);

@@ -156,6 +156,108 @@ fn assign_judgements_to_judges(
     assignments
 }
 
+/// Load a previously saved judgements file and seed its edges into `engine`
+/// before any new judgements are collected. Enforces the load-time invariants
+/// (matching lineup size — via `load_edges` — plus matching logprobs mode and
+/// every judge present in the current panel), remaps loaded items onto this
+/// run's indices by text hash (skipping any edge whose items are not in the
+/// current run), and records the survivors so they inform pairing and scoring.
+/// Loaded edges are kept out of the judge balancer's ledger by design: this
+/// only ever touches the engine.
+fn seed_prior_edges(
+    engine: &mut RankingEngine,
+    path: &Path,
+    text_hashes: &[String],
+    lineup_size: usize,
+    run_judge_ids: &[u64],
+    run_logprobs_mode: bool,
+    per_judge_verdict_temperatures: &HashMap<String, f64>,
+    verbose: bool,
+) {
+    let (mut edges, _names, file_judge_ids, file_judge_display_names, _flag_keys,
+         total_judgements, file_logprobs_mode, _temps, hash_keys) =
+        crate::score::load_edges(path, None, per_judge_verdict_temperatures, Some(lineup_size));
+
+    if edges.is_empty() {
+        bail(format!("No valid judgements found in {}", path.display()));
+    }
+
+    // Mixing one-hot verdicts (text mode) and full distributions (logprobs mode)
+    // under one global flag is not well-defined, so require an exact match.
+    if file_logprobs_mode != run_logprobs_mode {
+        bail(format!(
+            "{} was saved in {} mode, but this run uses {} mode. Loading requires a matching logprobs mode.",
+            path.display(),
+            if file_logprobs_mode { "logprobs" } else { "text" },
+            if run_logprobs_mode { "logprobs" } else { "text" },
+        ));
+    }
+
+    // Every judge that produced a loaded edge must be a configured judge here, so
+    // its verdict temperature is known and its position bias is estimated during
+    // scoring. To reuse a judge's data without new comparisons, configure it with
+    // weight 0 rather than dropping it.
+    for (i, jid) in file_judge_ids.iter().enumerate() {
+        if !run_judge_ids.contains(jid) {
+            bail(format!(
+                "Loaded file {} contains judge \"{}\", which is not in this run's judge panel. \
+                 Every judge in a loaded file must be a configured judge here. Add it to your \
+                 panel with weight 0 if you don't want new comparisons from it.",
+                path.display(), file_judge_display_names[i],
+            ));
+        }
+    }
+
+    // Remap loaded item indices onto this run's items by text hash. `hash_keys`
+    // is aligned with the loaded edges' item indices; `text_hashes` is this run's
+    // hash-sorted item list, so its position is the engine item id.
+    let hash_to_idx: HashMap<&str, i64> = text_hashes
+        .iter()
+        .enumerate()
+        .map(|(i, h)| (h.as_str(), i as i64))
+        .collect();
+
+    let mut seeded: Vec<Edge> = Vec::with_capacity(edges.len());
+    let mut covered: std::collections::HashSet<i64> = std::collections::HashSet::new();
+    let mut skipped = 0usize;
+    for edge in &mut edges {
+        let h1 = hash_keys[edge.item1 as usize].as_str();
+        let h2 = hash_keys[edge.item2 as usize].as_str();
+        match (hash_to_idx.get(h1), hash_to_idx.get(h2)) {
+            (Some(&i1), Some(&i2)) => {
+                edge.item1 = i1;
+                edge.item2 = i2;
+                covered.insert(i1);
+                covered.insert(i2);
+                seeded.push(*edge);
+            }
+            _ => skipped += 1,
+        }
+    }
+
+    if seeded.is_empty() {
+        bail(format!(
+            "None of the {} loaded judgements in {} reference items in this run. \
+             Check that the file and the item list belong together.",
+            total_judgements, path.display(),
+        ));
+    }
+
+    engine.record_edges(&seeded);
+
+    if verbose {
+        eprintln!(
+            "Loaded {} prior judgements from {} ({} edges seeded, covering {} items, {} judges)",
+            total_judgements, path.display(), seeded.len(), covered.len(), file_judge_ids.len(),
+        );
+    }
+    // Always report a partial loss: silently discarding part of a loaded file
+    // would leave a degraded run indistinguishable from a clean one without -v.
+    if skipped > 0 {
+        eprintln!("{skipped} of {} loaded edges skipped (referenced items not in this run)", edges.len());
+    }
+}
+
 pub async fn run(args: RankArgs) {
     let config_path = args.config.clone().unwrap_or_else(config::config_path);
     let cfg = config::load_config(&config_path);
@@ -362,6 +464,41 @@ pub async fn run(args: RankArgs) {
     };
     let mut engine = RankingEngine::new(&item_ids, engine_config);
 
+    // Seed prior judgements (if any) before the collection loop, so they inform
+    // the very first pairing pass and the final ranking. Kept out of the judge
+    // balancer's ledger — this only touches the engine.
+    if let Some(ref load_path) = args.load_judgements {
+        let per_judge_verdict_temps: HashMap<String, f64> = judges
+            .iter()
+            .map(|j| (format!("{}@{}", j.model, j.endpoint), j.verdict_temperature))
+            .collect();
+        seed_prior_edges(
+            &mut engine,
+            load_path,
+            &text_hashes,
+            resolved.lineup_size,
+            &judge_ids,
+            logprobs_mode,
+            &per_judge_verdict_temps,
+            resolved.verbose,
+        );
+    }
+
+    // Scoring options are constant across refits, so build them once and share
+    // them between the pre-loop priming pass and the per-refit interim scoring.
+    let interim_scoring_options = ScoringOptions {
+        confidence_level: resolved.confidence_level,
+        selection_sharpness,
+        anchor_index: resolved.anchor_index,
+        selection_cutoff: resolved.selection_cutoff,
+        selection_coverage: resolved.selection_coverage,
+        target_prior_edges: resolved.target_prior_edges,
+        regularization_strength: resolved.regularization_strength,
+        prior_tau2: resolved.prior_tau2,
+        bias_prior_tau2: resolved.bias_prior_tau2,
+        bias_prior_logit: resolved.bias_prior_logit,
+    };
+
     let analysis_length = resolved.analysis_length.clone();
     let max_retries = resolved.retries;
 
@@ -401,7 +538,49 @@ pub async fn run(args: RankArgs) {
     let mut refits_run = 0usize;
     let mut judgements_done = 0usize;
 
-    while judgements_done < budget {
+    // Prime the rating state from any seeded edges before the loop. Without this,
+    // the first pairing pass runs matchmaking on flat initial ratings, ignoring
+    // the loaded data entirely on refit 1.
+    if !engine.completed_edges.is_empty() {
+        if matches!(judgement_distribution, JudgementDistribution::TopHeavy) {
+            // Seeding can already push every item past `min_uniform_edges`, so the
+            // first pairing pass would be top-heavy and need `selection_weights` —
+            // normally produced by the first refit's interim scoring, which runs
+            // only after the first `generate_pairs`. Compute them now. And if
+            // `stop_confidence` is set and the seed already meets it, stop before
+            // collecting anything: the loaded data is already conclusive, so the
+            // run scores it and prints the ranking with no new comparisons (this is
+            // the deliberate zero-new case, not a failure).
+            let primed = run_scoring(
+                &item_ids,
+                &engine.completed_edges,
+                &interim_scoring_options,
+                &judge_info,
+            );
+            engine.set_current_posterior(&primed.item_means, &primed.item_stds);
+            if let Some(c) = resolved.stop_confidence {
+                let log_conf = primed.partition_log_confidence
+                    .expect("top-heavy interim scoring always computes selection ratios");
+                if log_conf >= c.ln() {
+                    eprintln!(
+                        "Early stop before collecting: loaded judgements already meet stop_confidence \
+                         (P(every item on its side of the anchor) = {:.1}% >= {:.1}%). \
+                         Collecting no new comparisons.",
+                        log_conf.exp() * 100.0, c * 100.0,
+                    );
+                    early_stop = true;
+                }
+            }
+            engine.selection_weights = primed.selection_weights;
+        } else {
+            // Uniform mode uses `current_ratings` for info-gain matchmaking but
+            // needs no `selection_weights`. A cheap MLE fit over the seed is enough
+            // to make the first pass exploit the loaded data.
+            engine.update_current_ratings();
+        }
+    }
+
+    while !early_stop && judgements_done < budget {
         if cancelled.load(Ordering::Relaxed) {
             break;
         }
@@ -699,18 +878,7 @@ pub async fn run(args: RankArgs) {
             let interim = run_scoring(
                 &item_ids,
                 &engine.completed_edges,
-                &ScoringOptions {
-                    confidence_level: resolved.confidence_level,
-                    selection_sharpness,
-                    anchor_index: resolved.anchor_index,
-                    selection_cutoff: resolved.selection_cutoff,
-                    selection_coverage: resolved.selection_coverage,
-                    target_prior_edges: resolved.target_prior_edges,
-                    regularization_strength: resolved.regularization_strength,
-                    prior_tau2: resolved.prior_tau2,
-                    bias_prior_tau2: resolved.bias_prior_tau2,
-                    bias_prior_logit: resolved.bias_prior_logit,
-                },
+                &interim_scoring_options,
                 &judge_info,
             );
             if resolved.emit_interim_rankings {
@@ -759,7 +927,11 @@ pub async fn run(args: RankArgs) {
         eprintln!("\nCancelled. {} judgements completed before interrupt.", total_judgements);
     }
 
-    if total_judgements == 0 {
+    // Zero new judgements is a failure only when we did not deliberately stop.
+    // A run that stopped before collecting (its loaded data already met
+    // stop_confidence) has seeded edges to score and produces a ranking; a run
+    // where every collected judgement failed has nothing valid and bails.
+    if total_judgements == 0 && !early_stop {
         bail("All judgements failed. No results to score.");
     }
 
@@ -1039,6 +1211,41 @@ async fn run_lineup_judgements(
     };
     let mut engine = RankingEngine::new(&item_ids, engine_config);
 
+    // Seed prior judgements (if any) before the collection loop; same contract
+    // as the pairwise path. The lineup-size guard in load_edges rejects any file
+    // whose judgements are not this run's lineup size.
+    if let Some(ref load_path) = args.load_judgements {
+        let per_judge_verdict_temps: HashMap<String, f64> = judges
+            .iter()
+            .map(|j| (format!("{}@{}", j.model, j.endpoint), j.verdict_temperature))
+            .collect();
+        seed_prior_edges(
+            &mut engine,
+            load_path,
+            &text_hashes,
+            resolved.lineup_size,
+            &judge_ids,
+            logprobs_mode,
+            &per_judge_verdict_temps,
+            resolved.verbose,
+        );
+    }
+
+    // Scoring options are constant across refits, so build them once and share
+    // them between the pre-loop priming pass and the per-refit interim scoring.
+    let interim_scoring_options = ScoringOptions {
+        confidence_level: resolved.confidence_level,
+        selection_sharpness,
+        anchor_index: resolved.anchor_index,
+        selection_cutoff: resolved.selection_cutoff,
+        selection_coverage: resolved.selection_coverage,
+        target_prior_edges: resolved.target_prior_edges,
+        regularization_strength: resolved.regularization_strength,
+        prior_tau2: resolved.prior_tau2,
+        bias_prior_tau2: resolved.bias_prior_tau2,
+        bias_prior_logit: resolved.bias_prior_logit,
+    };
+
     let analysis_length = resolved.analysis_length.clone();
     let max_retries = resolved.retries;
 
@@ -1080,7 +1287,49 @@ async fn run_lineup_judgements(
     let mut refits_run = 0usize;
     let mut judgements_done = 0usize;
 
-    while judgements_done < budget {
+    // Prime the rating state from any seeded edges before the loop. Seeding
+    // can already push every item past `min_uniform_edges`, so the first lineup
+    // pass would be top-heavy and need `selection_weights` — normally produced by
+    // the first refit's interim scoring, which runs only after the first
+    // `generate_lineups`. Without priming, that first pass also runs matchmaking
+    // on flat initial ratings, ignoring the loaded data entirely on refit 1.
+    if !engine.completed_edges.is_empty() {
+        if matches!(judgement_distribution, JudgementDistribution::TopHeavy) {
+            // Compute `selection_weights` now. And if `stop_confidence` is set and
+            // the seed already meets it, stop before collecting anything: the
+            // loaded data is already conclusive, so the run scores it and prints
+            // the ranking with no new comparisons (the deliberate zero-new case,
+            // not a failure).
+            let primed = run_scoring(
+                &item_ids,
+                &engine.completed_edges,
+                &interim_scoring_options,
+                &judge_info,
+            );
+            engine.set_current_posterior(&primed.item_means, &primed.item_stds);
+            if let Some(c) = resolved.stop_confidence {
+                let log_conf = primed.partition_log_confidence
+                    .expect("top-heavy interim scoring always computes selection ratios");
+                if log_conf >= c.ln() {
+                    eprintln!(
+                        "Early stop before collecting: loaded judgements already meet stop_confidence \
+                         (P(every item on its side of the anchor) = {:.1}% >= {:.1}%). \
+                         Collecting no new comparisons.",
+                        log_conf.exp() * 100.0, c * 100.0,
+                    );
+                    early_stop = true;
+                }
+            }
+            engine.selection_weights = primed.selection_weights;
+        } else {
+            // Uniform mode uses `current_ratings` for info-gain matchmaking but
+            // needs no `selection_weights`. A cheap MLE fit over the seed is enough
+            // to make the first pass exploit the loaded data.
+            engine.update_current_ratings();
+        }
+    }
+
+    while !early_stop && judgements_done < budget {
         if cancelled.load(Ordering::Relaxed) {
             break;
         }
@@ -1367,18 +1616,7 @@ async fn run_lineup_judgements(
             let interim = run_scoring(
                 &item_ids,
                 &engine.completed_edges,
-                &ScoringOptions {
-                    confidence_level: resolved.confidence_level,
-                    selection_sharpness,
-                    anchor_index: resolved.anchor_index,
-                    selection_cutoff: resolved.selection_cutoff,
-                    selection_coverage: resolved.selection_coverage,
-                    target_prior_edges: resolved.target_prior_edges,
-                    regularization_strength: resolved.regularization_strength,
-                    prior_tau2: resolved.prior_tau2,
-                    bias_prior_tau2: resolved.bias_prior_tau2,
-                    bias_prior_logit: resolved.bias_prior_logit,
-                },
+                &interim_scoring_options,
                 &judge_info,
             );
             if resolved.emit_interim_rankings {
@@ -1419,7 +1657,11 @@ async fn run_lineup_judgements(
         eprintln!("\nCancelled. {} lineup judgements completed before interrupt.", total_judgements);
     }
 
-    if total_judgements == 0 {
+    // Zero new judgements is a failure only when we did not deliberately stop.
+    // A run that stopped before collecting (its loaded data already met
+    // stop_confidence) has seeded edges to score and produces a ranking; a run
+    // where every collected judgement failed has nothing valid and bails.
+    if total_judgements == 0 && !early_stop {
         bail("All lineup judgements failed. No results to score.");
     }
 
@@ -1619,5 +1861,74 @@ mod tests {
         assert_eq!(cumulative.iter().sum::<usize>(), 9);
         assert!(cumulative[0] >= 4 && cumulative[0] <= 5);
         assert!(cumulative[1] >= 4 && cumulative[1] <= 5);
+    }
+
+    // Hashes of the fixture items A, B, C (truncated SHA-256 of "item:A" etc.),
+    // matching the identity keys the score-side tests use.
+    const HASH_A: &str = "34482beefb0cc992";
+    const HASH_B: &str = "b0e6004ac03e61d2";
+    const HASH_C: &str = "9188835ed6d49e09";
+
+    // Two logprobs-mode pairwise records: A>B and B>C, judged by m@http://e.
+    fn seed_fixture() -> tempfile::NamedTempFile {
+        let mut f = tempfile::NamedTempFile::new().unwrap();
+        writeln!(f, r#"{{"refit":0,"item1":"A","item2":"B","item1_text_hash":"{HASH_A}","item2_text_hash":"{HASH_B}","category_probs":[0.7,0.3],"judge_model":"m","judge_endpoint":"http://e","logprobs":true}}"#).unwrap();
+        writeln!(f, r#"{{"refit":0,"item1":"B","item2":"C","item1_text_hash":"{HASH_B}","item2_text_hash":"{HASH_C}","category_probs":[0.6,0.4],"judge_model":"m","judge_endpoint":"http://e","logprobs":true}}"#).unwrap();
+        f
+    }
+
+    fn seed_test_engine(num_items: usize) -> RankingEngine {
+        let item_ids: Vec<i64> = (0..num_items as i64).collect();
+        RankingEngine::new(&item_ids, EngineConfig {
+            judgement_distribution: JudgementDistribution::Uniform,
+            matchmaking_sharpness: 1.0,
+            min_uniform_edges: 1,
+            regularization_strength: 0.1,
+            seed: Some(0),
+        })
+    }
+
+    #[test]
+    fn test_seed_prior_edges_remaps_onto_run_indices() {
+        let f = seed_fixture();
+        let mut engine = seed_test_engine(3);
+        // Deliberately order this run's items differently from the file's
+        // hash-sorted order so the remap has to actually move indices:
+        // B -> 0, A -> 1, C -> 2.
+        let text_hashes = vec![HASH_B.to_string(), HASH_A.to_string(), HASH_C.to_string()];
+        let judge_id = nanojudge_core::judge_hash("http://e", "m");
+        let mut temps = HashMap::new();
+        temps.insert("m@http://e".to_string(), 1.0);
+
+        seed_prior_edges(&mut engine, f.path(), &text_hashes, 2, &[judge_id], true, &temps, false);
+
+        // Both records load; each pairwise record is one edge.
+        assert_eq!(engine.completed_edges.len(), 2);
+        // A>B remaps to (1, 0); B>C remaps to (0, 2).
+        let a_over_b = engine.completed_edges.iter().find(|e| e.item1 == 1 && e.item2 == 0);
+        let b_over_c = engine.completed_edges.iter().find(|e| e.item1 == 0 && e.item2 == 2);
+        assert!(a_over_b.is_some(), "A>B edge should remap to (1,0)");
+        assert!(b_over_c.is_some(), "B>C edge should remap to (0,2)");
+        // Every seeded edge carries the file judge's id.
+        assert!(engine.completed_edges.iter().all(|e| e.judge_id == judge_id));
+    }
+
+    #[test]
+    fn test_seed_prior_edges_skips_unknown_items() {
+        let f = seed_fixture();
+        let mut engine = seed_test_engine(2);
+        // This run has only A and B; C is absent, so the B>C edge must be
+        // dropped while A>B still seeds.
+        let text_hashes = vec![HASH_A.to_string(), HASH_B.to_string()];
+        let judge_id = nanojudge_core::judge_hash("http://e", "m");
+        let mut temps = HashMap::new();
+        temps.insert("m@http://e".to_string(), 1.0);
+
+        seed_prior_edges(&mut engine, f.path(), &text_hashes, 2, &[judge_id], true, &temps, false);
+
+        // Only A>B survives; it remaps to (0, 1).
+        assert_eq!(engine.completed_edges.len(), 1);
+        assert_eq!(engine.completed_edges[0].item1, 0);
+        assert_eq!(engine.completed_edges[0].item2, 1);
     }
 }
