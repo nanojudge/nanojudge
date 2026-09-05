@@ -154,7 +154,10 @@ pub struct ConfigArgs {
     pub reasoning: Option<bool>,
 
     /// Path to a custom prompt template file.
-    /// The template must contain: $criterion, $option1, $option2
+    /// Pairwise templates must contain $criterion, $option1 and $option2;
+    /// $name1, $name2 and $length are optional. Lineup templates must contain
+    /// $criterion and one $option<letter> per item ($optionA through $optionI);
+    /// $length is optional.
     #[arg(long)]
     pub prompt_template: Option<PathBuf>,
 

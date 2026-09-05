@@ -1057,6 +1057,8 @@ pub async fn run(args: RankArgs) {
             &judge_names,
             &judge_tokens,
             &judge_avg_wall_time,
+            scoring_result.panel_positional_bias,
+            scoring_result.panel_positional_bias_ci,
         ),
     }
 }
@@ -1769,6 +1771,7 @@ async fn run_lineup_judgements(
             &scoring_result.rankings, &titles, &engine.edge_counts, total_judgements,
             resolved.confidence_level, &scoring_result.judge_analytics,
             &judge_names, &judge_tokens, &judge_avg_wall_time,
+            scoring_result.panel_positional_bias, scoring_result.panel_positional_bias_ci,
         ),
     }
 }

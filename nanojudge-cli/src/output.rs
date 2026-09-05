@@ -55,13 +55,15 @@ pub fn print_table(
     judge_names: &HashMap<u64, String>,
     judge_tokens: &HashMap<u64, (u64, u64)>,
     judge_avg_wall_time: &HashMap<u64, f64>,
+    panel_positional_bias: f64,
+    panel_positional_bias_ci: (f64, f64),
 ) {
     let ci_label = format!("{:.0}% CI", confidence_level * 100.0);
 
     // Find the widest item name for padding
     let name_width = rankings
         .iter()
-        .map(|r| names[r.item as usize].len())
+        .map(|r| names[r.item as usize].chars().count())
         .max()
         .unwrap_or(4)
         .max(4); // at least "Item"
@@ -127,6 +129,10 @@ pub fn print_table(
             judge_tokens,
             judge_avg_wall_time,
         );
+        println!(
+            "Panel position bias — estimated: {:.3} [{:.3}, {:.3}] (corrected for in scores, 0.5 = no bias)",
+            panel_positional_bias, panel_positional_bias_ci.0, panel_positional_bias_ci.1,
+        );
     }
 }
 
@@ -151,7 +157,7 @@ fn print_judge_panel_analytics(
     // Find the widest judge name for padding
     let name_width = analytics
         .iter()
-        .map(|ja| judge_names.get(&ja.judge_id).map_or(16, |n| n.len()))
+        .map(|ja| judge_names.get(&ja.judge_id).map_or(16, |n| n.chars().count()))
         .max()
         .unwrap_or(5)
         .max(5); // at least "Judge"
@@ -241,7 +247,7 @@ pub fn print_live_table(
 
     let name_width = show
         .iter()
-        .map(|r| names[r.item as usize].len())
+        .map(|r| names[r.item as usize].chars().count())
         .max()
         .unwrap_or(4)
         .max(4);

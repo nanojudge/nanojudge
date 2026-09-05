@@ -1,10 +1,14 @@
 //! Prompt building for LLM judgements.
 //!
 //! Supports custom prompt templates with variable substitution.
-//! Required variables: $criterion, $option1, $option2
+//! Pairwise templates: $criterion, $option1 and $option2 are required;
+//! $name1, $name2 (item titles) and $length (the analysis-length setting)
+//! are optional. Lineup templates: $criterion and one $option<letter> per
+//! item ($optionA through $optionI) are required; $length is optional.
 //!
 //! If no template is provided, a sensible default is used that produces
-//! a "Verdict: Option <n>" line naming the winning option.
+//! a "Verdict: Option <n>" line (pairwise) or one "<Nth> place is Option
+//! <letter>" line per item (lineup).
 
 use crate::bail;
 use nanojudge_core::constants::{MAX_LINEUP_SIZE, MIN_LINEUP_SIZE};

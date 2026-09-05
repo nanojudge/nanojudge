@@ -85,7 +85,9 @@ const DEFAULT_CONFIG_TEMPLATE: &str = "\
 # concurrency = 16
 
 # Path to a custom prompt template file.
-# The template must contain these variables: $criterion, $option1, $option2
+# Pairwise templates must contain $criterion, $option1 and $option2
+# ($name1, $name2 and $length are optional). Lineup templates must contain
+# $criterion and $optionA through the letter for the lineup size.
 # If not set, the built-in default prompt is used.
 # prompt_template = \"/path/to/my-prompt.txt\"
 

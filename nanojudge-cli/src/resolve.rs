@@ -50,7 +50,7 @@ fn merge_opt<T: PartialEq + std::fmt::Display>(
 pub struct ResolvedConfig {
     pub judgements_per_item: usize,
     pub judgement_distribution: JudgementDistribution,
-    /// Number of items in each judged lineup: 2 or 3.
+    /// Number of items in each judged lineup: 2 (default) up to 9.
     pub lineup_size: usize,
     /// Top-heavy selection sharpness (power applied to each item's uncertainty
     /// ratio around the anchor). Finite and > 0.
@@ -220,7 +220,7 @@ pub fn resolve_judges(
         );
     }
 
-    // Compute display names: model is default, disambiguate with endpoint host if models collide
+    // Compute display names: model is default, disambiguate with the endpoint if models collide
     let mut model_counts: HashMap<String, usize> = HashMap::new();
     for jc in judge_configs {
         *model_counts.entry(jc.model.clone()).or_insert(0) += 1;
@@ -250,13 +250,13 @@ pub fn resolve_judges(
         };
 
         let display_name = if model_counts[&jc.model] > 1 {
-            let host = jc.endpoint
+            // endpoint+model is unique (validated above), so the full endpoint
+            // always disambiguates. The host alone does not when two judges
+            // share a host and differ only by path.
+            let endpoint = jc.endpoint
                 .trim_start_matches("http://")
-                .trim_start_matches("https://")
-                .split('/')
-                .next()
-                .unwrap_or(&jc.endpoint);
-            format!("{} ({})", jc.model, host)
+                .trim_start_matches("https://");
+            format!("{} ({})", jc.model, endpoint)
         } else {
             jc.model.clone()
         };

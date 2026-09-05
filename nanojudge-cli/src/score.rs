@@ -167,6 +167,8 @@ pub fn run(args: ScoreArgs) {
             &judge_name_map,
             &empty_tokens,
             &empty_wall_time,
+            scoring_result.panel_positional_bias,
+            scoring_result.panel_positional_bias_ci,
         ),
     }
 }
