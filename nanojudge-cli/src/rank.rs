@@ -686,6 +686,12 @@ pub async fn run(args: RankArgs) {
         let mut judge_aborted: Vec<usize> = vec![0; judges.len()];
 
         for (pair_result_idx, (handle, handle_judge_idx)) in handles.into_iter().enumerate() {
+            // Once cancelled, every uncollected request is aborted, including
+            // ones that have already finished. Harvesting finished results
+            // would keep only the fast responses from the tail of the batch,
+            // which selects on response length and judge speed and can bias
+            // the fit. Dropping the whole tail keeps the collected set an
+            // unbiased spawn-order prefix.
             if cancelled.load(Ordering::Relaxed) {
                 handle.abort();
                 judge_aborted[handle_judge_idx] += 1;
@@ -837,6 +843,16 @@ pub async fn run(args: RankArgs) {
                     eprintln!("  {} had {} in-flight requests", judge.display_name, judge_aborted[i]);
                 }
             }
+            // Keep the judgements collected before the interrupt: they are
+            // already in the JSONL, and they form a spawn-order prefix of the
+            // batch, so keeping them adds no speed-selected data. Aborted
+            // requests were never attempted, so they do not count toward the
+            // "X of Y succeeded" denominator. Per-judge wall-time stats are
+            // skipped: a partial collection is not comparable to a full one.
+            let aborted: usize = judge_aborted.iter().sum();
+            total_judgements += refit_results.len();
+            judgements_done += pairs.len() - aborted;
+            engine.record_edges(&refit_results);
             break;
         }
 
@@ -1421,6 +1437,12 @@ async fn run_lineup_judgements(
         let mut judge_aborted: Vec<usize> = vec![0; judges.len()];
 
         for (lineup_result_idx, (handle, handle_judge_idx)) in handles.into_iter().enumerate() {
+            // Once cancelled, every uncollected request is aborted, including
+            // ones that have already finished. Harvesting finished results
+            // would keep only the fast responses from the tail of the batch,
+            // which selects on response length and judge speed and can bias
+            // the fit. Dropping the whole tail keeps the collected set an
+            // unbiased spawn-order prefix.
             if cancelled.load(Ordering::Relaxed) {
                 handle.abort();
                 judge_aborted[handle_judge_idx] += 1;
@@ -1580,6 +1602,16 @@ async fn run_lineup_judgements(
                     eprintln!("  {} had {} in-flight requests", judge.display_name, judge_aborted[i]);
                 }
             }
+            // Keep the judgements collected before the interrupt: they are
+            // already in the JSONL, and they form a spawn-order prefix of the
+            // batch, so keeping them adds no speed-selected data. Aborted
+            // requests were never attempted, so they do not count toward the
+            // "X of Y succeeded" denominator. Per-judge wall-time stats are
+            // skipped: a partial collection is not comparable to a full one.
+            let aborted: usize = judge_aborted.iter().sum();
+            total_judgements += calls_before_refit;
+            judgements_done += lineups.len() - aborted;
+            engine.record_edges(&refit_results);
             break;
         }
 
