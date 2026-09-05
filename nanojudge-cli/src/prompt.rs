@@ -19,7 +19,7 @@ Option 2:
 $option2
 
 Instructions:
-Write a $length analysis. Analyse both options before forming a preference. You MUST end your response with one of these lines verbatim:
+Write an analysis ($length). Analyse both options before forming a preference. You MUST end your response with one of these lines verbatim:
 
 Verdict: Option 1
 Verdict: Option 2
@@ -127,12 +127,12 @@ fn size_word(lineup_size: usize) -> &'static str {
 /// $optionA
 /// ...
 /// Instructions:
-/// Write a $length analysis. Analyse all three options before forming a
+/// Write an analysis ($length). Analyse all three options before forming a
 /// preference. You MUST end your response with these three lines, ...
 /// ```
 pub fn default_lineup_template(lineup_size: usize) -> String {
     format!(
-        "{criterion}\n\n{blocks}\n\nInstructions:\nWrite a $length analysis. \
+        "{criterion}\n\n{blocks}\n\nInstructions:\nWrite an analysis ($length). \
 Analyse all {count} options before forming a preference. You MUST end your response \
 with these {count} lines, replacing the placeholder letters with the letter of the \
 option ({letters}):\n\n{lines}\n",
@@ -247,15 +247,13 @@ pub fn load_lineup_template(path: &std::path::Path, lineup_size: usize) -> Strin
 /// `$option2`, `$length`, etc. (common when ranking code) passes through
 /// untouched instead of being recursively substituted.
 pub fn build_prompt(template: &str, criterion: &str, option1: &str, option2: &str, name1: &str, name2: &str, analysis_length: &str) -> String {
-    // Trim trailing "s" from length descriptor for grammar ("3-5 paragraph" not "3-5 paragraphs")
-    let length = analysis_length.trim_end_matches('s');
     let vars: [(&str, &str); 6] = [
         ("$criterion", criterion),
         ("$option1", option1),
         ("$option2", option2),
         ("$name1", name1),
         ("$name2", name2),
-        ("$length", length),
+        ("$length", analysis_length),
     ];
 
     let mut out = String::with_capacity(template.len() + option1.len() + option2.len());
@@ -296,15 +294,13 @@ pub fn build_lineup_prompt(
         "lineup size must be between {MIN_LINEUP_SIZE} and {MAX_LINEUP_SIZE}, got {lineup_size}"
     );
 
-    let length = analysis_length.trim_end_matches('s');
-
     // No variable name is a prefix of another, so substitution order does not
     // affect the result; options are listed first only to read in lineup order.
     let mut vars: Vec<(String, &str)> = (0..lineup_size)
         .map(|i| (option_variable(i), option_texts[i]))
         .collect();
     vars.push(("$criterion".to_string(), criterion));
-    vars.push(("$length".to_string(), length));
+    vars.push(("$length".to_string(), analysis_length));
 
     let options_len: usize = option_texts.iter().map(|o| o.len()).sum();
     let mut out = String::with_capacity(template.len() + options_len);
@@ -370,7 +366,7 @@ Option C:
 $optionC
 
 Instructions:
-Write a $length analysis. Analyse all three options before forming a preference. \
+Write an analysis ($length). Analyse all three options before forming a preference. \
 You MUST end your response with these three lines, replacing the placeholder letters \
 with the letter of the option (A, B, or C):
 
@@ -394,7 +390,7 @@ Third place is Option Z
         assert!(prompt.starts_with("Which is tastier?"));
         assert!(prompt.contains("Option 1:\nPizza"));
         assert!(prompt.contains("Option 2:\nSushi"));
-        assert!(prompt.contains("2 paragraph"));
+        assert!(prompt.contains("Write an analysis (2 paragraphs)."));
         assert!(prompt.contains("Verdict: Option 1"));
         assert!(prompt.contains("Verdict: Option 2"));
     }
@@ -483,7 +479,7 @@ Third place is Option Z
         assert!(prompt.contains("Option C:\nTacos"));
         assert!(prompt.contains("First place is Option X"));
         assert!(prompt.contains("Third place is Option Z"));
-        assert!(prompt.contains("2 paragraph"));
+        assert!(prompt.contains("Write an analysis (2 paragraphs)."));
     }
 
     /// Every option's text lands in its own slot, and no `$option` variable is
