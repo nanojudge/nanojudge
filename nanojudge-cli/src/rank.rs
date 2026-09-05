@@ -36,7 +36,11 @@ fn resolve_save_path(path: &Path, prefix: &str) -> PathBuf {
     if path.is_dir() {
         path.join(format!("{prefix}-{ts}.jsonl"))
     } else {
-        let parent = path.parent().unwrap_or_else(|| Path::new("."));
+        // A bare filename has an empty parent, not None; treat it as ".".
+        let parent = match path.parent() {
+            Some(p) if !p.as_os_str().is_empty() => p,
+            _ => Path::new("."),
+        };
         if !parent.exists() {
             bail(format!("Directory {} does not exist", parent.display()));
         }
@@ -1772,6 +1776,31 @@ async fn run_lineup_judgements(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_resolve_save_path_bare_filename() {
+        // Path::parent() of "x.jsonl" is Some(""), not None. The empty
+        // parent must resolve to "." rather than failing the exists check.
+        let resolved = resolve_save_path(Path::new("x.jsonl"), "judgements");
+        assert_eq!(resolved, PathBuf::from("x.jsonl"));
+    }
+
+    #[test]
+    fn test_resolve_save_path_explicit_file_in_existing_dir() {
+        let dir = std::env::temp_dir();
+        let file = dir.join("nanojudge-resolve-save-path-test.jsonl");
+        let resolved = resolve_save_path(&file, "judgements");
+        assert_eq!(resolved, file);
+    }
+
+    #[test]
+    fn test_resolve_save_path_directory_gets_timestamped_name() {
+        let dir = std::env::temp_dir();
+        let resolved = resolve_save_path(&dir, "judgements");
+        assert_eq!(resolved.parent(), Some(dir.as_path()));
+        let name = resolved.file_name().unwrap().to_str().unwrap();
+        assert!(name.starts_with("judgements-") && name.ends_with(".jsonl"), "{name}");
+    }
 
     #[test]
     fn test_temper_verdict_identity_at_one() {
