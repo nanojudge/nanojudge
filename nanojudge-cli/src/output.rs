@@ -7,6 +7,10 @@ use std::collections::HashMap;
 struct JsonRankedItem {
     rank: usize,
     name: String,
+    /// Truncated SHA-256 of the item text (same value as `item1_text_hash` /
+    /// `item2_text_hash` in the judgement logs). The stable identity of the
+    /// item; `name` is a display title and is not unique.
+    text_hash: String,
     score: f64,
     lower_bound: f64,
     upper_bound: f64,
@@ -297,6 +301,7 @@ fn format_count(n: usize) -> String {
 fn build_json(
     rankings: &[RankedItem],
     names: &[String],
+    hashes: &[String],
     edge_counts: &[usize],
     total_judgements: usize,
     judge_analytics: &[JudgeAnalytics],
@@ -310,6 +315,7 @@ fn build_json(
         .map(|(i, r)| JsonRankedItem {
             rank: i + 1,
             name: names[r.item as usize].clone(),
+            text_hash: hashes[r.item as usize].clone(),
             score: r.score,
             lower_bound: r.lower_bound,
             upper_bound: r.upper_bound,
@@ -356,6 +362,7 @@ fn build_json(
 pub fn print_json(
     rankings: &[RankedItem],
     names: &[String],
+    hashes: &[String],
     edge_counts: &[usize],
     total_judgements: usize,
     judge_analytics: &[JudgeAnalytics],
@@ -368,6 +375,7 @@ pub fn print_json(
         build_json(
             rankings,
             names,
+            hashes,
             edge_counts,
             total_judgements,
             judge_analytics,
@@ -420,10 +428,26 @@ mod tests {
         }]
     }
 
+    fn sample_hashes() -> Vec<String> {
+        vec!["aaaaaaaaaaaaaaaa".into(), "bbbbbbbbbbbbbbbb".into(), "cccccccccccccccc".into()]
+    }
+
+    #[test]
+    fn test_json_items_carry_text_hash() {
+        let (rankings, names) = sample_rankings();
+        let json = build_json(&rankings, &names, &sample_hashes(), &[11, 22, 33], 30, &sample_analytics(), 0.523, (0.481, 0.567), None);
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        let items = parsed["items"].as_array().unwrap();
+        for it in items {
+            let idx = names.iter().position(|n| n == it["name"].as_str().unwrap()).unwrap();
+            assert_eq!(it["text_hash"], sample_hashes()[idx]);
+        }
+    }
+
     #[test]
     fn test_json_contains_all_fields() {
         let (rankings, names) = sample_rankings();
-        let json = build_json(&rankings, &names, &[11, 22, 33], 30, &sample_analytics(), 0.523, (0.481, 0.567), None);
+        let json = build_json(&rankings, &names, &sample_hashes(), &[11, 22, 33], 30, &sample_analytics(), 0.523, (0.481, 0.567), None);
         let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
 
         assert_eq!(parsed["total_judgements"], 30);
@@ -435,7 +459,7 @@ mod tests {
     #[test]
     fn test_json_items_structure() {
         let (rankings, names) = sample_rankings();
-        let json = build_json(&rankings, &names, &[11, 22, 33], 30, &sample_analytics(), 0.523, (0.481, 0.567), None);
+        let json = build_json(&rankings, &names, &sample_hashes(), &[11, 22, 33], 30, &sample_analytics(), 0.523, (0.481, 0.567), None);
         let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
 
         let items = parsed["items"].as_array().unwrap();
@@ -455,7 +479,7 @@ mod tests {
     #[test]
     fn test_json_is_valid() {
         let (rankings, names) = sample_rankings();
-        let json = build_json(&rankings, &names, &[11, 22, 33], 15, &sample_analytics(), 0.523, (0.481, 0.567), None);
+        let json = build_json(&rankings, &names, &sample_hashes(), &[11, 22, 33], 15, &sample_analytics(), 0.523, (0.481, 0.567), None);
         let _: serde_json::Value = serde_json::from_str(&json).unwrap();
     }
 

@@ -1036,6 +1036,7 @@ pub async fn run(args: RankArgs) {
         OutputFormat::Json => output::print_json(
             &scoring_result.rankings,
             &titles,
+            &text_hashes,
             &engine.edge_counts,
             total_judgements,
             &scoring_result.judge_analytics,
@@ -1762,7 +1763,7 @@ async fn run_lineup_judgements(
 
     match resolved.output_format {
         OutputFormat::Json => output::print_json(
-            &scoring_result.rankings, &titles, &engine.edge_counts, total_judgements,
+            &scoring_result.rankings, &titles, &text_hashes, &engine.edge_counts, total_judgements,
             &scoring_result.judge_analytics,
             scoring_result.panel_positional_bias, scoring_result.panel_positional_bias_ci,
             if resolved.emit_interim_rankings { Some(interim_rankings.as_slice()) } else { None },

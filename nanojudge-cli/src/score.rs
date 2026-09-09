@@ -81,7 +81,7 @@ pub fn run(args: ScoreArgs) {
         }
     });
 
-    let (edges, item_names, judge_ids, judge_display_names, judge_flag_keys, total_judgements, logprobs_mode, judge_temps_used, _) =
+    let (edges, item_names, judge_ids, judge_display_names, judge_flag_keys, total_judgements, logprobs_mode, judge_temps_used, item_hashes) =
         load_edges(path, args.verdict_temperature, &per_judge_temps, None);
 
     if edges.is_empty() {
@@ -150,6 +150,7 @@ pub fn run(args: ScoreArgs) {
         OutputFormat::Json => output::print_json(
             &scoring_result.rankings,
             &item_names,
+            &item_hashes,
             &edge_counts,
             total_judgements,
             &scoring_result.judge_analytics,
