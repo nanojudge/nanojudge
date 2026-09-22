@@ -4,13 +4,13 @@ use std::path::Path;
 
 use nanojudge_core::{
     constants::{MAX_LINEUP_SIZE, MIN_LINEUP_SIZE},
-    run_scoring, judge_hash, winner_dist_to_edges, Edge, JudgeInfo, ScoringOptions,
+    run_scoring, judge_hash, lineup_verdict_to_edges, Edge, JudgeInfo, LineupVerdict, ScoringOptions,
 };
 
 use crate::args::{OutputFormat, ScoreArgs};
 use crate::bail;
 use crate::output;
-use crate::rank::{temper_verdict, temper_verdict_in_place};
+use crate::rank::{temper_edges_in_place, temper_verdict};
 use crate::resolve::{DEFAULT_VERDICT_TEMPERATURE_REASONING, DEFAULT_VERDICT_TEMPERATURE_NO_REASONING};
 use crate::{
     DEFAULT_BIAS_PRIOR, DEFAULT_BIAS_PRIOR_TAU2, DEFAULT_CONFIDENCE_LEVEL, DEFAULT_PRIOR_TAU2,
@@ -271,16 +271,16 @@ pub(crate) fn load_edges(
 
         if let Some(items_arr) = record["items"].as_array() {
             // Lineup record
-            let winner_dist_arr = match record["winner_dist"].as_array() {
-                Some(arr) => arr,
-                None => {
-                    eprintln!("Warning: {}:{}: lineup record missing winner_dist, skipping", path.display(), line_num);
+            let (ranking_arr, place_probs_arr) = match (record["ranking"].as_array(), record["place_probs"].as_array()) {
+                (Some(r), Some(p)) => (r, p),
+                _ => {
+                    eprintln!("Warning: {}:{}: lineup record missing ranking/place_probs, skipping", path.display(), line_num);
                     continue;
                 }
             };
 
-            if items_arr.len() != winner_dist_arr.len() {
-                eprintln!("Warning: {}:{}: items/winner_dist length mismatch, skipping", path.display(), line_num);
+            if ranking_arr.len() != items_arr.len() || place_probs_arr.len() + 1 != items_arr.len() {
+                eprintln!("Warning: {}:{}: items/ranking/place_probs length mismatch, skipping", path.display(), line_num);
                 continue;
             }
             if !(MIN_LINEUP_SIZE..=MAX_LINEUP_SIZE).contains(&items_arr.len()) {
@@ -296,16 +296,23 @@ pub(crate) fn load_edges(
                 ));
             }
 
-            let mut winner_dist: Vec<f64> = winner_dist_arr.iter().map(|v| {
+            let ranking: Vec<usize> = ranking_arr.iter().map(|v| {
+                v.as_u64()
+                    .unwrap_or_else(|| bail(format!("{}:{}: non-integer ranking entry", path.display(), line_num)))
+                    as usize
+            }).collect();
+            let place_probs: Vec<f64> = place_probs_arr.iter().map(|v| {
                 v.as_f64()
-                    .unwrap_or_else(|| bail(format!("{}:{}: non-numeric winner_dist entry", path.display(), line_num)))
+                    .unwrap_or_else(|| bail(format!("{}:{}: non-numeric place_probs entry", path.display(), line_num)))
             }).collect();
 
-            let wd_sum: f64 = winner_dist.iter().sum();
-            if !wd_sum.is_finite() || wd_sum <= 0.0 || winner_dist.iter().any(|&p| p < 0.0) {
-                eprintln!("Warning: {}:{}: invalid winner_dist, skipping", path.display(), line_num);
+            let mut placed = vec![false; ranking.len()];
+            let is_permutation = ranking.iter().all(|&i| i < placed.len() && !std::mem::replace(&mut placed[i], true));
+            if !is_permutation || place_probs.iter().any(|p| !(0.0..=1.0).contains(p)) {
+                eprintln!("Warning: {}:{}: invalid lineup verdict, skipping", path.display(), line_num);
                 continue;
             }
+            let verdict = LineupVerdict { ranking, place_probs };
 
             let hashes: Vec<&str> = match record.get("item_text_hashes") {
                 Some(v) => match v.as_array() {
@@ -351,8 +358,6 @@ pub(crate) fn load_edges(
             );
             judge_temps_used.entry(judge_id).or_insert(edge_temp);
 
-            temper_verdict_in_place(&mut winner_dist, edge_temp);
-
             if !judge_id_set.contains(&judge_id) {
                 judge_id_set.push(judge_id);
                 judge_display_names.push(format!("{judge_model} @ {judge_endpoint}"));
@@ -362,7 +367,8 @@ pub(crate) fn load_edges(
                 logprobs_mode = true;
             }
 
-            let lineup_edges = winner_dist_to_edges(&item_ids, &winner_dist, judge_id, line_logprobs);
+            let mut lineup_edges = lineup_verdict_to_edges(&item_ids, &verdict, judge_id);
+            temper_edges_in_place(&mut lineup_edges, edge_temp);
             edges.extend(lineup_edges);
             total_judgements += 1;
         } else if record.get("item1").is_some() {
@@ -549,12 +555,39 @@ mod tests {
     #[test]
     fn test_load_lineup_edges() {
         let f = write_jsonl(&[
-            r#"{"refit":0,"items":["X","Y","Z"],"item_text_hashes":["1e53ad202eec08bb","aed6adde9f66ae60","efbff0fd345d4a0d"],"winner_dist":[0.5,0.3,0.2],"judge_model":"m","judge_endpoint":"http://e","logprobs":true}"#,
+            r#"{"refit":0,"items":["X","Y","Z"],"item_text_hashes":["1e53ad202eec08bb","aed6adde9f66ae60","efbff0fd345d4a0d"],"ranking":[0,1,2],"place_probs":[0.9,0.8],"judge_model":"m","judge_endpoint":"http://e","logprobs":true}"#,
         ]);
         let (edges, names, _, _, _, total, _, _, _) = load_edges(f.path(), Some(1.0), &HashMap::new(), None);
         assert_eq!(names, vec!["X", "Y", "Z"]);
         assert_eq!(total, 1);
-        assert!(edges.len() >= 2);
+        assert_eq!(edges.len(), 3);
+        let y_vs_z = edges.iter().find(|e| (e.item1, e.item2) == (1, 2)).unwrap();
+        assert!((y_vs_z.category_probs[0] - 0.8).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_load_lineup_certain_first_place_keeps_lower_pair() {
+        // X is certain 1st; the Y-vs-Z pick on the 2nd-place line must still
+        // become an edge.
+        let f = write_jsonl(&[
+            r#"{"refit":0,"items":["X","Y","Z"],"item_text_hashes":["1e53ad202eec08bb","aed6adde9f66ae60","efbff0fd345d4a0d"],"ranking":[0,1,2],"place_probs":[1.0,0.8],"judge_model":"m","judge_endpoint":"http://e","logprobs":true}"#,
+        ]);
+        let (edges, _, _, _, _, _, _, _, _) = load_edges(f.path(), Some(1.0), &HashMap::new(), None);
+        assert_eq!(edges.len(), 3);
+        let y_vs_z = edges.iter().find(|e| (e.item1, e.item2) == (1, 2)).unwrap();
+        assert!((y_vs_z.category_probs[0] - 0.8).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_load_lineup_tempers_each_edge() {
+        let f = write_jsonl(&[
+            r#"{"refit":0,"items":["X","Y","Z"],"item_text_hashes":["1e53ad202eec08bb","aed6adde9f66ae60","efbff0fd345d4a0d"],"ranking":[0,1,2],"place_probs":[1.0,0.8],"judge_model":"m","judge_endpoint":"http://e","logprobs":true}"#,
+        ]);
+        let (edges, _, _, _, _, _, _, _, _) = load_edges(f.path(), Some(4.0), &HashMap::new(), None);
+        let y_vs_z = edges.iter().find(|e| (e.item1, e.item2) == (1, 2)).unwrap();
+        let p = y_vs_z.category_probs;
+        let expected = (0.8f64 / 0.2).ln() / 4.0;
+        assert!(((p[0] / p[1]).ln() - expected).abs() < 1e-9);
     }
 
     #[test]
@@ -609,7 +642,7 @@ mod tests {
     #[test]
     fn test_lineup_size_out_of_range_skipped() {
         let f = write_jsonl(&[
-            r#"{"refit":0,"items":["X"],"winner_dist":[1.0],"judge_model":"m","judge_endpoint":"http://e","logprobs":true}"#,
+            r#"{"refit":0,"items":["X"],"ranking":[0],"place_probs":[],"judge_model":"m","judge_endpoint":"http://e","logprobs":true}"#,
             r#"{"refit":0,"item1":"A","item2":"B","item1_text_hash":"34482beefb0cc992","item2_text_hash":"b0e6004ac03e61d2","category_probs":[0.7,0.3],"judge_model":"m","judge_endpoint":"http://e","logprobs":true}"#,
         ]);
         let (edges, names, _, _, _, total, _, _, _) = load_edges(f.path(), Some(1.0), &HashMap::new(), None);
@@ -631,9 +664,12 @@ mod tests {
     }
 
     #[test]
-    fn test_invalid_winner_dist_skipped() {
+    fn test_invalid_lineup_verdict_skipped() {
         let f = write_jsonl(&[
-            r#"{"refit":0,"items":["X","Y","Z"],"winner_dist":[0.0,0.0,0.0],"judge_model":"m","judge_endpoint":"http://e","logprobs":true}"#,
+            r#"{"refit":0,"items":["X","Y","Z"],"ranking":[0,0,2],"place_probs":[0.9,0.8],"judge_model":"m","judge_endpoint":"http://e","logprobs":true}"#,
+            r#"{"refit":0,"items":["X","Y","Z"],"ranking":[0,1,3],"place_probs":[0.9,0.8],"judge_model":"m","judge_endpoint":"http://e","logprobs":true}"#,
+            r#"{"refit":0,"items":["X","Y","Z"],"ranking":[0,1,2],"place_probs":[1.5,0.8],"judge_model":"m","judge_endpoint":"http://e","logprobs":true}"#,
+            r#"{"refit":0,"items":["X","Y","Z"],"ranking":[0,1,2],"place_probs":[0.9,-0.1],"judge_model":"m","judge_endpoint":"http://e","logprobs":true}"#,
             r#"{"refit":0,"item1":"A","item2":"B","item1_text_hash":"34482beefb0cc992","item2_text_hash":"b0e6004ac03e61d2","category_probs":[0.7,0.3],"judge_model":"m","judge_endpoint":"http://e","logprobs":true}"#,
         ]);
         let (edges, names, _, _, _, total, _, _, _) = load_edges(f.path(), Some(1.0), &HashMap::new(), None);
@@ -657,7 +693,7 @@ mod tests {
     #[test]
     fn test_skipped_record_leaves_no_phantom_items() {
         let f = write_jsonl(&[
-            r#"{"refit":0,"items":["Ghost1","Ghost2","Ghost3"],"winner_dist":[0.5,0.3],"judge_model":"m","judge_endpoint":"http://e","logprobs":true}"#,
+            r#"{"refit":0,"items":["Ghost1","Ghost2","Ghost3"],"ranking":[0,1,2],"place_probs":[0.5],"judge_model":"m","judge_endpoint":"http://e","logprobs":true}"#,
             r#"{"refit":0,"item1":"A","item2":"B","item1_text_hash":"34482beefb0cc992","item2_text_hash":"b0e6004ac03e61d2","category_probs":[0.7,0.3],"judge_model":"m","judge_endpoint":"http://e","logprobs":true}"#,
         ]);
         let (edges, names, _, _, _, total, _, _, _) = load_edges(f.path(), Some(1.0), &HashMap::new(), None);
@@ -681,7 +717,7 @@ mod tests {
     #[test]
     fn test_duplicate_lineup_items_skipped() {
         let f = write_jsonl(&[
-            r#"{"refit":0,"items":["Same","Same","Other"],"item_text_hashes":["4b40ab569b4eb741","4b40ab569b4eb741","2d12788030f6dda9"],"winner_dist":[0.5,0.3,0.2],"judge_model":"m","judge_endpoint":"http://e","logprobs":true}"#,
+            r#"{"refit":0,"items":["Same","Same","Other"],"item_text_hashes":["4b40ab569b4eb741","4b40ab569b4eb741","2d12788030f6dda9"],"ranking":[0,1,2],"place_probs":[0.5,0.6],"judge_model":"m","judge_endpoint":"http://e","logprobs":true}"#,
             r#"{"refit":0,"item1":"A","item2":"B","item1_text_hash":"34482beefb0cc992","item2_text_hash":"b0e6004ac03e61d2","category_probs":[0.7,0.3],"judge_model":"m","judge_endpoint":"http://e","logprobs":true}"#,
         ]);
         let (edges, names, _, _, _, total, _, _, _) = load_edges(f.path(), Some(1.0), &HashMap::new(), None);

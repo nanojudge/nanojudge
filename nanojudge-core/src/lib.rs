@@ -80,7 +80,7 @@ pub use pairing::{
     get_effective_judgement_distribution, JudgementDistribution,
 };
 pub use scoring::run_scoring;
-pub use lineup::winner_dist_to_edges;
+pub use lineup::{lineup_verdict_to_edges, LineupVerdict};
 pub use types::{
     item_hash, judge_hash, Edge, JudgeAnalytics, JudgeInfo, Pair, RankedItem,
     ScoringOptions, ScoringResult,

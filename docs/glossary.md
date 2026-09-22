@@ -15,8 +15,10 @@
   belong to that same judgement attempt. A failed or unparseable attempt
   consumes budget but contributes no scoring evidence.
 
-- **Winner distribution**: For a lineup, the judge's probability that each
-  member is the best item. In saved lineup judgements this is `winner_dist`.
+- **Lineup verdict**: For a lineup, the judge's ranking of its members
+  (`ranking`, best first) plus, for every place but the last, the probability
+  the judge gave that place's pick among the members not yet placed
+  (`place_probs`). Text mode records every place probability as 1.
 
 - **Category probabilities** (`category_probs`): An edge's two probabilities,
   `[P(item1 wins), P(item2 wins)]`.
@@ -28,8 +30,8 @@
   A two-item judgement produces one edge. A successful lineup judgement can
   produce up to `lineup_size * (lineup_size - 1) / 2` edges. For example, one
   three-item judgement can produce three edges, and each item is then incident
-  to two of them. A pair whose two winner probabilities are both zero produces
-  no edge.
+  to two of them. A pair is dropped only when the judge's place probabilities
+  leave both of its members with zero chance of the higher place.
 
 - **Edge count**: The number of surviving derived edges involving an item. It is
   not the number of judgements containing that item. Uniform-stage thresholds
@@ -161,8 +163,8 @@
   unrelated to item selection weights and edge weights.
 
 - **Logprobs mode**: Uses token probabilities to recover a continuous verdict
-  distribution. Text mode instead parses the stated winner and produces a
-  one-hot verdict.
+  distribution. Text mode instead parses the stated verdict (the winner of a
+  pair, or the full ranking of a lineup) and produces hard edges.
 
 - **Sampling temperature** (`temperature`): Controls randomness while the LLM
   generates its response.

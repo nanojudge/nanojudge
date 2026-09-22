@@ -48,9 +48,8 @@ pub struct Edge {
     pub judge_id: u64,
     /// Likelihood weight for this edge. Two-item judgements use 1.0. Edges
     /// decomposed from a lineup judgement use `df / k` where `k` is the
-    /// number of surviving edges and `df` depends on verdict provenance:
-    /// `size - 1` for logprobs (full winner-distribution), 1 for text mode
-    /// (winner only). See `lineup::winner_dist_to_edges` for details.
+    /// number of surviving edges and `df` is `size - 1`, one per ranked place
+    /// but the last. See `lineup::lineup_verdict_to_edges` for details.
     pub weight: f64,
 }
 
@@ -211,9 +210,9 @@ pub struct ScoringResult {
 pub type Pair = (i64, i64);
 
 /// An ordered lineup of items presented together in one judgement.
-/// Holds between 2 and 9 caller IDs, in presentation order. Its winner
-/// distribution is folded into edges by
-/// [`crate::lineup::winner_dist_to_edges`].
+/// Holds between 2 and 9 caller IDs, in presentation order. Its judged
+/// ranking is folded into edges by
+/// [`crate::lineup::lineup_verdict_to_edges`].
 pub type Lineup = Vec<i64>;
 
 /// Internal indexed edge (usize indices, not caller IDs).

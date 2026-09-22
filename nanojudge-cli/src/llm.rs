@@ -4,6 +4,7 @@ use crate::parse::{
     parse_lineup_text,
 };
 use crate::prompt::{build_prompt, build_lineup_prompt};
+use nanojudge_core::LineupVerdict;
 use rand::Rng;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
@@ -328,9 +329,9 @@ pub async fn judge_pair(
 pub struct LineupJudgementResult {
     /// The lineup's item IDs, in presentation order (slot A first).
     pub item_ids: Vec<i64>,
-    /// Winner-distribution `[q_A, q_B, ...]` (probability each option is best),
-    /// aligned to `item_ids`. None if the response was unparseable.
-    pub winner_dist: Option<Vec<f64>>,
+    /// The judge's ranking and place probabilities, indexing into `item_ids`.
+    /// None if the response was unparseable.
+    pub verdict: Option<LineupVerdict>,
     pub response_text: String,
     pub prompt: String,
     pub retries_used: usize,
@@ -338,25 +339,25 @@ pub struct LineupJudgementResult {
     pub hit_max_tokens: bool,
 }
 
-/// Send one HTTP request for a lineup judgement and fold the response into a
-/// winner-distribution over the lineup's options. Returns Err only on HTTP/network
-/// failures; an unparseable ranking yields `Ok` with `winner_dist = None`.
+/// Send one HTTP request for a lineup judgement and parse the response into a
+/// verdict over the lineup's options. Returns Err only on HTTP/network
+/// failures; an unparseable ranking yields `Ok` with `verdict = None`.
 async fn send_lineup_judgement_request(
     client: &Client,
     config: &LlmConfig,
     prompt: &str,
     lineup_size: usize,
     min_logprob_coverage: f64,
-) -> Result<(Option<Vec<f64>>, String, Option<Usage>, bool), LlmError> {
+) -> Result<(Option<LineupVerdict>, String, Option<Usage>, bool), LlmError> {
     let (content, logprobs, usage, hit_max_tokens) = send_chat_raw(client, config, prompt).await?;
 
-    let winner_dist = if config.logprobs {
+    let verdict = if config.logprobs {
         parse_lineup(&logprobs, lineup_size, min_logprob_coverage)
     } else {
         parse_lineup_text(&content, lineup_size)
     };
 
-    Ok((winner_dist, content, usage, hit_max_tokens))
+    Ok((verdict, content, usage, hit_max_tokens))
 }
 
 /// Call the LLM to rank a lineup's items, with retries on HTTP errors. Mirrors
@@ -388,10 +389,10 @@ pub async fn judge_lineup(
     let mut last_err = String::new();
     for attempt in 0..=max_retries {
         match send_lineup_judgement_request(client, config, &prompt, lineup_size, min_logprob_coverage).await {
-            Ok((winner_dist, content, usage, hit_max_tokens)) => {
+            Ok((verdict, content, usage, hit_max_tokens)) => {
                 return Ok(LineupJudgementResult {
                     item_ids: item_ids.to_vec(),
-                    winner_dist,
+                    verdict,
                     response_text: content,
                     prompt: prompt.clone(),
                     retries_used: attempt,

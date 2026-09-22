@@ -160,7 +160,7 @@ impl RankingEngine {
     /// Generate `lineups_count` lineups of `lineup_size` items each,
     /// using the current effective distribution. The lineup analogue of
     /// `generate_pairs`. Each lineup receives one judgement, then is folded into
-    /// edges by the caller via `lineup::winner_dist_to_edges` before being fed
+    /// edges by the caller via `lineup::lineup_verdict_to_edges` before being fed
     /// back through `record_edges`.
     ///
     /// # Panics

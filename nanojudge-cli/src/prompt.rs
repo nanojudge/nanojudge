@@ -56,8 +56,8 @@ const REQUIRED_VARIABLES_NO_REASONING: &[&str] = &["$criterion", "$option1", "$o
 // rather than something the tool papers over.
 //
 // The judge ranks every option (first place through last); the parser reads the
-// trailing "Option <letter>" lines and folds them into a winner-distribution
-// that feeds `winner_dist_to_edges`.
+// trailing "Option <letter>" lines into a `LineupVerdict` (the ranking plus
+// each place's pick probability) that feeds `lineup_verdict_to_edges`.
 
 /// Option letters, in presentation order. Index 0 is slot A.
 pub const OPTION_LETTERS: [char; MAX_LINEUP_SIZE] =

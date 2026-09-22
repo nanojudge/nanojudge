@@ -749,7 +749,7 @@ pub(crate) fn generate_top_heavy_pairings_indexed(
 
 /// Reject a lineup size outside the supported range at the point of request.
 ///
-/// `lineup::winner_dist_to_edges` rejects the same range when folding a
+/// `lineup::lineup_verdict_to_edges` rejects the same range when folding a
 /// judgement, but that is only reached after the judge has been called. Failing
 /// here means a caller learns the size is unsupported before spending anything
 /// on it.
@@ -871,8 +871,8 @@ pub(crate) fn generate_uniform_lineups_indexed(
         }
 
         assert!(!iteration_lineups.is_empty(), "uniform lineup generation made no progress");
-        // Each member of a full winner distribution participates in one
-        // derived edge against every other lineup member. These counts are a
+        // Each member of a judged lineup participates in one derived edge
+        // against every other lineup member. These counts are a
         // local projection used only while planning this call; actual surviving
         // edges are recorded from the returned judgement afterward.
         let projected_edges_per_item = lineup_size - 1;

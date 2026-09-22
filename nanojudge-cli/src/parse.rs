@@ -5,6 +5,7 @@
 /// - Logprob mode: extracts continuous probabilities from the option-digit
 ///   token's logprobs.
 /// - Text mode (--no-logprobs): extracts the discrete verdict from response text.
+use nanojudge_core::LineupVerdict;
 use nanojudge_core::constants::MAX_LINEUP_SIZE;
 use serde::Deserialize;
 
@@ -214,8 +215,8 @@ pub fn parse_response(logprobs: &[LogprobContent], min_logprob_coverage: f64) ->
 //
 // A lineup judgement asks the judge to rank `k` options (2 ≤ k ≤ 9) labelled
 // A..I, one "Nth place is Option X" line per rank. Reading the logprobs of the
-// first `k - 1` of those lines recovers the full winner-distribution as a
-// stick-breaking chain — see `parse_lineup`.
+// first `k - 1` of those lines gives each place's probability for its pick
+// among the options still unplaced — see `parse_lineup`.
 
 /// The option letters of a lineup judgement, in order (A..I).
 const LINEUP_LETTERS: [char; MAX_LINEUP_SIZE] = ['A', 'B', 'C', 'D', 'E', 'F', 'G', 'H', 'I'];
@@ -304,8 +305,7 @@ fn extract_rank_slot(
 /// distinct (e.g. the model repeated an option), the whole judgement is thrown
 /// out rather than filled in.
 ///
-/// Returns the first `lineup_size - 1` slots — the last rank carries no free
-/// parameter, since its probability is whatever residual remains.
+/// Returns the whole block, one slot per rank, best first.
 fn extract_lineup_slots(
     logprobs: &[LogprobContent],
     lineup_size: usize,
@@ -333,57 +333,45 @@ fn extract_lineup_slots(
     if slots.len() < lineup_size {
         return None;
     }
-    let block = &slots[slots.len() - lineup_size..];
+    let block_start = slots.len() - lineup_size;
     let mut seen = vec![false; lineup_size];
-    for s in block {
+    for s in &slots[block_start..] {
         seen[s.letter] = true;
     }
     if !seen.iter().all(|&b| b) {
         return None;
     }
 
-    Some(
-        block[..lineup_size - 1]
-            .iter()
-            .map(|s| RankSlot { dist: s.dist.clone(), letter: s.letter })
-            .collect(),
-    )
+    Some(slots.split_off(block_start))
 }
 
-/// Fold a lineup response's logprobs into a winner-distribution
-/// `[q_A, q_B, ...]` — the probability each option is the best of the lineup.
+/// Read a lineup response's logprobs into a [`LineupVerdict`]: the emitted
+/// ranking, plus each place's probability for its pick.
 ///
 /// Each ranking line's logprobs are the judge's top-1 distribution *conditional
-/// on the items ranked above it already being placed*, so the ranking block is a
-/// stick-breaking chain under the Luce model:
+/// on the items ranked above it already being placed*. So a place's probability
+/// is its emitted letter's share of that line's distribution restricted to the
+/// options not yet placed — under the Luce model, the chosen option's strength
+/// over the strength of everything still unplaced.
 ///
-/// - The 1st-place slot gives the winner's probability directly.
-/// - The residual mass is split among the rest in proportion to the 2nd-place
-///   slot's distribution restricted to the not-yet-placed options.
-/// - Repeat down the block, each rank taking its share of the shrinking residual.
-/// - The last-ranked option absorbs whatever residual is left, which is why only
-///   `lineup_size - 1` slots are read.
-///
-/// That yields exactly `lineup_size - 1` free parameters, matching the degrees of
-/// freedom `lineup::winner_dist_to_edges` assigns in logprobs mode.
+/// Only the first `lineup_size - 1` lines are read for probabilities: the last
+/// place has a single option left, so it carries no free parameter (its line
+/// must still be present — a ranking is only valid if it places every option).
 ///
 /// Returns None if any rank slot fails to parse or clear the coverage threshold,
-/// or if a slot puts no mass at all on the options still unplaced (no way to
-/// split that residual — treated as an unparseable judgement rather than a guess).
+/// or if a slot puts no mass at all on the options still unplaced (no share to
+/// read — treated as an unparseable judgement rather than a guess).
 pub fn parse_lineup(
     logprobs: &[LogprobContent],
     lineup_size: usize,
     min_logprob_coverage: f64,
-) -> Option<Vec<f64>> {
+) -> Option<LineupVerdict> {
     let slots = extract_lineup_slots(logprobs, lineup_size, min_logprob_coverage)?;
 
-    let mut q = vec![0.0_f64; lineup_size];
     let mut placed = vec![false; lineup_size];
-    let mut residual = 1.0_f64;
+    let mut place_probs = Vec::with_capacity(lineup_size - 1);
 
-    for slot in &slots {
-        // This rank's share of the residual, from its distribution restricted to
-        // the options not yet placed.
+    for slot in &slots[..lineup_size - 1] {
         let denom: f64 = (0..lineup_size)
             .filter(|&i| !placed[i])
             .map(|i| slot.dist[i])
@@ -391,30 +379,24 @@ pub fn parse_lineup(
         if denom <= 0.0 {
             return None;
         }
-        let share = slot.dist[slot.letter] / denom;
-        q[slot.letter] = residual * share;
-        residual -= q[slot.letter];
+        place_probs.push(slot.dist[slot.letter] / denom);
         placed[slot.letter] = true;
     }
 
-    // The last-ranked option takes what is left.
-    let last = (0..lineup_size)
-        .find(|&i| !placed[i])
-        .expect("a full ranking leaves exactly one option unplaced");
-    q[last] = residual.max(0.0);
-
-    Some(q)
+    Some(LineupVerdict {
+        ranking: slots.iter().map(|s| s.letter).collect(),
+        place_probs,
+    })
 }
 
 /// Parse a lineup ranking from response text (--no-logprobs mode).
 ///
 /// Same rule as the logprob path: take the LAST `lineup_size` "Option <letter>"
-/// mentions (the trailing ranking block), require them to be a distinct full
-/// ranking, and return a one-hot winner-distribution on the 1st. Without
-/// logprobs there is no soft information, so the ordering below 1st place is
-/// dropped — only the winner is kept. Returns None if a clean full ranking can't
-/// be read (throw it out).
-pub fn parse_lineup_text(text: &str, lineup_size: usize) -> Option<Vec<f64>> {
+/// mentions (the trailing ranking block) and require them to be a distinct full
+/// ranking. Without logprobs every pick is hard, so each place's probability is
+/// 1.0 — the full ordering is kept, not just the winner. Returns None if a clean
+/// full ranking can't be read (throw it out).
+pub fn parse_lineup_text(text: &str, lineup_size: usize) -> Option<LineupVerdict> {
     let lower = text.to_ascii_lowercase();
     let bytes = text.as_bytes();
 
@@ -451,9 +433,10 @@ pub fn parse_lineup_text(text: &str, lineup_size: usize) -> Option<Vec<f64>> {
         return None;
     }
 
-    let mut q = vec![0.0_f64; lineup_size];
-    q[block[0]] = 1.0; // 1st place
-    Some(q)
+    Some(LineupVerdict {
+        ranking: block.to_vec(),
+        place_probs: vec![1.0; lineup_size - 1],
+    })
 }
 
 /// Parse a verdict from response text (for --no-logprobs mode).
@@ -884,14 +867,44 @@ mod tests {
         ]
     }
 
+    /// Assert a lineup verdict's ranking and place probabilities.
+    fn assert_verdict(v: &LineupVerdict, ranking: &[usize], place_probs: &[f64]) {
+        assert_eq!(v.ranking, ranking, "ranking");
+        assert_eq!(v.place_probs.len(), place_probs.len(), "place_probs length");
+        for (got, want) in v.place_probs.iter().zip(place_probs) {
+            assert!(
+                (got - want).abs() < 1e-9,
+                "place_probs {:?}, expected {:?}",
+                v.place_probs,
+                place_probs
+            );
+        }
+    }
+
     #[test]
-    fn test_parse_lineup_folds_winner_distribution() {
-        let q = parse_lineup(&lineup_logprobs(), 3, 0.95).expect("should parse");
-        // Winner A keeps its 1st-place prob; residual 0.10 split 0.8:0.2 → 0.08, 0.02.
-        assert!((q[0] - 0.9).abs() < 1e-9, "q_A = {}", q[0]);
-        assert!((q[1] - 0.08).abs() < 1e-9, "q_B = {}", q[1]);
-        assert!((q[2] - 0.02).abs() < 1e-9, "q_C = {}", q[2]);
-        assert!((q.iter().sum::<f64>() - 1.0).abs() < 1e-9);
+    fn test_parse_lineup_reads_place_probabilities() {
+        let v = parse_lineup(&lineup_logprobs(), 3, 0.95).expect("should parse");
+        // 1st: A at 0.9. 2nd: B's share of the unplaced B/C mass, 0.8 : 0.2
+        // (the 0.0001 still on the already-placed A is not counted).
+        assert_verdict(&v, &[0, 1, 2], &[0.9, 0.8]);
+    }
+
+    #[test]
+    fn test_parse_lineup_certain_first_place_keeps_second_place() {
+        // The 1st-place line's top_logprobs hold only A: the pick is certain.
+        // The 2nd place's B-over-C probability must still come through.
+        let lp = vec![
+            plain("1st"), plain(":"), plain(" Option"),
+            letter_tok(" A", 1.0, 0.0, 0.0),
+            plain("\n"),
+            plain("2nd"), plain(":"), plain(" Option"),
+            letter_tok(" B", 0.0, 0.8, 0.2),
+            plain("\n"),
+            plain("3rd"), plain(":"), plain(" Option"),
+            letter_tok(" C", 0.0, 0.0, 1.0),
+        ];
+        let v = parse_lineup(&lp, 3, 0.95).expect("should parse");
+        assert_verdict(&v, &[0, 1, 2], &[1.0, 0.8]);
     }
 
     #[test]
@@ -908,10 +921,8 @@ mod tests {
             plain("3"), plain("rd"), plain(":"), plain(" Option"),
             letter_tok(" C", 0.0, 0.0, 1.0),
         ];
-        let q = parse_lineup(&lp, 3, 0.95).expect("split-ordinal tokens should parse");
-        assert!((q[0] - 0.9).abs() < 1e-9, "q_A = {}", q[0]);
-        assert!((q[1] - 0.08).abs() < 1e-9, "q_B = {}", q[1]);
-        assert!((q[2] - 0.02).abs() < 1e-9, "q_C = {}", q[2]);
+        let v = parse_lineup(&lp, 3, 0.95).expect("split-ordinal tokens should parse");
+        assert_verdict(&v, &[0, 1, 2], &[0.9, 0.8]);
     }
 
     #[test]
@@ -927,10 +938,8 @@ mod tests {
             plain("3rd"), plain(":"), plain(" Op"), plain("t"), plain("ion"),
             letter_tok(" C", 0.0, 0.0, 1.0),
         ];
-        let q = parse_lineup(&lp, 3, 0.95).expect("split Option anchors should parse");
-        assert!((q[0] - 0.9).abs() < 1e-9, "q_A = {}", q[0]);
-        assert!((q[1] - 0.08).abs() < 1e-9, "q_B = {}", q[1]);
-        assert!((q[2] - 0.02).abs() < 1e-9, "q_C = {}", q[2]);
+        let v = parse_lineup(&lp, 3, 0.95).expect("split Option anchors should parse");
+        assert_verdict(&v, &[0, 1, 2], &[0.9, 0.8]);
     }
 
     #[test]
@@ -940,8 +949,8 @@ mod tests {
         let mut lp = lineup_logprobs();
         lp.extend([plain("\n"), plain("Best"), plain(" of"), plain(" the"), plain(" options")]);
         lp.push(letter_tok(" A", 0.9, 0.05, 0.05));
-        let q = parse_lineup(&lp, 3, 0.95).expect("block before the prose must parse");
-        assert!((q[0] - 0.9).abs() < 1e-9, "q_A = {} — prose 'options' shifted the block", q[0]);
+        let v = parse_lineup(&lp, 3, 0.95).expect("block before the prose must parse");
+        assert_verdict(&v, &[0, 1, 2], &[0.9, 0.8]);
     }
 
     #[test]
@@ -956,9 +965,9 @@ mod tests {
             lp.push(letter_tok(" B", 0.0001, 0.8, 0.2));
             lp.extend(chunk_plain("\n3rd: Option", seed ^ 2));
             lp.push(letter_tok(" C", 0.0, 0.0, 1.0));
-            let q = parse_lineup(&lp, 3, 0.95)
+            let v = parse_lineup(&lp, 3, 0.95)
                 .unwrap_or_else(|| panic!("seed {seed}: chunked tokenization must parse"));
-            assert!((q[0] - 0.9).abs() < 1e-9, "seed {seed}: q_A = {}", q[0]);
+            assert_verdict(&v, &[0, 1, 2], &[0.9, 0.8]);
         }
     }
 
@@ -1002,10 +1011,8 @@ mod tests {
             plain("\n"),
             plain(" Option"), letter_tok(" C", 0.0, 0.0, 1.0),
         ];
-        let q = parse_lineup(&lp, 3, 0.95).expect("bare Option lines should parse");
-        assert!((q[0] - 0.9).abs() < 1e-9, "q_A = {}", q[0]);
-        assert!((q[1] - 0.08).abs() < 1e-9, "q_B = {}", q[1]);
-        assert!((q[2] - 0.02).abs() < 1e-9, "q_C = {}", q[2]);
+        let v = parse_lineup(&lp, 3, 0.95).expect("bare Option lines should parse");
+        assert_verdict(&v, &[0, 1, 2], &[0.9, 0.8]);
     }
 
     #[test]
@@ -1014,8 +1021,8 @@ mod tests {
         // derail the block — the LAST "1st"/"first" marker wins.
         let mut lp = vec![plain("in"), plain(" the"), plain(" first"), plain(" place"), plain(".")];
         lp.extend(lineup_logprobs());
-        let q = parse_lineup(&lp, 3, 0.95).expect("should still find the final block");
-        assert!((q[0] - 0.9).abs() < 1e-9);
+        let v = parse_lineup(&lp, 3, 0.95).expect("should still find the final block");
+        assert_verdict(&v, &[0, 1, 2], &[0.9, 0.8]);
     }
 
     #[test]
@@ -1046,15 +1053,21 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_lineup_text_one_hot_on_winner() {
+    fn test_parse_lineup_text_keeps_full_ranking() {
         let text = "Analysis here.\n\n1st: Option B\n2nd: Option A\n3rd: Option C";
-        assert_eq!(parse_lineup_text(text, 3), Some(vec![0.0, 1.0, 0.0]));
+        assert_eq!(
+            parse_lineup_text(text, 3),
+            Some(LineupVerdict { ranking: vec![1, 0, 2], place_probs: vec![1.0, 1.0] })
+        );
     }
 
     #[test]
     fn test_parse_lineup_text_uses_last_block() {
         let text = "I'd put it in first normally.\n\n1st: Option C\n2nd: Option A\n3rd: Option B";
-        assert_eq!(parse_lineup_text(text, 3), Some(vec![0.0, 0.0, 1.0]));
+        assert_eq!(
+            parse_lineup_text(text, 3),
+            Some(LineupVerdict { ranking: vec![2, 0, 1], place_probs: vec![1.0, 1.0] })
+        );
     }
 
     #[test]
@@ -1098,7 +1111,7 @@ mod tests {
     /// A full ranking block for a lineup of `size`, ranked A, B, C, ... in
     /// order, where each slot puts half its conditional mass on the letter it
     /// emits and spreads the other half evenly over the still-unplaced ones.
-    /// The stick-breaking chain then halves the residual at every step.
+    /// Every place's probability is then 0.5.
     fn halving_ranking_block(size: usize) -> Vec<LogprobContent> {
         const ORDINALS: [&str; MAX_LINEUP_SIZE] =
             ["1st", "2nd", "3rd", "4th", "5th", "6th", "7th", "8th", "9th"];
@@ -1122,39 +1135,22 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_lineup_stick_breaking_at_every_size() {
-        // Each slot claims half the remaining stick, so option i takes 2^-(i+1)
-        // and the unread last option absorbs the same share as the one before it.
+    fn test_parse_lineup_place_probabilities_at_every_size() {
+        // Each slot gives its pick half the still-unplaced mass, so every
+        // place reads 0.5, and the unread last place adds no entry.
         for size in MIN_LINEUP_SIZE..=MAX_LINEUP_SIZE {
-            let q = parse_lineup(&halving_ranking_block(size), size, 0.95)
+            let v = parse_lineup(&halving_ranking_block(size), size, 0.95)
                 .unwrap_or_else(|| panic!("size {size}: should parse"));
-            assert_eq!(q.len(), size, "size {size}: wrong width");
-            for (i, &qi) in q.iter().enumerate().take(size - 1) {
-                let expected = 0.5_f64.powi(i as i32 + 1);
-                assert!(
-                    (qi - expected).abs() < 1e-12,
-                    "size {size}: q[{i}] = {qi}, expected {expected}"
-                );
-            }
-            let last = 0.5_f64.powi(size as i32 - 1);
-            assert!(
-                (q[size - 1] - last).abs() < 1e-12,
-                "size {size}: residual q[{}] = {}, expected {last}",
-                size - 1,
-                q[size - 1]
-            );
-            assert!(
-                (q.iter().sum::<f64>() - 1.0).abs() < 1e-12,
-                "size {size}: probabilities must sum to 1"
-            );
+            let ranking: Vec<usize> = (0..size).collect();
+            assert_verdict(&v, &ranking, &vec![0.5; size - 1]);
         }
     }
 
     #[test]
     fn test_parse_lineup_ignores_the_last_slots_distribution() {
         // The final line must be present (a ranking is only valid if it places
-        // every option) but carries no free information: the last option just
-        // absorbs the residual, so scrambling its logprobs changes nothing.
+        // every option) but carries no free information: only one option is
+        // left for it, so scrambling its logprobs changes nothing.
         for size in MIN_LINEUP_SIZE..=MAX_LINEUP_SIZE {
             let block = halving_ranking_block(size);
             let expected = parse_lineup(&block, size, 0.95)

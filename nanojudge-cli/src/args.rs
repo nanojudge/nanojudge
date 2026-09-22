@@ -80,10 +80,10 @@ pub struct ConfigArgs {
     pub judgement_distribution: Option<String>,
 
     /// Number of items in each judged lineup: 2 (default) up to 9.
-    /// Above 2, each judgement ranks the whole lineup and the winner-distribution
-    /// is folded into one edge per pair, so one judgement yields more scoring
-    /// evidence. Sizes above 2 need logprobs for full information (text mode keeps
-    /// only the winner). A custom --prompt-template must name exactly as many
+    /// Above 2, each judgement ranks the whole lineup and the ranking is
+    /// decomposed into one edge per pair, so one judgement yields more scoring
+    /// evidence. Logprobs mode makes those edges soft; text mode keeps the stated
+    /// ranking as hard edges. A custom --prompt-template must name exactly as many
     /// options as the lineup size ($optionA..$optionI).
     #[arg(long)]
     pub lineup_size: Option<usize>,

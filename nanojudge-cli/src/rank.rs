@@ -1,7 +1,7 @@
 use nanojudge_core::{
     Edge, EngineConfig, JudgeInfo, RankingEngine, ScoringOptions,
     JudgementDistribution, calculate_budget,
-    judgements_needed_for_every_item_to_appear_once, run_scoring, item_hash, winner_dist_to_edges,
+    judgements_needed_for_every_item_to_appear_once, run_scoring, item_hash, lineup_verdict_to_edges,
 };
 use nanojudge_core::seed;
 use rand::seq::SliceRandom;
@@ -53,21 +53,14 @@ fn resolve_save_path(path: &Path, prefix: &str) -> PathBuf {
 /// variation across models.
 const TOKENS_PER_RANKING_LINE: u32 = 16;
 
-/// Temper a parsed verdict distribution before it becomes edges:
-/// q_i ← q_i^(1/temperature), renormalized — equivalent to dividing each
-/// derived edge's log-odds by `temperature`. Values > 1 pull overconfident
-/// verdicts toward uniform; 1.0 is the identity. One-hot (text-mode) verdicts
-/// are fixed points, so only logprob-derived verdicts are affected.
+/// Temper a parsed verdict distribution before it becomes an edge:
+/// q_i ← q_i^(1/temperature), renormalized — equivalent to dividing the
+/// edge's log-odds by `temperature`. Values > 1 pull overconfident verdicts
+/// toward uniform; 1.0 is the identity. One-hot (text-mode) verdicts are fixed
+/// points, so only logprob-derived verdicts are affected.
 pub(crate) fn temper_verdict<const N: usize>(mut dist: [f64; N], temperature: f64) -> [f64; N] {
-    temper_verdict_in_place(&mut dist, temperature);
-    dist
-}
-
-/// `temper_verdict` over a verdict distribution of any width — lineups carry
-/// one entry per option, so their width is only known at runtime.
-pub(crate) fn temper_verdict_in_place(dist: &mut [f64], temperature: f64) {
     if temperature == 1.0 {
-        return;
+        return dist;
     }
     let inv = 1.0 / temperature;
     let mut sum = 0.0;
@@ -77,6 +70,16 @@ pub(crate) fn temper_verdict_in_place(dist: &mut [f64], temperature: f64) {
     }
     for q in dist.iter_mut() {
         *q /= sum;
+    }
+    dist
+}
+
+/// Temper every edge decomposed from a lineup verdict. Tempering each edge's
+/// `[p, 1 - p]` is the same as tempering the lineup's Luce strengths
+/// themselves, since an edge depends only on the ratio of its two strengths.
+pub(crate) fn temper_edges_in_place(edges: &mut [Edge], temperature: f64) {
+    for e in edges.iter_mut() {
+        e.category_probs = temper_verdict(e.category_probs, temperature);
     }
 }
 
@@ -1065,7 +1068,7 @@ pub async fn run(args: RankArgs) {
 }
 
 /// Lineup acquisition loop. Selects lineups, asks each judge to rank
-/// them, folds the winner-distribution into one edge per pair in the lineup,
+/// them, decomposes each ranking into one edge per pair in the lineup,
 /// and feeds those to the same scoring engine the pairwise path uses.
 /// `total_judgements` here counts LLM calls (lineups), so accuracy-per-call is
 /// directly comparable to pairwise; each call contributes up to k(k-1)/2 edges
@@ -1392,7 +1395,7 @@ async fn run_lineup_judgements(
         for (lineup_idx, lineup) in lineups.iter().enumerate() {
             // Shuffle the lineup into random slot order so no item has a fixed
             // presentation position (every permutation equally likely).
-            // winner_dist stays aligned because judge_lineup maps option
+            // The verdict stays aligned because judge_lineup maps option
             // A/B/C/... to whatever ids we pass here, in order.
             let mut slot_ids = lineup.clone();
             slot_ids.shuffle(&mut slot_rng);
@@ -1482,7 +1485,7 @@ async fn run_lineup_judgements(
                         judge_stats[judge_idx].input_tokens += usage.prompt_tokens;
                         judge_stats[judge_idx].output_tokens += usage.completion_tokens;
                     }
-                    if let Some(winner_dist) = tw.winner_dist {
+                    if let Some(verdict) = tw.verdict {
                         calls_before_refit += 1;
                         if let Some(ref file_mutex) = save_file {
                             let lineup_titles: Vec<&str> = tw.item_ids
@@ -1497,7 +1500,8 @@ async fn run_lineup_judgements(
                                 "refit": refits_run,
                                 "items": lineup_titles,
                                 "item_text_hashes": lineup_hashes,
-                                "winner_dist": winner_dist,
+                                "ranking": verdict.ranking,
+                                "place_probs": verdict.place_probs,
                                 "judge_model": judge_models[judge_idx],
                                 "judge_endpoint": judge_endpoints[judge_idx],
                                 "temperature": actual_temperature,
@@ -1522,16 +1526,13 @@ async fn run_lineup_judgements(
                             let _ = f.flush();
                         }
 
-                        let mut tempered = winner_dist;
-                        temper_verdict_in_place(&mut tempered, judge_verdict_temperatures[judge_idx]);
-
                         // Decomposed edges for engine and scoring.
-                        let edges = winner_dist_to_edges(
+                        let mut edges = lineup_verdict_to_edges(
                             &tw.item_ids,
-                            &tempered,
+                            &verdict,
                             assigned_judge_id,
-                            logprobs_mode,
                         );
+                        temper_edges_in_place(&mut edges, judge_verdict_temperatures[judge_idx]);
                         refit_results.extend(edges);
                     } else {
                         failed_parse += 1;
@@ -1840,15 +1841,22 @@ mod tests {
     }
 
     #[test]
-    fn test_temper_verdict_lineup_pairwise_ratios() {
-        // Tempering the 3-vector before the Luce ratio must divide every
-        // edge's log-odds by T.
-        let q = [0.9, 0.08, 0.02];
-        let t = temper_verdict(q, 4.0);
-        assert!((t.iter().sum::<f64>() - 1.0).abs() < 1e-12);
-        for (i, j) in [(0, 1), (0, 2), (1, 2)] {
-            let expected = (q[i] / q[j]).ln() / 4.0;
-            assert!(((t[i] / t[j]).ln() - expected).abs() < 1e-9);
+    fn test_temper_lineup_edges_divides_strength_log_ratios() {
+        // Places 0.9 then 0.8 give Luce strengths [0.9, 0.08, 0.02]; tempering
+        // each edge must divide the log-ratio of its two strengths by T.
+        let verdict = nanojudge_core::LineupVerdict {
+            ranking: vec![0, 1, 2],
+            place_probs: vec![0.9, 0.8],
+        };
+        let mut edges = lineup_verdict_to_edges(&[10, 20, 30], &verdict, 0);
+        temper_edges_in_place(&mut edges, 4.0);
+        let s = [0.9f64, 0.08, 0.02];
+        for e in &edges {
+            let (i, j) = (e.slot1 as usize, e.slot2 as usize);
+            let p = e.category_probs;
+            assert!((p[0] + p[1] - 1.0).abs() < 1e-12);
+            let expected = (s[i] / s[j]).ln() / 4.0;
+            assert!(((p[0] / p[1]).ln() - expected).abs() < 1e-9, "{i} vs {j}");
         }
     }
 
