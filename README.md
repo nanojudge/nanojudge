@@ -235,22 +235,20 @@ NanoJudge is model-agnostic. It uses whatever LLM you point it at as a raw compu
 
 ## Benchmark
 
-We pitted NanoJudge against **Score-O** — the pointwise scoring baseline from the [BIRCO](https://github.com/BIRCO-benchmark/BIRCO_dataset) paper, on BIRCO's **RELIC** task (recovering a masked quotation in a literary analysis). Both run on the same judge model (Gemma 4 E4B); the only difference is the protocol: NanoJudge compares items pairwise, Score-O scores them one at a time.
+We pitted NanoJudge against the strongest competitor we could find: **REALM** ([Wang et al. 2025](https://arxiv.org/abs/2508.18379)), a recent LLM re-ranker that sorts candidates with a quicksort-style recursion and TrueSkill ratings. The task is **RELIC** from the [BIRCO](https://github.com/BIRCO-benchmark/BIRCO_dataset) benchmark: find the passage that fills a masked quotation in a piece of literary analysis. Each query comes with a pool of about 51 passages, and exactly one of them is correct. Both methods use the same judge model (Qwen3-4B-Instruct-2507) on the same 100 queries. REALM does not support reasoning, so NanoJudge was also run with reasoning off.
 
-Each query in RELIC comes with a pool of passages, one of which is the correct answer and the rest wrong. We made the task harder by generating additional wrong passages with a completion-based LLM, leaving only 1 correct answer as before. 1x is the original dataset. 2x means we doubled the pool size, 4x quadrupled and so on. Score-O collapses as the pool grows whereas NanoJudge degrades gracefully.
+REALM has no budget setting of its own, so for REALM (4x) we run REALM four times per query from different starting orders and rank each passage by its average position. That brings it to approximately the same number of LLM calls as NanoJudge (4x).
 
-| Dataset size | Score-O | NanoJudge |
-|---|---|---|
-| 1x | 0.3858 | **0.6043** |
-| 2x | 0.3158 | **0.5590** |
-| 4x | 0.2549 | **0.5325** |
-| 8x | 0.1788 | **0.4533** |
-| 16x | 0.1546 | **0.3734** |
-| 32x | 0.0784 | **0.2958** |
+| Method | Calls per query | nDCG@10 | MRR@10 | Recall@5 |
+|---|---|---|---|---|
+| REALM (1x) | 49.45 | 0.5986 | 0.5380 | 0.6800 |
+| NanoJudge (1x) | 50.59 | 0.4683 | 0.3746 | 0.5800 |
+| REALM (4x) | 199.90 | 0.6458 | 0.5859 | 0.7000 |
+| NanoJudge (4x) | 202.36 | **0.6940** | **0.6227** | **0.8100** |
 
-_nDCG@10, higher is better._
+_Higher is better for all three metrics._
 
-At 32x the pool, NanoJudge scores nearly 4x higher than Score-O - and even on a pool 16x larger, it matches Score-O's score on the original, undiluted pool. NanoJudge is built to scale.
+At the smallest budget REALM leads. Given four times the calls, REALM improves only modestly (nDCG@10 +0.047), while NanoJudge improves by +0.226 and overtakes REALM on every metric.
 
 ## Related work
 
