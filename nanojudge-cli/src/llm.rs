@@ -278,12 +278,12 @@ pub async fn judge_pair(
     item1_id: i64,
     item2_id: i64,
     min_logprob_coverage: f64,
-    analysis_length: &str,
+    deliberation_length: &str,
     max_retries: usize,
     verbose: bool,
     judge_name: &str,
 ) -> Result<PairJudgementResult, String> {
-    let prompt = build_prompt(template, criterion, item1_name, item2_name, item1_title, item2_title, analysis_length);
+    let prompt = build_prompt(template, criterion, item1_name, item2_name, item1_title, item2_title, deliberation_length);
 
     let mut last_err = String::new();
     for attempt in 0..=max_retries {
@@ -373,7 +373,7 @@ pub async fn judge_lineup(
     option_texts: &[&str],
     item_ids: &[i64],
     min_logprob_coverage: f64,
-    analysis_length: &str,
+    deliberation_length: &str,
     max_retries: usize,
     verbose: bool,
     judge_name: &str,
@@ -384,7 +384,7 @@ pub async fn judge_lineup(
         "option_texts and item_ids must describe the same lineup"
     );
     let lineup_size = item_ids.len();
-    let prompt = build_lineup_prompt(template, criterion, option_texts, analysis_length);
+    let prompt = build_lineup_prompt(template, criterion, option_texts, deliberation_length);
 
     let mut last_err = String::new();
     for attempt in 0..=max_retries {

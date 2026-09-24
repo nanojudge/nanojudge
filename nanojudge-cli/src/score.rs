@@ -11,7 +11,7 @@ use crate::args::{OutputFormat, ScoreArgs};
 use crate::bail;
 use crate::output;
 use crate::rank::{temper_edges_in_place, temper_verdict};
-use crate::resolve::{DEFAULT_VERDICT_TEMPERATURE_REASONING, DEFAULT_VERDICT_TEMPERATURE_NO_REASONING};
+use crate::resolve::{DEFAULT_VERDICT_TEMPERATURE_DELIBERATION, DEFAULT_VERDICT_TEMPERATURE_NO_DELIBERATION};
 use crate::{
     DEFAULT_BIAS_PRIOR, DEFAULT_BIAS_PRIOR_TAU2, DEFAULT_CONFIDENCE_LEVEL, DEFAULT_PRIOR_TAU2,
     DEFAULT_REGULARIZATION_STRENGTH,
@@ -180,7 +180,7 @@ fn resolve_edge_temperature(
     judge_id: u64,
     per_judge: &HashMap<String, f64>,
     global: Option<f64>,
-    judge_reasoning_seen: &mut HashMap<u64, (bool, usize)>,
+    judge_deliberation_seen: &mut HashMap<u64, (bool, usize)>,
     record: &serde_json::Value,
     path: &Path,
     line_num: usize,
@@ -192,27 +192,27 @@ fn resolve_edge_temperature(
     if let Some(t) = global {
         return t;
     }
-    let reasoning = match record["reasoning"].as_bool() {
+    let deliberation = match record["deliberation"].as_bool() {
         Some(b) => b,
         None => bail(format!(
-            "{}:{}: missing reasoning field (required to infer default verdict temperature; pass --verdict-temperature to set explicitly)",
+            "{}:{}: missing deliberation field (required to infer default verdict temperature; pass --verdict-temperature to set explicitly)",
             path.display(), line_num
         )),
     };
-    if let Some(&(prev_reasoning, first_line)) = judge_reasoning_seen.get(&judge_id) {
-        if reasoning != prev_reasoning {
+    if let Some(&(prev_deliberation, first_line)) = judge_deliberation_seen.get(&judge_id) {
+        if deliberation != prev_deliberation {
             bail(format!(
-                "{}:{}: judge {judge_model}@{judge_endpoint} has reasoning={reasoning}, but line {first_line} had reasoning={prev_reasoning}",
+                "{}:{}: judge {judge_model}@{judge_endpoint} has deliberation={deliberation}, but line {first_line} had deliberation={prev_deliberation}",
                 path.display(), line_num
             ));
         }
     } else {
-        judge_reasoning_seen.insert(judge_id, (reasoning, line_num));
+        judge_deliberation_seen.insert(judge_id, (deliberation, line_num));
     }
-    if reasoning {
-        DEFAULT_VERDICT_TEMPERATURE_REASONING
+    if deliberation {
+        DEFAULT_VERDICT_TEMPERATURE_DELIBERATION
     } else {
-        DEFAULT_VERDICT_TEMPERATURE_NO_REASONING
+        DEFAULT_VERDICT_TEMPERATURE_NO_DELIBERATION
     }
 }
 
@@ -239,7 +239,7 @@ pub(crate) fn load_edges(
     let mut edges: Vec<Edge> = Vec::new();
     let mut total_judgements: usize = 0;
     let mut logprobs_mode = false;
-    let mut judge_reasoning_seen: HashMap<u64, (bool, usize)> = HashMap::new();
+    let mut judge_deliberation_seen: HashMap<u64, (bool, usize)> = HashMap::new();
     let mut judge_temps_used: HashMap<u64, f64> = HashMap::new();
     let mut line_num: usize = 0;
 
@@ -353,7 +353,7 @@ pub(crate) fn load_edges(
             let edge_temp = resolve_edge_temperature(
                 judge_model, judge_endpoint, judge_id,
                 per_judge_verdict_temperatures, global_verdict_temperature,
-                &mut judge_reasoning_seen,
+                &mut judge_deliberation_seen,
                 &record, path, line_num,
             );
             judge_temps_used.entry(judge_id).or_insert(edge_temp);
@@ -436,7 +436,7 @@ pub(crate) fn load_edges(
             let edge_temp = resolve_edge_temperature(
                 judge_model, judge_endpoint, judge_id,
                 per_judge_verdict_temperatures, global_verdict_temperature,
-                &mut judge_reasoning_seen,
+                &mut judge_deliberation_seen,
                 &record, path, line_num,
             );
             judge_temps_used.entry(judge_id).or_insert(edge_temp);
@@ -764,9 +764,9 @@ mod tests {
     }
 
     #[test]
-    fn test_auto_verdict_temperature_reasoning_true() {
+    fn test_auto_verdict_temperature_deliberation_true() {
         let f = write_jsonl(&[
-            r#"{"refit":0,"item1":"A","item2":"B","item1_text_hash":"34482beefb0cc992","item2_text_hash":"b0e6004ac03e61d2","category_probs":[0.9,0.1],"judge_model":"m","judge_endpoint":"http://e","logprobs":true,"reasoning":true}"#,
+            r#"{"refit":0,"item1":"A","item2":"B","item1_text_hash":"34482beefb0cc992","item2_text_hash":"b0e6004ac03e61d2","category_probs":[0.9,0.1],"judge_model":"m","judge_endpoint":"http://e","logprobs":true,"deliberation":true}"#,
         ]);
         let (edges, _, _, _, _, _, _, temps, _) = load_edges(f.path(), None, &HashMap::new(), None);
         assert!(temps.values().all(|&t| t == 3.0));
@@ -774,9 +774,9 @@ mod tests {
     }
 
     #[test]
-    fn test_auto_verdict_temperature_reasoning_false() {
+    fn test_auto_verdict_temperature_deliberation_false() {
         let f = write_jsonl(&[
-            r#"{"refit":0,"item1":"A","item2":"B","item1_text_hash":"34482beefb0cc992","item2_text_hash":"b0e6004ac03e61d2","category_probs":[0.9,0.1],"judge_model":"m","judge_endpoint":"http://e","logprobs":true,"reasoning":false}"#,
+            r#"{"refit":0,"item1":"A","item2":"B","item1_text_hash":"34482beefb0cc992","item2_text_hash":"b0e6004ac03e61d2","category_probs":[0.9,0.1],"judge_model":"m","judge_endpoint":"http://e","logprobs":true,"deliberation":false}"#,
         ]);
         let (edges, _, _, _, _, _, _, temps, _) = load_edges(f.path(), None, &HashMap::new(), None);
         assert!(temps.values().all(|&t| t == 1.0));

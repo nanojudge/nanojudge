@@ -166,6 +166,13 @@
   distribution. Text mode instead parses the stated verdict (the winner of a
   pair, or the full ranking of a lineup) and produces hard edges.
 
+- **Deliberation** (`deliberation_enabled`, `--deliberation`): NanoJudge's
+  prompt mode that asks the judge to write out its thinking in the visible
+  answer before stating its verdict. Its length is set by
+  `deliberation_length`. With deliberation off, the judge states only the
+  verdict. This is set by NanoJudge's prompt and is separate from the
+  model's own reasoning, which is controlled per judge by `reasoning_effort`.
+
 - **Sampling temperature** (`temperature`): Controls randomness while the LLM
   generates its response.
 

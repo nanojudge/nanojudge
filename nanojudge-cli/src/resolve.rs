@@ -17,14 +17,14 @@ use crate::{
 const DEFAULT_CONCURRENCY: usize = 16;
 const DEFAULT_TEMPERATURE_JITTER: f64 = 0.0;
 const DEFAULT_MAX_RETRIES: usize = 3;
-const DEFAULT_ANALYSIS_LENGTH: &str = "2 paragraphs";
+const DEFAULT_DELIBERATION_LENGTH: &str = "2 paragraphs";
 const DEFAULT_TARGET_PRIOR_EDGES: f64 = 5.0;
-// A verdict token written after a reasoning analysis is near-deterministic, so
+// A verdict token written after deliberation is near-deterministic, so
 // its logprobs read overconfident and get decompressed by default. Without
-// reasoning, the verdict token is the model's first expression of preference
+// deliberation, the verdict token is the model's first expression of preference
 // and its logprobs are left untouched.
-pub(crate) const DEFAULT_VERDICT_TEMPERATURE_REASONING: f64 = 3.0;
-pub(crate) const DEFAULT_VERDICT_TEMPERATURE_NO_REASONING: f64 = 1.0;
+pub(crate) const DEFAULT_VERDICT_TEMPERATURE_DELIBERATION: f64 = 3.0;
+pub(crate) const DEFAULT_VERDICT_TEMPERATURE_NO_DELIBERATION: f64 = 1.0;
 
 /// Merge a CLI value with a config file value. CLI wins.
 /// Warns to stderr if both are set and differ.
@@ -74,8 +74,8 @@ pub struct ResolvedConfig {
     /// full budget) — there is deliberately no default.
     pub stop_confidence: Option<f64>,
     pub retries: usize,
-    pub analysis_length: String,
-    pub reasoning_enabled: bool,
+    pub deliberation_length: String,
+    pub deliberation_enabled: bool,
     pub prompt_template: String,
     pub confidence_level: f64,
     pub regularization_strength: f64,
@@ -139,7 +139,7 @@ pub fn resolve_judges(
     shared: &ConfigArgs,
     cfg: &config::NanojudgeConfig,
     config_path: &Path,
-    reasoning_enabled: bool,
+    deliberation_enabled: bool,
 ) -> Vec<ResolvedJudge> {
     let judge_configs = cfg.judge.as_ref().filter(|j| !j.is_empty())
         .unwrap_or_else(|| {
@@ -180,10 +180,10 @@ pub fn resolve_judges(
     }
 
     let global_verdict_temperature = merge_opt(shared.verdict_temperature, cfg.verdict_temperature, "verdict-temperature")
-        .unwrap_or(if reasoning_enabled {
-            DEFAULT_VERDICT_TEMPERATURE_REASONING
+        .unwrap_or(if deliberation_enabled {
+            DEFAULT_VERDICT_TEMPERATURE_DELIBERATION
         } else {
-            DEFAULT_VERDICT_TEMPERATURE_NO_REASONING
+            DEFAULT_VERDICT_TEMPERATURE_NO_DELIBERATION
         });
     if !global_verdict_temperature.is_finite() || global_verdict_temperature <= 0.0 {
         bail(format!(
@@ -316,14 +316,13 @@ pub fn resolve_judges(
         bail("At least one judge must have positive weight.".to_string());
     }
 
-    if !reasoning_enabled {
+    if !deliberation_enabled {
         let any_explicit_max_tokens = judge_configs.iter().any(|jc| jc.max_tokens.is_some());
         if any_explicit_max_tokens {
-            eprintln!("Warning: max_tokens is ignored when reasoning is disabled (forced to 16)");
+            eprintln!("Warning: max_tokens is ignored when deliberation is disabled (forced down to fit just the verdict)");
         }
         for j in &mut judges {
             j.max_tokens = 16;
-            j.temperature = 0.0;
         }
     }
 
@@ -399,8 +398,8 @@ pub fn resolve_config(shared: &ConfigArgs, cfg: &config::NanojudgeConfig) -> Res
     }
     let retries = merge_opt(shared.retries, cfg.retries, "retries")
         .unwrap_or(DEFAULT_MAX_RETRIES);
-    let analysis_length = merge_opt(shared.analysis_length.clone(), cfg.analysis_length.clone(), "analysis-length")
-        .unwrap_or_else(|| DEFAULT_ANALYSIS_LENGTH.to_string());
+    let deliberation_length = merge_opt(shared.deliberation_length.clone(), cfg.deliberation_length.clone(), "deliberation-length")
+        .unwrap_or_else(|| DEFAULT_DELIBERATION_LENGTH.to_string());
 
     let confidence_level = merge_opt(shared.confidence_level, cfg.confidence_level, "confidence-level")
         .unwrap_or(DEFAULT_CONFIDENCE_LEVEL);
@@ -488,11 +487,11 @@ pub fn resolve_config(shared: &ConfigArgs, cfg: &config::NanojudgeConfig) -> Res
     }
     let bias_prior_logit = (bias_prior / (1.0 - bias_prior)).ln();
 
-    let reasoning_enabled = merge_opt(shared.reasoning, cfg.reasoning_enabled, "reasoning")
+    let deliberation_enabled = merge_opt(shared.deliberation, cfg.deliberation_enabled, "deliberation")
         .unwrap_or(true);
 
-    if !reasoning_enabled && shared.analysis_length.is_some() {
-        eprintln!("Warning: --analysis-length is ignored when reasoning is disabled");
+    if !deliberation_enabled && (shared.deliberation_length.is_some() || cfg.deliberation_length.is_some()) {
+        eprintln!("Warning: deliberation_length is ignored when deliberation is disabled");
     }
 
     // Prompt template: CLI path > config path > built-in default
@@ -510,11 +509,11 @@ pub fn resolve_config(shared: &ConfigArgs, cfg: &config::NanojudgeConfig) -> Res
         let template_path = cli_path.or(cfg_path);
         match template_path {
             Some(path) if uses_lineups => prompt::load_lineup_template(&path, lineup_size),
-            Some(path) => prompt::load_template(&path, reasoning_enabled),
-            None if uses_lineups && reasoning_enabled => prompt::default_lineup_template(lineup_size),
-            None if uses_lineups => prompt::default_lineup_template_no_reasoning(lineup_size),
-            None if reasoning_enabled => prompt::DEFAULT_TEMPLATE.to_string(),
-            None => prompt::DEFAULT_TEMPLATE_NO_REASONING.to_string(),
+            Some(path) => prompt::load_template(&path),
+            None if uses_lineups && deliberation_enabled => prompt::default_lineup_template(lineup_size),
+            None if uses_lineups => prompt::default_lineup_template_no_deliberation(lineup_size),
+            None if deliberation_enabled => prompt::DEFAULT_TEMPLATE.to_string(),
+            None => prompt::DEFAULT_TEMPLATE_NO_DELIBERATION.to_string(),
         }
     };
 
@@ -529,8 +528,8 @@ pub fn resolve_config(shared: &ConfigArgs, cfg: &config::NanojudgeConfig) -> Res
         target_prior_edges,
         stop_confidence,
         retries,
-        analysis_length,
-        reasoning_enabled,
+        deliberation_length,
+        deliberation_enabled,
         prompt_template,
         confidence_level,
         regularization_strength,
@@ -573,8 +572,8 @@ mod tests {
             target_prior_edges: None,
             stop_confidence: None,
             retries: None,
-            analysis_length: None,
-            reasoning: None,
+            deliberation_length: None,
+            deliberation: None,
             prompt_template: None,
             confidence_level: None,
             regularization_strength: None,
@@ -664,19 +663,19 @@ mod tests {
     }
 
     #[test]
-    fn test_verdict_temperature_default_reasoning() {
+    fn test_verdict_temperature_default_deliberation() {
         let cli = default_cli();
         let cfg = one_judge_config();
         let judges = resolve_judges(&cli, &cfg, Path::new("test.toml"), true);
-        assert_eq!(judges[0].verdict_temperature, DEFAULT_VERDICT_TEMPERATURE_REASONING);
+        assert_eq!(judges[0].verdict_temperature, DEFAULT_VERDICT_TEMPERATURE_DELIBERATION);
     }
 
     #[test]
-    fn test_verdict_temperature_default_no_reasoning() {
+    fn test_verdict_temperature_default_no_deliberation() {
         let cli = default_cli();
         let cfg = one_judge_config();
         let judges = resolve_judges(&cli, &cfg, Path::new("test.toml"), false);
-        assert_eq!(judges[0].verdict_temperature, DEFAULT_VERDICT_TEMPERATURE_NO_REASONING);
+        assert_eq!(judges[0].verdict_temperature, DEFAULT_VERDICT_TEMPERATURE_NO_DELIBERATION);
     }
 
     #[test]
@@ -718,8 +717,8 @@ mod tests {
     }
 
     #[test]
-    fn test_verdict_temperature_explicit_wins_in_no_reasoning_mode() {
-        // An explicit global value applies as-is even when reasoning is off —
+    fn test_verdict_temperature_explicit_wins_in_no_deliberation_mode() {
+        // An explicit global value applies as-is even when deliberation is off —
         // the mode-dependent default only kicks in when nothing is set.
         let cli = default_cli();
         let mut cfg = one_judge_config();
@@ -773,29 +772,29 @@ mod tests {
     }
 
     #[test]
-    fn test_reasoning_from_cli() {
+    fn test_deliberation_from_cli() {
         let mut cli = cli_with_budget();
-        cli.reasoning = Some(false);
+        cli.deliberation = Some(false);
         let cfg = NanojudgeConfig::default();
         let resolved = resolve_config(&cli, &cfg);
-        assert!(!resolved.reasoning_enabled);
+        assert!(!resolved.deliberation_enabled);
     }
 
     #[test]
-    fn test_reasoning_cli_overrides_config() {
+    fn test_deliberation_cli_overrides_config() {
         let mut cli = cli_with_budget();
-        cli.reasoning = Some(true);
-        let cfg = NanojudgeConfig { reasoning_enabled: Some(false), ..Default::default() };
+        cli.deliberation = Some(true);
+        let cfg = NanojudgeConfig { deliberation_enabled: Some(false), ..Default::default() };
         let resolved = resolve_config(&cli, &cfg);
-        assert!(resolved.reasoning_enabled);
+        assert!(resolved.deliberation_enabled);
     }
 
     #[test]
-    fn test_reasoning_from_config() {
+    fn test_deliberation_from_config() {
         let cli = cli_with_budget();
-        let cfg = NanojudgeConfig { reasoning_enabled: Some(false), judgements_per_item: Some(10), ..Default::default() };
+        let cfg = NanojudgeConfig { deliberation_enabled: Some(false), judgements_per_item: Some(10), ..Default::default() };
         let resolved = resolve_config(&cli, &cfg);
-        assert!(!resolved.reasoning_enabled);
+        assert!(!resolved.deliberation_enabled);
     }
 
     #[test]

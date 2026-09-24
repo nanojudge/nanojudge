@@ -122,7 +122,7 @@ nanojudge rank ... --save-successful-judgements --save-failed-judgements
 nanojudge rank ... --save-successful-judgements --include-successful-prompts
 ```
 
-Each successful record is a JSON object with `refit`, `item1`, `item2`, `item1_text_hash`, `item2_text_hash`, `category_probs`, `judge_model`, `judge_endpoint`, `temperature` (the actual value sent to the API, after jitter), `reasoning`, `criterion`, `logprobs`, `retries_used`, `hit_max_tokens`, and `usage` (token counts, when the endpoint provides them). The `item*_text_hash` fields are SHA-256 hashes (truncated to 64 bits) of the full item text; `nanojudge score` requires them as identity keys and will reject records without them. Prompts and responses are omitted by default; add `--include-successful-prompts` to include them.
+Each successful record is a JSON object with `refit`, `item1`, `item2`, `item1_text_hash`, `item2_text_hash`, `category_probs`, `judge_model`, `judge_endpoint`, `temperature` (the actual value sent to the API, after jitter), `deliberation`, `criterion`, `logprobs`, `retries_used`, `hit_max_tokens`, and `usage` (token counts, when the endpoint provides them). The `item*_text_hash` fields are SHA-256 hashes (truncated to 64 bits) of the full item text; `nanojudge score` requires them as identity keys and will reject records without them. Prompts and responses are omitted by default; add `--include-successful-prompts` to include them.
 
 Failed records always include `prompt` and `response` for debugging, plus the same metadata fields.
 
@@ -141,7 +141,7 @@ Loaded records are matched to this run by item text hash, so the file's items mu
 
 To reuse a judge's saved data without drawing any new comparisons from it, give that judge `weight = 0` in the config: its loaded edges still seed the engine, but it is assigned no new work. At least one judge must have positive weight.
 
-JSONL files store raw verdict probabilities; verdict tempering is applied at scoring time. When re-scoring with `nanojudge score`, pass `--verdict-temperature` to control tempering globally (default: 3.0 with reasoning, 1.0 without, inferred from the file's `reasoning` field), or `--judge-verdict-temperature "model@endpoint=T"` to set per-judge values. Use `--verdict-temperature 1.0` for untempered raw probabilities. If `rank` used a non-default `verdict_temperature` (globally or per-judge), re-pass those values to `score` to reproduce the original ranking — the JSONL does not record them. JSONL files produced before the `reasoning` field was added require `--verdict-temperature` to be passed explicitly.
+JSONL files store raw verdict probabilities; verdict tempering is applied at scoring time. When re-scoring with `nanojudge score`, pass `--verdict-temperature` to control tempering globally (default: 3.0 with deliberation, 1.0 without, inferred from the file's `deliberation` field), or `--judge-verdict-temperature "model@endpoint=T"` to set per-judge values. Use `--verdict-temperature 1.0` for untempered raw probabilities. If `rank` used a non-default `verdict_temperature` (globally or per-judge), re-pass those values to `score` to reproduce the original ranking — the JSONL does not record them. JSONL files without a `deliberation` field require `--verdict-temperature` to be passed explicitly.
 
 Runs with `lineup_size` above 2 write a different shape, since a lineup has no fixed number of members: `item1`/`item2` are replaced by an `items` array holding the lineup in presentation order, `item1_text_hash`/`item2_text_hash` by `item_text_hashes`, and `category_probs` by two fields: `ranking`, the judge's ordering of the lineup as indices into `items` (best first), and `place_probs`, one entry per place but the last, giving the probability the judge assigned that place's pick among the members not yet placed (all `1.0` in text mode). Pairwise runs are unaffected — a reader written against the two-item shape keeps working for `lineup_size = 2`.
 
@@ -175,7 +175,7 @@ Per-judge settings (in `[[judge]]` blocks):
 | `api_key_env` | No | Environment variable containing the API key |
 | `reasoning_effort` | No | Controls model reasoning mode (e.g. `"none"` to disable Qwen 3.5 thinking) |
 | `min_logprob_coverage` | No | Min fraction of verdict-token logprob mass required to trust a verdict, > 0.0 and ≤ 1.0 (default: 0.95) |
-| `verdict_temperature` | No | Tempers this judge's parsed verdict distribution before scoring: `q^(1/T)`, dividing each edge's log-odds by T. > 1 softens overconfident verdicts toward 50/50; distinct from the sampling `temperature`. Must be finite and > 0. Also settable top-level (default: 3.0 with reasoning enabled, 1.0 without) |
+| `verdict_temperature` | No | Tempers this judge's parsed verdict distribution before scoring: `q^(1/T)`, dividing each edge's log-odds by T. > 1 softens overconfident verdicts toward 50/50; distinct from the sampling `temperature`. Must be finite and > 0. Also settable top-level (default: 3.0 with deliberation enabled, 1.0 without) |
 
 ## How it works
 
@@ -235,7 +235,7 @@ NanoJudge is model-agnostic. It uses whatever LLM you point it at as a raw compu
 
 ## Benchmark
 
-We pitted NanoJudge against the strongest competitor we could find: **REALM** ([Wang et al. 2025](https://arxiv.org/abs/2508.18379)), a recent LLM re-ranker that sorts candidates with a quicksort-style recursion and TrueSkill ratings. The task is **RELIC** from the [BIRCO](https://github.com/BIRCO-benchmark/BIRCO_dataset) benchmark: find the passage that fills a masked quotation in a piece of literary analysis. Each query comes with a pool of about 51 passages, and exactly one of them is correct. Both methods use the same judge model (Qwen3-4B-Instruct-2507) on the same 100 queries. REALM does not support reasoning, so NanoJudge was also run with reasoning off.
+We pitted NanoJudge against the strongest competitor we could find: **REALM** ([Wang et al. 2025](https://arxiv.org/abs/2508.18379)), a recent LLM re-ranker that sorts candidates with a quicksort-style recursion and TrueSkill ratings. The task is **RELIC** from the [BIRCO](https://github.com/BIRCO-benchmark/BIRCO_dataset) benchmark: find the passage that fills a masked quotation in a piece of literary analysis. Each query comes with a pool of about 51 passages, and exactly one of them is correct. Both methods use the same judge model (Qwen3-4B-Instruct-2507) on the same 100 queries. REALM has no deliberation step, so NanoJudge was also run with deliberation off.
 
 REALM has no budget setting of its own, so for REALM (4x) we run REALM four times per query from different starting orders and rank each passage by its average position. That brings it to approximately the same number of LLM calls as NanoJudge (4x).
 

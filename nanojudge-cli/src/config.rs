@@ -41,7 +41,7 @@ pub struct NanojudgeConfig {
     pub concurrency: Option<usize>,
     pub prompt_template: Option<String>,
     pub logprobs: Option<bool>,
-    pub analysis_length: Option<String>,
+    pub deliberation_length: Option<String>,
     pub judgement_distribution: Option<String>,
     /// Number of items in each judged lineup: 2 to 9.
     pub lineup_size: Option<usize>,
@@ -60,7 +60,7 @@ pub struct NanojudgeConfig {
     pub judgements_per_refit: Option<usize>,
     pub prior_tau2: Option<f64>,
     pub bias_prior_tau2: Option<f64>,
-    pub reasoning_enabled: Option<bool>,
+    pub deliberation_enabled: Option<bool>,
     pub min_logprob_coverage: Option<f64>,
     pub verdict_temperature: Option<f64>,
     pub live_top: Option<usize>,
@@ -96,15 +96,17 @@ const DEFAULT_CONFIG_TEMPLATE: &str = "\
 # When false, uses text-based verdict parsing (discrete) — may need more judgements.
 # logprobs = false
 
-# How much analysis the LLM should write before its verdict.
+# How much deliberation the LLM should write before its verdict.
 # Examples: \"3 sentences\", \"1 paragraph\", \"5 sentences\".
-# analysis_length = \"2 paragraphs\"
+# deliberation_length = \"2 paragraphs\"
 
-# Whether to have the LLM reason before giving its verdict.
-# When false, the LLM skips analysis and outputs only the verdict line.
-# Faster and cheaper, but may reduce accuracy. max_tokens is forced to 16.
-# Cannot be used with a custom prompt_template.
-# reasoning_enabled = true
+# Whether to have the LLM deliberate before giving its verdict.
+# When false, the LLM skips deliberation and outputs only the verdict.
+# Faster and cheaper, but may reduce accuracy. max_tokens is forced down to
+# fit just the verdict (16 for pairs, one ranking line per item for lineups).
+# With a custom prompt_template, set this to match what the template asks for:
+# false means the template must ask for the verdict only.
+# deliberation_enabled = true
 
 # Judgement distribution: \"uniform\" or \"top-heavy\".
 # Uniform gives equal attention to all items. Top-heavy focuses on contenders.
@@ -165,9 +167,9 @@ const DEFAULT_CONFIG_TEMPLATE: &str = "\
 # sampling `temperature` — this tempers the parsed verdict, not the LLM call.
 # Text-mode (non-logprob) verdicts are one-hot and unaffected.
 # Must be finite and > 0. Can be overridden per-judge.
-# Default: 3.0 when reasoning is enabled (a verdict token written after an
-# analysis is near-deterministic, so its logprobs read overconfident);
-# 1.0 when reasoning is disabled.
+# Default: 3.0 when deliberation is enabled (a verdict token written after
+# deliberating is near-deterministic, so its logprobs read overconfident);
+# 1.0 when deliberation is disabled.
 # verdict_temperature = 3.0
 
 # Print a live ranking table after each refit. 0 = all items, N = top N.
@@ -218,7 +220,7 @@ const DEFAULT_CONFIG_TEMPLATE: &str = "\
 #   presence_penalty       - Penalizes repeated tokens, range -2.0 to 2.0
 #   top_p                  - Nucleus sampling threshold, range 0.0 to 1.0
 #   min_logprob_coverage   - Min verdict-token logprob mass to trust a verdict, > 0.0 and <= 1.0 (default: 0.95)
-#   verdict_temperature    - Temper this judge's parsed verdicts, q^(1/T); > 1 softens overconfidence, must be > 0 (default: global value, else 3.0 reasoning / 1.0 no-reasoning)
+#   verdict_temperature    - Temper this judge's parsed verdicts, q^(1/T); > 1 softens overconfidence, must be > 0 (default: global value, else 3.0 deliberation / 1.0 no-deliberation)
 #   max_tokens             - Maximum tokens in LLM response (default: 2048, or average of specified judges)
 #   api_key_env            - Environment variable name containing the API key
 #   reasoning_effort       - OpenRouter: controls reasoning/thinking mode (e.g. \\\"none\\\" to disable Qwen thinking)
@@ -349,7 +351,7 @@ judgements_per_item = 10
 judgements_per_refit = 3
 concurrency = 16
 logprobs = false
-analysis_length = "3 sentences"
+deliberation_length = "3 sentences"
 
 [[judge]]
 endpoint = "http://localhost:8000"
@@ -365,7 +367,7 @@ top_p = 0.95
         assert_eq!(config.judgements_per_refit, Some(3));
         assert_eq!(config.concurrency.unwrap(), 16);
         assert!(!config.logprobs.unwrap());
-        assert_eq!(config.analysis_length.as_deref().unwrap(), "3 sentences");
+        assert_eq!(config.deliberation_length.as_deref().unwrap(), "3 sentences");
         let judges = config.judge.unwrap();
         assert_eq!(judges.len(), 1);
         assert_eq!(judges[0].endpoint, "http://localhost:8000");
@@ -448,14 +450,14 @@ judgements_per_item = 5
     }
 
     #[test]
-    fn test_reasoning_enabled_parses() {
+    fn test_deliberation_enabled_parses() {
         let mut tmpfile = tempfile::NamedTempFile::new().unwrap();
         write!(tmpfile, r#"
-reasoning_enabled = false
+deliberation_enabled = false
 "#).unwrap();
 
         let config = load_config(tmpfile.path());
-        assert_eq!(config.reasoning_enabled, Some(false));
+        assert_eq!(config.deliberation_enabled, Some(false));
     }
 
     #[test]
@@ -477,14 +479,14 @@ verdict_temperature = 2.5
     }
 
     #[test]
-    fn test_reasoning_enabled_defaults_to_none() {
+    fn test_deliberation_enabled_defaults_to_none() {
         let mut tmpfile = tempfile::NamedTempFile::new().unwrap();
         write!(tmpfile, r#"
 judgements_per_item = 5
 "#).unwrap();
 
         let config = load_config(tmpfile.path());
-        assert!(config.reasoning_enabled.is_none());
+        assert!(config.deliberation_enabled.is_none());
     }
 
     #[test]

@@ -114,7 +114,7 @@ pub async fn run(
     // judgement. This is an implementation detail, not a benchmark mode:
     // `samples_per_judgement = 1` naturally produces a hard judgement.
     let config_toml = format!(
-        "reasoning_enabled = false\n\
+        "deliberation_enabled = false\n\
          logprobs = true\n\
          verdict_temperature = 1.0\n\
          \n\

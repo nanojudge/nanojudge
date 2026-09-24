@@ -48,7 +48,7 @@ fn resolve_save_path(path: &Path, prefix: &str) -> PathBuf {
     }
 }
 
-/// Output tokens to allow per ranking line in no-reasoning mode. A line reads
+/// Output tokens to allow per ranking line in no-deliberation mode. A line reads
 /// "First place is Option A" — about 7 tokens; 16 leaves room for tokenizer
 /// variation across models.
 const TOKENS_PER_RANKING_LINE: u32 = 16;
@@ -278,7 +278,7 @@ pub async fn run(args: RankArgs) {
     }
 
     // Resolve judges from [[judge]] blocks
-    let judges = resolve_judges(&args.cfg, &cfg, &config_path, resolved.reasoning_enabled);
+    let judges = resolve_judges(&args.cfg, &cfg, &config_path, resolved.deliberation_enabled);
     let logprobs_mode = judges[0].logprobs;
 
     if !logprobs_mode {
@@ -506,7 +506,7 @@ pub async fn run(args: RankArgs) {
         bias_prior_logit: resolved.bias_prior_logit,
     };
 
-    let analysis_length = resolved.analysis_length.clone();
+    let deliberation_length = resolved.deliberation_length.clone();
     let max_retries = resolved.retries;
 
     // Judge display names (Arc for sharing across tasks)
@@ -653,7 +653,7 @@ pub async fn run(args: RankArgs) {
             let texts = texts.clone();
             let titles = titles.clone();
             let criterion = criteria[criterion_assignments[pair_idx]].clone();
-            let analysis_length = analysis_length.clone();
+            let deliberation_length = deliberation_length.clone();
             let template = prompt_template.clone();
             let id_a = *id_a;
             let id_b = *id_b;
@@ -676,7 +676,7 @@ pub async fn run(args: RankArgs) {
                     id_a,
                     id_b,
                     min_logprob_coverage,
-                    &analysis_length,
+                    &deliberation_length,
                     max_retries,
                     verbose,
                     &judge_name,
@@ -744,7 +744,7 @@ pub async fn run(args: RankArgs) {
                                 "judge_model": judge_models[judge_idx],
                                 "judge_endpoint": judge_endpoints[judge_idx],
                                 "temperature": actual_temperature,
-                                "reasoning": resolved.reasoning_enabled,
+                                "deliberation": resolved.deliberation_enabled,
                                 "criterion": criterion,
                                 "logprobs": logprobs_mode,
                                 "retries_used": result.retries_used,
@@ -785,7 +785,7 @@ pub async fn run(args: RankArgs) {
                                 "judge_model": judge_models[judge_idx],
                                 "judge_endpoint": judge_endpoints[judge_idx],
                                 "temperature": actual_temperature,
-                                "reasoning": resolved.reasoning_enabled,
+                                "deliberation": resolved.deliberation_enabled,
                                 "criterion": criterion,
                                 "logprobs": logprobs_mode,
                                 "retries_used": result.retries_used,
@@ -1000,8 +1000,8 @@ pub async fn run(args: RankArgs) {
     }
 
     // Print max_tokens warnings (always, not just verbose)
-    // Suppressed when reasoning is disabled — max_tokens is intentionally low.
-    if resolved.reasoning_enabled {
+    // Suppressed when deliberation is disabled — max_tokens is intentionally low.
+    if resolved.deliberation_enabled {
         let mut any_max_tokens_hit = false;
         for (i, judge) in judges.iter().enumerate() {
             if judge_stats[i].max_tokens_hits > 0 {
@@ -1079,14 +1079,14 @@ async fn run_lineup_judgements(
     cfg: &config::NanojudgeConfig,
     resolved: &crate::resolve::ResolvedConfig,
 ) {
-    let mut judges = resolve_judges(&args.cfg, cfg, config_path, resolved.reasoning_enabled);
+    let mut judges = resolve_judges(&args.cfg, cfg, config_path, resolved.deliberation_enabled);
     let logprobs_mode = judges[0].logprobs;
 
-    // No-reasoning mode forces max_tokens to 16 (calibrated for a single verdict
+    // No-deliberation mode forces max_tokens to 16 (calibrated for a single verdict
     // line). A lineup ranking is one line per item (~7 tokens each), which 16
     // truncates — cutting off the trailing lines so the parser discards the
     // whole judgement. Give it enough room for every rank.
-    if !resolved.reasoning_enabled {
+    if !resolved.deliberation_enabled {
         let ranking_tokens = TOKENS_PER_RANKING_LINE * resolved.lineup_size as u32;
         for j in &mut judges {
             j.max_tokens = ranking_tokens;
@@ -1272,7 +1272,7 @@ async fn run_lineup_judgements(
         bias_prior_logit: resolved.bias_prior_logit,
     };
 
-    let analysis_length = resolved.analysis_length.clone();
+    let deliberation_length = resolved.deliberation_length.clone();
     let max_retries = resolved.retries;
 
     let judge_display_names: Arc<Vec<String>> = Arc::new(judges.iter().map(|j| j.display_name.clone()).collect());
@@ -1418,7 +1418,7 @@ async fn run_lineup_judgements(
             });
             let texts = texts.clone();
             let criterion = criteria[criterion_assignments[lineup_idx]].clone();
-            let analysis_length = analysis_length.clone();
+            let deliberation_length = deliberation_length.clone();
             let template = template.clone();
             let min_logprob_coverage = judge_min_logprob_coverages[judge_idx];
             let assigned_judge_id = judge_ids[judge_idx];
@@ -1434,7 +1434,7 @@ async fn run_lineup_judgements(
                 let result = judge_lineup(
                     &client, &llm_config, &template, &criterion,
                     &option_texts, &slot_ids,
-                    min_logprob_coverage, &analysis_length, max_retries, verbose, &judge_name,
+                    min_logprob_coverage, &deliberation_length, max_retries, verbose, &judge_name,
                 ).await;
                 (result, assigned_judge_id, judge_idx, std::time::Instant::now())
             });
@@ -1505,7 +1505,7 @@ async fn run_lineup_judgements(
                                 "judge_model": judge_models[judge_idx],
                                 "judge_endpoint": judge_endpoints[judge_idx],
                                 "temperature": actual_temperature,
-                                "reasoning": resolved.reasoning_enabled,
+                                "deliberation": resolved.deliberation_enabled,
                                 "criterion": criterion,
                                 "logprobs": logprobs_mode,
                                 "retries_used": tw.retries_used,
@@ -1552,7 +1552,7 @@ async fn run_lineup_judgements(
                                 "judge_model": judge_models[judge_idx],
                                 "judge_endpoint": judge_endpoints[judge_idx],
                                 "temperature": actual_temperature,
-                                "reasoning": resolved.reasoning_enabled,
+                                "deliberation": resolved.deliberation_enabled,
                                 "criterion": criterion,
                                 "logprobs": logprobs_mode,
                                 "retries_used": tw.retries_used,

@@ -2,7 +2,7 @@
 //!
 //! Supports custom prompt templates with variable substitution.
 //! Pairwise templates: $criterion, $option1 and $option2 are required;
-//! $name1, $name2 (item titles) and $length (the analysis-length setting)
+//! $name1, $name2 (item titles) and $length (the deliberation-length setting)
 //! are optional. Lineup templates: $criterion and one $option<letter> per
 //! item ($optionA through $optionI) are required; $length is optional.
 //!
@@ -29,7 +29,7 @@ Verdict: Option 1
 Verdict: Option 2
 ";
 
-pub const DEFAULT_TEMPLATE_NO_REASONING: &str = "\
+pub const DEFAULT_TEMPLATE_NO_DELIBERATION: &str = "\
 $criterion
 
 Option 1:
@@ -46,7 +46,6 @@ Verdict: Option 2
 ";
 
 const REQUIRED_VARIABLES: &[&str] = &["$criterion", "$option1", "$option2"];
-const REQUIRED_VARIABLES_NO_REASONING: &[&str] = &["$criterion", "$option1", "$option2"];
 
 // --- Lineup judgement templates ---
 //
@@ -120,7 +119,7 @@ fn size_word(lineup_size: usize) -> &'static str {
     WORDS[lineup_size]
 }
 
-/// The built-in lineup template for `lineup_size` items, with an analysis step.
+/// The built-in lineup template for `lineup_size` items, with a deliberation step.
 ///
 /// The 3-item form is the shape all sizes follow:
 ///
@@ -149,8 +148,8 @@ option ({letters}):\n\n{lines}\n",
 }
 
 /// The built-in lineup template for `lineup_size` items, verdict only (no
-/// reasoning step).
-pub fn default_lineup_template_no_reasoning(lineup_size: usize) -> String {
+/// deliberation step).
+pub fn default_lineup_template_no_deliberation(lineup_size: usize) -> String {
     format!(
         "{criterion}\n\n{blocks}\n\nInstructions:\nRespond only with these {count} lines, \
 replacing the placeholder letters with the letter of the option ({letters}):\n\n{lines}\n",
@@ -165,9 +164,8 @@ replacing the placeholder letters with the letter of the option ({letters}):\n\n
 
 /// Validate that a template contains all required variables.
 /// Returns an error message listing any missing variables.
-pub fn validate_template(template: &str, reasoning_enabled: bool) -> Result<(), String> {
-    let required = if reasoning_enabled { REQUIRED_VARIABLES } else { REQUIRED_VARIABLES_NO_REASONING };
-    let missing: Vec<&&str> = required
+pub fn validate_template(template: &str) -> Result<(), String> {
+    let missing: Vec<&&str> = REQUIRED_VARIABLES
         .iter()
         .filter(|var| !template.contains(**var))
         .collect();
@@ -220,11 +218,11 @@ it uses {}. Use a template with exactly {} option variable(s), or change lineup-
 }
 
 /// Load a prompt template from a file path, validate it, and return the contents.
-pub fn load_template(path: &std::path::Path, reasoning_enabled: bool) -> String {
+pub fn load_template(path: &std::path::Path) -> String {
     let content = std::fs::read_to_string(path)
         .unwrap_or_else(|e| bail(format!("Failed to read prompt template {}: {e}", path.display())));
 
-    if let Err(msg) = validate_template(&content, reasoning_enabled) {
+    if let Err(msg) = validate_template(&content) {
         bail(format!("{} (in {})", msg, path.display()));
     }
 
@@ -250,14 +248,14 @@ pub fn load_lineup_template(path: &std::path::Path, lineup_size: usize) -> Strin
 /// Substituted values are never rescanned, so item text containing literal
 /// `$option2`, `$length`, etc. (common when ranking code) passes through
 /// untouched instead of being recursively substituted.
-pub fn build_prompt(template: &str, criterion: &str, option1: &str, option2: &str, name1: &str, name2: &str, analysis_length: &str) -> String {
+pub fn build_prompt(template: &str, criterion: &str, option1: &str, option2: &str, name1: &str, name2: &str, deliberation_length: &str) -> String {
     let vars: [(&str, &str); 6] = [
         ("$criterion", criterion),
         ("$option1", option1),
         ("$option2", option2),
         ("$name1", name1),
         ("$name2", name2),
-        ("$length", analysis_length),
+        ("$length", deliberation_length),
     ];
 
     let mut out = String::with_capacity(template.len() + option1.len() + option2.len());
@@ -290,7 +288,7 @@ pub fn build_lineup_prompt(
     template: &str,
     criterion: &str,
     option_texts: &[&str],
-    analysis_length: &str,
+    deliberation_length: &str,
 ) -> String {
     let lineup_size = option_texts.len();
     assert!(
@@ -304,7 +302,7 @@ pub fn build_lineup_prompt(
         .map(|i| (option_variable(i), option_texts[i]))
         .collect();
     vars.push(("$criterion".to_string(), criterion));
-    vars.push(("$length".to_string(), analysis_length));
+    vars.push(("$length".to_string(), deliberation_length));
 
     let options_len: usize = option_texts.iter().map(|o| o.len()).sum();
     let mut out = String::with_capacity(template.len() + options_len);
@@ -332,7 +330,7 @@ mod tests {
         // digit that could be mistaken for part of the ranking format.
         for size in MIN_LINEUP_SIZE..=MAX_LINEUP_SIZE {
             for template in
-                [default_lineup_template(size), default_lineup_template_no_reasoning(size)]
+                [default_lineup_template(size), default_lineup_template_no_deliberation(size)]
             {
                 let word = size_word(size);
                 assert!(
@@ -385,7 +383,7 @@ Third place is Option Z
 
     #[test]
     fn test_default_template_is_valid() {
-        validate_template(DEFAULT_TEMPLATE, true).unwrap();
+        validate_template(DEFAULT_TEMPLATE).unwrap();
     }
 
     #[test]
@@ -434,7 +432,7 @@ Third place is Option Z
 
     #[test]
     fn test_validate_missing_variables() {
-        let result = validate_template("Just $option1 and $option2", true);
+        let result = validate_template("Just $option1 and $option2");
         assert!(result.is_err());
         let msg = result.unwrap_err();
         assert!(msg.contains("$criterion"));
@@ -443,18 +441,18 @@ Third place is Option Z
     #[test]
     fn test_validate_complete_template() {
         let template = "$criterion\n$option1\n$option2\n$length";
-        validate_template(template, true).unwrap();
+        validate_template(template).unwrap();
     }
 
     #[test]
-    fn test_no_reasoning_template_has_no_length() {
-        assert!(!DEFAULT_TEMPLATE_NO_REASONING.contains("$length"));
+    fn test_no_deliberation_template_has_no_length() {
+        assert!(!DEFAULT_TEMPLATE_NO_DELIBERATION.contains("$length"));
     }
 
     #[test]
-    fn test_no_reasoning_template_has_verdicts() {
-        assert!(DEFAULT_TEMPLATE_NO_REASONING.contains("Verdict: Option 1"));
-        assert!(DEFAULT_TEMPLATE_NO_REASONING.contains("Verdict: Option 2"));
+    fn test_no_deliberation_template_has_verdicts() {
+        assert!(DEFAULT_TEMPLATE_NO_DELIBERATION.contains("Verdict: Option 1"));
+        assert!(DEFAULT_TEMPLATE_NO_DELIBERATION.contains("Verdict: Option 2"));
     }
 
     // --- Lineup template tests ---
@@ -464,8 +462,8 @@ Third place is Option Z
         for size in MIN_LINEUP_SIZE..=MAX_LINEUP_SIZE {
             validate_lineup_template(&default_lineup_template(size), size)
                 .unwrap_or_else(|e| panic!("size {size}: {e}"));
-            validate_lineup_template(&default_lineup_template_no_reasoning(size), size)
-                .unwrap_or_else(|e| panic!("size {size} (no reasoning): {e}"));
+            validate_lineup_template(&default_lineup_template_no_deliberation(size), size)
+                .unwrap_or_else(|e| panic!("size {size} (no deliberation): {e}"));
         }
     }
 
@@ -572,8 +570,8 @@ Third place is Option Z
     }
 
     #[test]
-    fn test_build_prompt_no_reasoning() {
-        let prompt = build_prompt(DEFAULT_TEMPLATE_NO_REASONING, "Which is tastier?", "Pizza", "Sushi", "pizza", "sushi", "ignored");
+    fn test_build_prompt_no_deliberation() {
+        let prompt = build_prompt(DEFAULT_TEMPLATE_NO_DELIBERATION, "Which is tastier?", "Pizza", "Sushi", "pizza", "sushi", "ignored");
         assert!(prompt.contains("Option 1:\nPizza"));
         assert!(prompt.contains("Option 2:\nSushi"));
         assert!(prompt.contains("Respond only with one of these lines verbatim:"));

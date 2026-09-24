@@ -71,7 +71,7 @@ pub struct ConfigArgs {
     /// q^(1/T), which divides every edge's log-odds by T. 1.0 = off; > 1 pulls
     /// overconfident verdicts toward 50/50; < 1 sharpens. Distinct from the
     /// sampling temperature. Must be finite and > 0. Can be overridden per-judge.
-    /// Default: 3.0 with reasoning enabled, 1.0 without.
+    /// Default: 3.0 with deliberation enabled, 1.0 without.
     #[arg(long)]
     pub verdict_temperature: Option<f64>,
 
@@ -143,15 +143,15 @@ pub struct ConfigArgs {
     #[arg(long)]
     pub retries: Option<usize>,
 
-    /// How much analysis the LLM should write before its verdict.
+    /// How much deliberation the LLM should write before its verdict.
     /// Default: "2 paragraphs". Examples: "3 sentences", "1 paragraph", "5 sentences".
     #[arg(long)]
-    pub analysis_length: Option<String>,
+    pub deliberation_length: Option<String>,
 
-    /// Enable LLM reasoning/analysis before the verdict. Default: true.
-    /// Use --reasoning false to skip analysis (faster/cheaper, forces max_tokens to 16).
+    /// Enable LLM deliberation before the verdict. Default: true.
+    /// Use --deliberation false to skip deliberation (faster/cheaper, forces max_tokens down to fit just the verdict).
     #[arg(long, num_args = 0..=1, default_missing_value = "true")]
-    pub reasoning: Option<bool>,
+    pub deliberation: Option<bool>,
 
     /// Path to a custom prompt template file.
     /// Pairwise templates must contain $criterion, $option1 and $option2;
@@ -270,8 +270,8 @@ pub struct ScoreArgs {
     /// Temperature applied to each verdict distribution before scoring:
     /// q^(1/T), which divides every edge's log-odds by T. 1.0 = off;
     /// values above 1 pull overconfident verdicts toward 50/50; below 1
-    /// sharpens. Default: 3.0 with reasoning, 1.0 without (inferred from
-    /// the JSONL file's reasoning field). Must be finite and > 0.
+    /// sharpens. Default: 3.0 with deliberation, 1.0 without (inferred from
+    /// the JSONL file's deliberation field). Must be finite and > 0.
     /// Overridden per-judge by --judge-verdict-temperature.
     #[arg(long)]
     pub verdict_temperature: Option<f64>,
