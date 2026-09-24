@@ -173,6 +173,20 @@
   verdict. This is set by NanoJudge's prompt and is separate from the
   model's own reasoning, which is controlled per judge by `reasoning_effort`.
 
+- **Model reasoning** (`reasoning`, `reasoning_effort`): Thinking the model
+  does on its own before answering, separate from its visible answer and from
+  NanoJudge's deliberation. Endpoints return its text in a `reasoning` or
+  `reasoning_content` field, which NanoJudge saves as `reasoning`. The text may
+  be a summary rather than the full reasoning, or missing entirely even when
+  the model reasoned. The reported `reasoning_tokens` count is the more
+  reliable record of how much reasoning happened.
+
+- **Visible tokens** (`visible_tokens`): The tokens in the model's visible
+  answer, i.e. the deliberation and verdict: `completion_tokens` minus
+  `reasoning_tokens`. `null` when the endpoint doesn't report reasoning tokens.
+  This assumes the endpoint counts reasoning tokens as part of
+  `completion_tokens`, which is the usual convention.
+
 - **Sampling temperature** (`temperature`): Controls randomness while the LLM
   generates its response.
 

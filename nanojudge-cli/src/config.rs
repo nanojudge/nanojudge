@@ -65,7 +65,9 @@ pub struct NanojudgeConfig {
     pub verdict_temperature: Option<f64>,
     pub live_top: Option<usize>,
     pub save_successful_judgements: Option<PathBuf>,
-    pub include_successful_prompts: Option<bool>,
+    pub save_prompt_text: Option<bool>,
+    pub save_response_text: Option<bool>,
+    pub save_reasoning_text: Option<bool>,
     pub output_format: Option<OutputFormat>,
     pub verbose: Option<bool>,
     pub save_failed_judgements: Option<PathBuf>,
@@ -179,13 +181,22 @@ const DEFAULT_CONFIG_TEMPLATE: &str = "\
 # Save successful judgements to a JSONL file. Value is a path.
 # Use \".\" for the current directory (auto-generates judgements-{timestamp}.jsonl).
 # A directory path auto-generates a filename inside it.
-# By default saves metadata and verdicts but not prompts/responses.
+# By default saves metadata and verdicts but no text; see the three
+# save_*_text settings below.
 # Omit or comment out to disable.
 # save_successful_judgements = \".\"
 
-# Include full prompts and responses in saved successful judgements.
-# Only meaningful when save_successful_judgements is set.
-# include_successful_prompts = false
+# Include the prompt sent to the LLM in saved successful judgements.
+# Requires save_successful_judgements.
+# save_prompt_text = false
+
+# Include the LLM's visible answer (deliberation and verdict) in saved
+# successful judgements. Requires save_successful_judgements.
+# save_response_text = false
+
+# Include the model's own reasoning text in saved successful judgements.
+# Requires save_successful_judgements.
+# save_reasoning_text = false
 
 # Output format for final results: \"table\" or \"json\".
 # output_format = \"table\"
@@ -196,7 +207,7 @@ const DEFAULT_CONFIG_TEMPLATE: &str = "\
 # Save failed judgements (unparseable responses) to a JSONL file. Value is a path.
 # Use \".\" for the current directory (auto-generates failures-{timestamp}.jsonl).
 # A directory path auto-generates a filename inside it.
-# Always includes prompts and responses for debugging.
+# Always includes the prompt, response and reasoning text for debugging.
 # Omit or comment out to disable.
 # save_failed_judgements = \".\"
 

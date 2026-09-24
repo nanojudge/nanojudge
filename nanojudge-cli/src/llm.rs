@@ -100,7 +100,39 @@ struct ChatCompletionResponse {
 #[derive(Debug, Deserialize)]
 pub struct Usage {
     pub prompt_tokens: u64,
+    /// Includes reasoning tokens, when the model reasons.
     pub completion_tokens: u64,
+    /// Should equal prompt_tokens + completion_tokens. Only used for checking.
+    total_tokens: Option<u64>,
+    completion_tokens_details: Option<CompletionTokensDetails>,
+}
+
+#[derive(Debug, Deserialize)]
+struct CompletionTokensDetails {
+    reasoning_tokens: Option<u64>,
+}
+
+impl Usage {
+    /// Tokens the model spent reasoning. None if the endpoint didn't report it.
+    pub fn reasoning_tokens(&self) -> Option<u64> {
+        self.completion_tokens_details.as_ref().and_then(|d| d.reasoning_tokens)
+    }
+
+    /// Tokens in the visible answer: completion tokens minus reasoning tokens.
+    /// None when reasoning tokens weren't reported.
+    pub fn visible_tokens(&self) -> Option<u64> {
+        self.reasoning_tokens().map(|r| self.completion_tokens - r)
+    }
+
+    /// The `usage` object written to the judgements files.
+    pub fn to_json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "prompt_tokens": self.prompt_tokens,
+            "completion_tokens": self.completion_tokens,
+            "reasoning_tokens": self.reasoning_tokens(),
+            "visible_tokens": self.visible_tokens(),
+        })
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -113,6 +145,10 @@ struct Choice {
 #[derive(Debug, Deserialize)]
 struct MessageContent {
     content: Option<String>,
+    /// The model's reasoning text. Endpoints use one of these two names; a
+    /// missing field and an explicit null both read as None.
+    reasoning: Option<String>,
+    reasoning_content: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -125,7 +161,10 @@ pub struct PairJudgementResult {
     pub item1_id: i64,
     pub item2_id: i64,
     pub parse_result: ParseResult,
-    pub response_text: String,
+    /// The visible answer. None if the endpoint returned no content.
+    pub response_text: Option<String>,
+    /// The model's reasoning text. None if the endpoint returned none.
+    pub reasoning_text: Option<String>,
     pub prompt: String,
     pub retries_used: usize,
     pub usage: Option<Usage>,
@@ -164,16 +203,67 @@ pub(crate) fn jittered_temperature(base: f64, jitter_std: f64, rng: &mut impl Rn
     base * multiplier
 }
 
-/// Send one chat request to the LLM and return the raw pieces the callers need:
-/// the response text, the token logprobs (empty in text mode), token usage, and
-/// whether the response hit `max_tokens`. Returns Err only on HTTP/network
-/// failures. Bails (fatal) if logprobs were requested but none came back, since
-/// that is a misconfiguration rather than a per-judgement failure.
+/// Take the reasoning text from whichever of the two fields the endpoint used.
+/// Both being set is an error: there's no way to tell which one is the model's
+/// reasoning.
+fn pick_reasoning(
+    reasoning: Option<String>,
+    reasoning_content: Option<String>,
+) -> Result<Option<String>, String> {
+    match (reasoning, reasoning_content) {
+        (Some(_), Some(_)) => Err(
+            "the response has both `reasoning` and `reasoning_content`; can't tell which is the model's reasoning".into(),
+        ),
+        (Some(r), None) | (None, Some(r)) => Ok(Some(r)),
+        (None, None) => Ok(None),
+    }
+}
+
+/// Check the token counts mean what we assume: total tokens are prompt plus
+/// completion tokens, and reasoning tokens are part of completion tokens.
+/// An endpoint that counts reasoning outside completion tokens fails one of
+/// these on a reply that reasons, unless it also leaves reasoning out of the
+/// total and reasons less than it answers.
+fn check_token_counts(usage: &Usage) -> Result<(), String> {
+    if let Some(total) = usage.total_tokens
+        && total != usage.prompt_tokens + usage.completion_tokens
+    {
+        return Err(format!(
+            "reported {total} total tokens but {} prompt + {} completion tokens; total tokens should be prompt plus completion tokens",
+            usage.prompt_tokens, usage.completion_tokens
+        ));
+    }
+    match usage.reasoning_tokens() {
+        Some(r) if r > usage.completion_tokens => Err(format!(
+            "reported {r} reasoning tokens but only {} completion tokens; reasoning tokens should be part of completion tokens",
+            usage.completion_tokens
+        )),
+        _ => Ok(()),
+    }
+}
+
+/// The parts of one LLM reply that the judgement files record.
+pub struct LlmReply {
+    /// The visible answer. None if the endpoint returned no content.
+    pub content: Option<String>,
+    /// The model's reasoning text. None if the endpoint returned none.
+    pub reasoning: Option<String>,
+    pub usage: Option<Usage>,
+    /// True if the response was truncated due to hitting max_tokens.
+    pub hit_max_tokens: bool,
+}
+
+/// Send one chat request to the LLM and return the reply plus the token
+/// logprobs (empty in text mode). Returns Err only on HTTP/network failures.
+/// Bails (fatal) if logprobs were requested but none came back, if the reply
+/// has both `reasoning` and `reasoning_content`, or if its token counts are
+/// inconsistent (see `check_token_counts`): these are endpoint problems rather
+/// than per-judgement failures.
 async fn send_chat_raw(
     client: &Client,
     config: &LlmConfig,
     prompt: &str,
-) -> Result<(String, Vec<LogprobContent>, Option<Usage>, bool), LlmError> {
+) -> Result<(LlmReply, Vec<LogprobContent>), LlmError> {
     let request = ChatCompletionRequest {
         model: config.model.clone(),
         messages: vec![ChatMessage {
@@ -225,7 +315,12 @@ async fn send_chat_raw(
         .next()
         .ok_or(LlmError::Retryable("No choices in LLM response".into()))?;
 
-    let content = choice.message.content.unwrap_or_default();
+    let message = choice.message;
+    let reasoning = pick_reasoning(message.reasoning, message.reasoning_content)
+        .unwrap_or_else(|e| crate::bail(format!("{}: {e}", config.model)));
+    if let Some(ref usage) = data.usage {
+        check_token_counts(usage).unwrap_or_else(|e| crate::bail(format!("{}: {e}", config.model)));
+    }
     let hit_max_tokens = choice.finish_reason.as_deref() == Some("length");
 
     let logprobs = if config.logprobs {
@@ -238,7 +333,13 @@ async fn send_chat_raw(
         Vec::new()
     };
 
-    Ok((content, logprobs, data.usage, hit_max_tokens))
+    let reply = LlmReply {
+        content: message.content,
+        reasoning,
+        usage: data.usage,
+        hit_max_tokens,
+    };
+    Ok((reply, logprobs))
 }
 
 /// Send one HTTP request to the LLM and parse the pairwise verdict.
@@ -249,16 +350,19 @@ pub async fn send_pair_judgement_request(
     config: &LlmConfig,
     prompt: &str,
     min_logprob_coverage: f64,
-) -> Result<(ParseResult, String, Option<Usage>, bool), LlmError> {
-    let (content, logprobs, usage, hit_max_tokens) = send_chat_raw(client, config, prompt).await?;
+) -> Result<(ParseResult, LlmReply), LlmError> {
+    let (reply, logprobs) = send_chat_raw(client, config, prompt).await?;
 
     let parse_result = if config.logprobs {
         parse_response(&logprobs, min_logprob_coverage)
     } else {
-        parse_response_text(&content)
+        match &reply.content {
+            Some(content) => parse_response_text(content),
+            None => ParseResult { category_probs: None },
+        }
     };
 
-    Ok((parse_result, content, usage, hit_max_tokens))
+    Ok((parse_result, reply))
 }
 
 /// Call the LLM to compare two items, with retries on HTTP errors.
@@ -288,16 +392,17 @@ pub async fn judge_pair(
     let mut last_err = String::new();
     for attempt in 0..=max_retries {
         match send_pair_judgement_request(client, config, &prompt, min_logprob_coverage).await {
-            Ok((parse_result, content, usage, hit_max_tokens)) => {
+            Ok((parse_result, reply)) => {
                 return Ok(PairJudgementResult {
                     item1_id,
                     item2_id,
                     parse_result,
-                    response_text: content,
+                    response_text: reply.content,
+                    reasoning_text: reply.reasoning,
                     prompt: prompt.clone(),
                     retries_used: attempt,
-                    usage,
-                    hit_max_tokens,
+                    usage: reply.usage,
+                    hit_max_tokens: reply.hit_max_tokens,
                 });
             }
             Err(LlmError::Permanent(e)) => {
@@ -332,7 +437,10 @@ pub struct LineupJudgementResult {
     /// The judge's ranking and place probabilities, indexing into `item_ids`.
     /// None if the response was unparseable.
     pub verdict: Option<LineupVerdict>,
-    pub response_text: String,
+    /// The visible answer. None if the endpoint returned no content.
+    pub response_text: Option<String>,
+    /// The model's reasoning text. None if the endpoint returned none.
+    pub reasoning_text: Option<String>,
     pub prompt: String,
     pub retries_used: usize,
     pub usage: Option<Usage>,
@@ -348,16 +456,16 @@ async fn send_lineup_judgement_request(
     prompt: &str,
     lineup_size: usize,
     min_logprob_coverage: f64,
-) -> Result<(Option<LineupVerdict>, String, Option<Usage>, bool), LlmError> {
-    let (content, logprobs, usage, hit_max_tokens) = send_chat_raw(client, config, prompt).await?;
+) -> Result<(Option<LineupVerdict>, LlmReply), LlmError> {
+    let (reply, logprobs) = send_chat_raw(client, config, prompt).await?;
 
     let verdict = if config.logprobs {
         parse_lineup(&logprobs, lineup_size, min_logprob_coverage)
     } else {
-        parse_lineup_text(&content, lineup_size)
+        reply.content.as_deref().and_then(|content| parse_lineup_text(content, lineup_size))
     };
 
-    Ok((verdict, content, usage, hit_max_tokens))
+    Ok((verdict, reply))
 }
 
 /// Call the LLM to rank a lineup's items, with retries on HTTP errors. Mirrors
@@ -389,15 +497,16 @@ pub async fn judge_lineup(
     let mut last_err = String::new();
     for attempt in 0..=max_retries {
         match send_lineup_judgement_request(client, config, &prompt, lineup_size, min_logprob_coverage).await {
-            Ok((verdict, content, usage, hit_max_tokens)) => {
+            Ok((verdict, reply)) => {
                 return Ok(LineupJudgementResult {
                     item_ids: item_ids.to_vec(),
                     verdict,
-                    response_text: content,
+                    response_text: reply.content,
+                    reasoning_text: reply.reasoning,
                     prompt: prompt.clone(),
                     retries_used: attempt,
-                    usage,
-                    hit_max_tokens,
+                    usage: reply.usage,
+                    hit_max_tokens: reply.hit_max_tokens,
                 });
             }
             Err(LlmError::Permanent(e)) => {
@@ -454,6 +563,106 @@ mod tests {
             assert!(result >= base * 0.8);
             assert!(result <= base * 1.2);
         }
+    }
+
+    fn usage(json: &str) -> Usage {
+        serde_json::from_str(json).unwrap()
+    }
+
+    fn message(json: &str) -> MessageContent {
+        serde_json::from_str(json).unwrap()
+    }
+
+    #[test]
+    fn test_usage_reasoning_tokens_reported() {
+        let u = usage(r#"{"prompt_tokens": 13, "completion_tokens": 26,
+            "completion_tokens_details": {"reasoning_tokens": 19}}"#);
+        assert_eq!(u.reasoning_tokens(), Some(19));
+        assert_eq!(u.visible_tokens(), Some(7));
+    }
+
+    #[test]
+    fn test_usage_zero_reasoning_tokens_is_not_null() {
+        let u = usage(r#"{"prompt_tokens": 13, "completion_tokens": 12,
+            "completion_tokens_details": {"reasoning_tokens": 0}}"#);
+        let j = u.to_json();
+        assert_eq!(j["reasoning_tokens"], serde_json::json!(0));
+        assert_eq!(j["visible_tokens"], serde_json::json!(12));
+    }
+
+    #[test]
+    fn test_usage_reasoning_tokens_not_reported() {
+        for json in [
+            r#"{"prompt_tokens": 5, "completion_tokens": 9}"#,
+            r#"{"prompt_tokens": 5, "completion_tokens": 9, "completion_tokens_details": null}"#,
+            r#"{"prompt_tokens": 5, "completion_tokens": 9, "completion_tokens_details": {}}"#,
+            r#"{"prompt_tokens": 5, "completion_tokens": 9, "completion_tokens_details": {"reasoning_tokens": null}}"#,
+        ] {
+            let j = usage(json).to_json();
+            assert!(j["reasoning_tokens"].is_null(), "{json}");
+            assert!(j["visible_tokens"].is_null(), "{json}");
+            assert_eq!(j["completion_tokens"], serde_json::json!(9));
+        }
+    }
+
+    #[test]
+    fn test_check_token_counts_reasoning() {
+        let within = usage(r#"{"prompt_tokens": 1, "completion_tokens": 10,
+            "completion_tokens_details": {"reasoning_tokens": 10}}"#);
+        assert!(check_token_counts(&within).is_ok());
+        let over = usage(r#"{"prompt_tokens": 1, "completion_tokens": 10,
+            "completion_tokens_details": {"reasoning_tokens": 11}}"#);
+        assert!(check_token_counts(&over).is_err());
+        let unreported = usage(r#"{"prompt_tokens": 1, "completion_tokens": 10}"#);
+        assert!(check_token_counts(&unreported).is_ok());
+    }
+
+    #[test]
+    fn test_check_token_counts_total() {
+        // Gemini's reply from OpenRouter: reasoning inside completion.
+        let matching = usage(r#"{"prompt_tokens": 10, "completion_tokens": 174, "total_tokens": 184,
+            "completion_tokens_details": {"reasoning_tokens": 162}}"#);
+        assert!(check_token_counts(&matching).is_ok());
+        // Reasoning counted outside completion but inside the total.
+        let separate = usage(r#"{"prompt_tokens": 10, "completion_tokens": 12, "total_tokens": 184,
+            "completion_tokens_details": {"reasoning_tokens": 162}}"#);
+        assert!(check_token_counts(&separate).is_err());
+        let off_by_one = usage(r#"{"prompt_tokens": 10, "completion_tokens": 174, "total_tokens": 185}"#);
+        assert!(check_token_counts(&off_by_one).is_err());
+        let unreported = usage(r#"{"prompt_tokens": 10, "completion_tokens": 174}"#);
+        assert!(check_token_counts(&unreported).is_ok());
+        let null = usage(r#"{"prompt_tokens": 10, "completion_tokens": 174, "total_tokens": null}"#);
+        assert!(check_token_counts(&null).is_ok());
+    }
+
+    #[test]
+    fn test_message_missing_and_null_fields_are_none() {
+        let missing = message(r#"{"role": "assistant"}"#);
+        assert_eq!(missing.content, None);
+        assert_eq!(missing.reasoning, None);
+        assert_eq!(missing.reasoning_content, None);
+        let null = message(r#"{"content": null, "reasoning": null, "reasoning_content": null}"#);
+        assert_eq!(null.content, None);
+        assert_eq!(null.reasoning, None);
+        assert_eq!(null.reasoning_content, None);
+    }
+
+    #[test]
+    fn test_message_empty_strings_stay_empty() {
+        let m = message(r#"{"content": "", "reasoning": ""}"#);
+        assert_eq!(m.content.as_deref(), Some(""));
+        assert_eq!(pick_reasoning(m.reasoning, m.reasoning_content), Ok(Some(String::new())));
+    }
+
+    #[test]
+    fn test_pick_reasoning() {
+        let s = |t: &str| Some(t.to_string());
+        assert_eq!(pick_reasoning(s("a"), None), Ok(s("a")));
+        assert_eq!(pick_reasoning(None, s("b")), Ok(s("b")));
+        assert_eq!(pick_reasoning(None, None), Ok(None));
+        assert!(pick_reasoning(s("a"), s("b")).is_err());
+        // An empty string still counts as present.
+        assert!(pick_reasoning(s(""), s("b")).is_err());
     }
 
     #[test]

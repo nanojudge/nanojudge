@@ -430,7 +430,9 @@ pub async fn run(args: RankArgs) {
     } else {
         None
     };
-    let include_successful_prompts = resolved.include_successful_prompts;
+    let save_prompt_text = resolved.save_prompt_text;
+    let save_response_text = resolved.save_response_text;
+    let save_reasoning_text = resolved.save_reasoning_text;
 
     // Set up failure saving if requested
     let failures_file = if let Some(ref save_path) = resolved.save_failed_judgements {
@@ -513,6 +515,7 @@ pub async fn run(args: RankArgs) {
     let judge_display_names: Arc<Vec<String>> = Arc::new(judges.iter().map(|j| j.display_name.clone()).collect());
     let judge_models: Arc<Vec<String>> = Arc::new(judges.iter().map(|j| j.model.clone()).collect());
     let judge_endpoints: Arc<Vec<String>> = Arc::new(judges.iter().map(|j| j.endpoint.clone()).collect());
+    let judge_reasoning_efforts: Arc<Vec<Option<String>>> = Arc::new(judges.iter().map(|j| j.reasoning_effort.clone()).collect());
 
     let mut total_judgements: usize = 0;
     let mut total_retries: usize = 0;
@@ -745,20 +748,23 @@ pub async fn run(args: RankArgs) {
                                 "judge_endpoint": judge_endpoints[judge_idx],
                                 "temperature": actual_temperature,
                                 "deliberation": resolved.deliberation_enabled,
+                                "reasoning_effort": judge_reasoning_efforts[judge_idx],
                                 "criterion": criterion,
                                 "logprobs": logprobs_mode,
                                 "retries_used": result.retries_used,
                                 "hit_max_tokens": result.hit_max_tokens,
                             });
                             if let Some(ref usage) = result.usage {
-                                line["usage"] = serde_json::json!({
-                                    "prompt_tokens": usage.prompt_tokens,
-                                    "completion_tokens": usage.completion_tokens,
-                                });
+                                line["usage"] = usage.to_json();
                             }
-                            if include_successful_prompts {
+                            if save_prompt_text {
                                 line["prompt"] = serde_json::json!(result.prompt);
+                            }
+                            if save_response_text {
                                 line["response"] = serde_json::json!(result.response_text);
+                            }
+                            if save_reasoning_text {
+                                line["reasoning"] = serde_json::json!(result.reasoning_text);
                             }
                             let mut f = file_mutex.lock().unwrap();
                             let _ = writeln!(f, "{}", line);
@@ -786,18 +792,17 @@ pub async fn run(args: RankArgs) {
                                 "judge_endpoint": judge_endpoints[judge_idx],
                                 "temperature": actual_temperature,
                                 "deliberation": resolved.deliberation_enabled,
+                                "reasoning_effort": judge_reasoning_efforts[judge_idx],
                                 "criterion": criterion,
                                 "logprobs": logprobs_mode,
                                 "retries_used": result.retries_used,
                                 "hit_max_tokens": result.hit_max_tokens,
                                 "prompt": result.prompt,
                                 "response": result.response_text,
+                                "reasoning": result.reasoning_text,
                             });
                             if let Some(ref usage) = result.usage {
-                                line["usage"] = serde_json::json!({
-                                    "prompt_tokens": usage.prompt_tokens,
-                                    "completion_tokens": usage.completion_tokens,
-                                });
+                                line["usage"] = usage.to_json();
                             }
                             let mut f = file_mutex.lock().unwrap();
                             let _ = writeln!(f, "{}", line);
@@ -1208,7 +1213,9 @@ async fn run_lineup_judgements(
     } else {
         None
     };
-    let include_successful_prompts = resolved.include_successful_prompts;
+    let save_prompt_text = resolved.save_prompt_text;
+    let save_response_text = resolved.save_response_text;
+    let save_reasoning_text = resolved.save_reasoning_text;
 
     let failures_file = if let Some(ref save_path) = resolved.save_failed_judgements {
         let path = resolve_save_path(save_path, "failures");
@@ -1278,6 +1285,7 @@ async fn run_lineup_judgements(
     let judge_display_names: Arc<Vec<String>> = Arc::new(judges.iter().map(|j| j.display_name.clone()).collect());
     let judge_models: Arc<Vec<String>> = Arc::new(judges.iter().map(|j| j.model.clone()).collect());
     let judge_endpoints: Arc<Vec<String>> = Arc::new(judges.iter().map(|j| j.endpoint.clone()).collect());
+    let judge_reasoning_efforts: Arc<Vec<Option<String>>> = Arc::new(judges.iter().map(|j| j.reasoning_effort.clone()).collect());
 
     // total_judgements counts LLM calls (successfully-parsed lineups).
     let mut total_judgements: usize = 0;
@@ -1506,20 +1514,23 @@ async fn run_lineup_judgements(
                                 "judge_endpoint": judge_endpoints[judge_idx],
                                 "temperature": actual_temperature,
                                 "deliberation": resolved.deliberation_enabled,
+                                "reasoning_effort": judge_reasoning_efforts[judge_idx],
                                 "criterion": criterion,
                                 "logprobs": logprobs_mode,
                                 "retries_used": tw.retries_used,
                                 "hit_max_tokens": tw.hit_max_tokens,
                             });
                             if let Some(ref usage) = tw.usage {
-                                line["usage"] = serde_json::json!({
-                                    "prompt_tokens": usage.prompt_tokens,
-                                    "completion_tokens": usage.completion_tokens,
-                                });
+                                line["usage"] = usage.to_json();
                             }
-                            if include_successful_prompts {
+                            if save_prompt_text {
                                 line["prompt"] = serde_json::json!(tw.prompt);
+                            }
+                            if save_response_text {
                                 line["response"] = serde_json::json!(tw.response_text);
+                            }
+                            if save_reasoning_text {
+                                line["reasoning"] = serde_json::json!(tw.reasoning_text);
                             }
                             let mut f = file_mutex.lock().unwrap();
                             let _ = writeln!(f, "{}", line);
@@ -1553,18 +1564,17 @@ async fn run_lineup_judgements(
                                 "judge_endpoint": judge_endpoints[judge_idx],
                                 "temperature": actual_temperature,
                                 "deliberation": resolved.deliberation_enabled,
+                                "reasoning_effort": judge_reasoning_efforts[judge_idx],
                                 "criterion": criterion,
                                 "logprobs": logprobs_mode,
                                 "retries_used": tw.retries_used,
                                 "hit_max_tokens": tw.hit_max_tokens,
                                 "prompt": tw.prompt,
                                 "response": tw.response_text,
+                                "reasoning": tw.reasoning_text,
                             });
                             if let Some(ref usage) = tw.usage {
-                                line["usage"] = serde_json::json!({
-                                    "prompt_tokens": usage.prompt_tokens,
-                                    "completion_tokens": usage.completion_tokens,
-                                });
+                                line["usage"] = usage.to_json();
                             }
                             let mut f = file_mutex.lock().unwrap();
                             let _ = writeln!(f, "{}", line);

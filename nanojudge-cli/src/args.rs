@@ -212,14 +212,25 @@ pub struct ConfigArgs {
     /// Save successful judgements to a JSONL file.
     /// Bare flag: saves to judgements-{timestamp}.jsonl in the current directory.
     /// With a path: saves to that file (or auto-generates a name if path is a directory).
-    /// By default saves metadata and verdicts but not prompts/responses.
+    /// By default saves metadata and verdicts but no text; add --save-prompt-text,
+    /// --save-response-text and --save-reasoning-text to include it.
     #[arg(long, num_args = 0..=1, default_missing_value = ".")]
     pub save_successful_judgements: Option<PathBuf>,
 
-    /// Include full prompts and responses in saved successful judgements.
-    /// Only meaningful when --save-successful-judgements is set.
+    /// Include the prompt sent to the LLM in saved successful judgements.
+    /// Requires --save-successful-judgements.
     #[arg(long, num_args = 0..=1, default_missing_value = "true")]
-    pub include_successful_prompts: Option<bool>,
+    pub save_prompt_text: Option<bool>,
+
+    /// Include the LLM's visible answer (deliberation and verdict) in saved
+    /// successful judgements. Requires --save-successful-judgements.
+    #[arg(long, num_args = 0..=1, default_missing_value = "true")]
+    pub save_response_text: Option<bool>,
+
+    /// Include the model's own reasoning text in saved successful judgements.
+    /// Requires --save-successful-judgements.
+    #[arg(long, num_args = 0..=1, default_missing_value = "true")]
+    pub save_reasoning_text: Option<bool>,
 
     /// Output format for final results: "table" or "json". Default: table.
     #[arg(long, value_enum)]
@@ -232,7 +243,7 @@ pub struct ConfigArgs {
     /// Save failed judgements (unparseable responses) to a JSONL file.
     /// Bare flag: saves to failures-{timestamp}.jsonl in the current directory.
     /// With a path: saves to that file (or auto-generates a name if path is a directory).
-    /// Always includes prompts and responses for debugging.
+    /// Always includes the prompt, response and reasoning text for debugging.
     #[arg(long, num_args = 0..=1, default_missing_value = ".")]
     pub save_failed_judgements: Option<PathBuf>,
 

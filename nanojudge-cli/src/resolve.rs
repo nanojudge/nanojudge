@@ -88,7 +88,9 @@ pub struct ResolvedConfig {
     pub live_top: Option<usize>,
     pub emit_interim_rankings: bool,
     pub save_successful_judgements: Option<PathBuf>,
-    pub include_successful_prompts: bool,
+    pub save_prompt_text: bool,
+    pub save_response_text: bool,
+    pub save_reasoning_text: bool,
     pub output_format: OutputFormat,
     pub verbose: bool,
     pub save_failed_judgements: Option<PathBuf>,
@@ -452,10 +454,22 @@ pub fn resolve_config(shared: &ConfigArgs, cfg: &config::NanojudgeConfig) -> Res
         (c @ Some(_), None) => c,
         (None, f) => f,
     };
-    let include_successful_prompts = merge_opt(shared.include_successful_prompts, cfg.include_successful_prompts, "include-successful-prompts")
+    let save_prompt_text = merge_opt(shared.save_prompt_text, cfg.save_prompt_text, "save-prompt-text")
         .unwrap_or(false);
-    if include_successful_prompts && save_successful_judgements.is_none() {
-        bail("--include-successful-prompts requires --save-successful-judgements");
+    let save_response_text = merge_opt(shared.save_response_text, cfg.save_response_text, "save-response-text")
+        .unwrap_or(false);
+    let save_reasoning_text = merge_opt(shared.save_reasoning_text, cfg.save_reasoning_text, "save-reasoning-text")
+        .unwrap_or(false);
+    if save_successful_judgements.is_none() {
+        for (enabled, flag) in [
+            (save_prompt_text, "save-prompt-text"),
+            (save_response_text, "save-response-text"),
+            (save_reasoning_text, "save-reasoning-text"),
+        ] {
+            if enabled {
+                bail(format!("--{flag} requires --save-successful-judgements"));
+            }
+        }
     }
     let output_format = merge_opt(shared.output_format, cfg.output_format, "output-format").unwrap_or_else(|| {
         if std::io::IsTerminal::is_terminal(&std::io::stdout()) {
@@ -542,7 +556,9 @@ pub fn resolve_config(shared: &ConfigArgs, cfg: &config::NanojudgeConfig) -> Res
         live_top,
         emit_interim_rankings,
         save_successful_judgements,
-        include_successful_prompts,
+        save_prompt_text,
+        save_response_text,
+        save_reasoning_text,
         output_format,
         verbose,
         save_failed_judgements,
@@ -586,7 +602,9 @@ mod tests {
             live_top: None,
             emit_interim_rankings: None,
             save_successful_judgements: None,
-            include_successful_prompts: None,
+            save_prompt_text: None,
+            save_response_text: None,
+            save_reasoning_text: None,
             output_format: None,
             verbose: None,
             save_failed_judgements: None,

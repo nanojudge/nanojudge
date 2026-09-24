@@ -127,8 +127,8 @@ pub async fn run_benchmark(
             let latency = start.elapsed().as_secs_f64();
 
             let single = match result {
-                Ok((parse_result, content, usage, _hit_max_tokens)) => {
-                    let (prompt_tokens, completion_tokens) = match usage {
+                Ok((parse_result, reply)) => {
+                    let (prompt_tokens, completion_tokens) = match reply.usage {
                         Some(u) => (u.prompt_tokens, u.completion_tokens),
                         None => (0, 0),
                     };
@@ -136,7 +136,7 @@ pub async fn run_benchmark(
                         latency_secs: latency,
                         prompt_tokens,
                         completion_tokens,
-                        response_len_chars: content.len(),
+                        response_len_chars: reply.content.as_ref().map_or(0, |c| c.len()),
                         verdict_option: parse_result.category_probs.map(|probs| {
                             // The judge's verdict is the higher-weight option.
                             if probs[0] >= probs[1] { 0 } else { 1 }
@@ -144,7 +144,7 @@ pub async fn run_benchmark(
                         parseable: parse_result.category_probs.is_some(),
                         http_error: false,
                         prompt_text: prompt,
-                        response_text: content,
+                        response_text: reply.content.unwrap_or_else(|| "[NO CONTENT: endpoint returned null]".to_string()),
                     }
                 }
                 Err(ref e) => {

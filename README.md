@@ -118,13 +118,13 @@ nanojudge rank ... --save-successful-judgements results.jsonl
 # Also save failed judgements (unparseable responses) for debugging
 nanojudge rank ... --save-successful-judgements --save-failed-judgements
 
-# Include full prompts and responses in successful records (always included in failures)
-nanojudge rank ... --save-successful-judgements --include-successful-prompts
+# Include text in successful records (always included in failures)
+nanojudge rank ... --save-successful-judgements --save-prompt-text --save-response-text --save-reasoning-text
 ```
 
-Each successful record is a JSON object with `refit`, `item1`, `item2`, `item1_text_hash`, `item2_text_hash`, `category_probs`, `judge_model`, `judge_endpoint`, `temperature` (the actual value sent to the API, after jitter), `deliberation`, `criterion`, `logprobs`, `retries_used`, `hit_max_tokens`, and `usage` (token counts, when the endpoint provides them). The `item*_text_hash` fields are SHA-256 hashes (truncated to 64 bits) of the full item text; `nanojudge score` requires them as identity keys and will reject records without them. Prompts and responses are omitted by default; add `--include-successful-prompts` to include them.
+Each successful record is a JSON object with `refit`, `item1`, `item2`, `item1_text_hash`, `item2_text_hash`, `category_probs`, `judge_model`, `judge_endpoint`, `temperature` (the actual value sent to the API, after jitter), `deliberation`, `reasoning_effort` (the judge's setting, or `null` if unset), `criterion`, `logprobs`, `retries_used`, `hit_max_tokens`, and `usage` (when the endpoint provides it: `prompt_tokens`, `completion_tokens`, `reasoning_tokens` and `visible_tokens`, where the last two are `null` if the endpoint doesn't report reasoning tokens). The `item*_text_hash` fields are SHA-256 hashes (truncated to 64 bits) of the full item text; `nanojudge score` requires them as identity keys and will reject records without them. Text is omitted by default: `--save-prompt-text` adds `prompt` (what NanoJudge sent), `--save-response-text` adds `response` (the model's visible answer: deliberation and verdict), and `--save-reasoning-text` adds `reasoning` (the model's own reasoning text). A text field is `null` when the endpoint sent nothing and `""` when it sent an empty string.
 
-Failed records always include `prompt` and `response` for debugging, plus the same metadata fields.
+Failed records always include `prompt`, `response` and `reasoning` for debugging, plus the same metadata fields.
 
 Lines are flushed immediately so you can `tail -f` during a run.
 
