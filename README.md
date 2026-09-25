@@ -104,46 +104,16 @@ Output with criterion "Which of these fruits is healthiest?":
 
 Add `--output-format json` for machine-readable output. Add `-v` for progress during execution.
 
-### Saving judgements for inspection
+### Saving and reusing judgements
 
-Save judgements to JSONL files for spot-checking or live monitoring with `tail -f`:
+`--save-successful-judgements` writes each judgement to a JSONL file as the run goes, so you can inspect it or follow it with `tail -f`. `--load-judgements` feeds a saved file into a new run, which builds on it instead of starting from scratch.
 
 ```bash
-# Save successful judgements to judgements-{timestamp}.jsonl in the current directory
-nanojudge rank ... --save-successful-judgements
-
-# Save to a specific file
 nanojudge rank ... --save-successful-judgements results.jsonl
-
-# Also save failed judgements (unparseable responses) for debugging
-nanojudge rank ... --save-successful-judgements --save-failed-judgements
-
-# Include text in successful records (always included in failures)
-nanojudge rank ... --save-successful-judgements --save-prompt-text --save-response-text --save-reasoning-text
-```
-
-Each successful record is a JSON object with `refit`, `item1`, `item2`, `item1_text_hash`, `item2_text_hash`, `category_probs`, `judge_model`, `judge_endpoint`, `temperature` (the actual value sent to the API, after jitter), `deliberation`, `reasoning_effort` (the judge's setting, or `null` if unset), `criterion`, `logprobs`, `retries_used`, `hit_max_tokens`, and `usage` (when the endpoint provides it: `prompt_tokens`, `completion_tokens`, `reasoning_tokens` and `visible_tokens`, where the last two are `null` if the endpoint doesn't report reasoning tokens). The `item*_text_hash` fields are SHA-256 hashes (truncated to 64 bits) of the full item text; `nanojudge score` requires them as identity keys and will reject records without them. Text is omitted by default: `--save-prompt-text` adds `prompt` (what NanoJudge sent), `--save-response-text` adds `response` (the model's visible answer: deliberation and verdict), and `--save-reasoning-text` adds `reasoning` (the model's own reasoning text). A text field is `null` when the endpoint sent nothing and `""` when it sent an empty string.
-
-Failed records always include `prompt`, `response` and `reasoning` for debugging, plus the same metadata fields.
-
-Lines are flushed immediately so you can `tail -f` during a run.
-
-### Reusing saved judgements
-
-Feed a saved successful-judgements file back into a new run to seed its comparisons before any new ones are collected. The prior edges count toward coverage and matchmaking, so new pairings and the final ranking build on the loaded data:
-
-```bash
-# Seed this run with judgements saved from an earlier one
 nanojudge rank ... --load-judgements results.jsonl
 ```
 
-Loaded records are matched to this run by item text hash, so the file's items must be the same as the run's items. Every judge that appears in the file must also be a judge in this run, and a lineup file must match the run's lineup size — mismatches are rejected rather than silently dropped. Edges that reference items not in the run are skipped with a count printed to stderr. If the loaded judgements already satisfy `--stop-confidence`, the run stops before collecting anything and scores the seed directly.
-
-To reuse a judge's saved data without drawing any new comparisons from it, give that judge `weight = 0` in the config: its loaded edges still seed the engine, but it is assigned no new work. At least one judge must have positive weight.
-
-JSONL files store raw verdict probabilities; verdict tempering is applied at scoring time. When re-scoring with `nanojudge score`, pass `--verdict-temperature` to control tempering globally (default: 3.0 with deliberation, 1.0 without, inferred from the file's `deliberation` field), or `--judge-verdict-temperature "model@endpoint=T"` to set per-judge values. Use `--verdict-temperature 1.0` for untempered raw probabilities. If `rank` used a non-default `verdict_temperature` (globally or per-judge), re-pass those values to `score` to reproduce the original ranking — the JSONL does not record them. JSONL files without a `deliberation` field require `--verdict-temperature` to be passed explicitly.
-
-Runs with `lineup_size` above 2 write a different shape, since a lineup has no fixed number of members: `item1`/`item2` are replaced by an `items` array holding the lineup in presentation order, `item1_text_hash`/`item2_text_hash` by `item_text_hashes`, and `category_probs` by two fields: `ranking`, the judge's ordering of the lineup as indices into `items` (best first), and `place_probs`, one entry per place but the last, giving the probability the judge assigned that place's pick among the members not yet placed (all `1.0` in text mode). Pairwise runs are unaffected — a reader written against the two-item shape keeps working for `lineup_size = 2`.
+See [Saved judgements](docs/saved-judgements.md) for the options, the record format, and re-scoring with `nanojudge score`.
 
 ## Config file
 
