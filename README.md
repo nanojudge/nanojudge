@@ -2,7 +2,7 @@
 
 NanoJudge quantifies the relative strengths of arbitrary items under a criterion you define, using LLMs as judges. Provide the criterion (e.g., "Which is healthier?") and your item list of any length (e.g., "Eggs", "Butter", "Spinach", ...), and get a ranking with confidence intervals.
 
-Instead of overwhelming an LLM with one massive prompt, NanoJudge breaks the task down into a series of small lineup judgements. Operating like an intelligent matchmaking league, it adaptively places similarly strong items into lineups as results come in, efficiently producing an accurate leaderboard. The resulting edges are fed into an Elo-style rating system, producing a transparent ranking, all backed by AI explanations.
+Instead of overwhelming an LLM with one massive prompt, NanoJudge breaks the task down into a series of small lineup judgements. Operating like an intelligent matchmaking league, it adaptively places similarly strong items into lineups as results come in, efficiently producing an accurate leaderboard. The resulting edges are combined using Bradley-Terry statistics into a transparent ranking.
 
 Works with any OpenAI-compatible API endpoint.
 
@@ -75,7 +75,7 @@ cat papers.txt | nanojudge rank \
 
 CLI flags like `--judgements-per-item` override config file values.
 
-Output with criterion "Which of these fruits is healthiest?":
+Output with criterion "Which fruit is healthier?":
 
 ```
  # | Item          |   Score | 95% CI Low | 95% CI High | Edges
@@ -104,6 +104,12 @@ Output with criterion "Which of these fruits is healthiest?":
 
 Add `--output-format json` for machine-readable output. Add `-v` for progress during execution.
 
+### Other commands
+
+- `nanojudge score`: re-scores a saved judgements file without calling any endpoints.
+- `nanojudge benchmark`: measures an endpoint's throughput, latency and reliability.
+- `nanojudge probe`: re-checks every judge's endpoint (see [Endpoint probe](docs/probe.md)).
+
 ### Saving and reusing judgements
 
 `--save-successful-judgements` writes each judgement to a JSONL file as the run goes, so you can inspect it or follow it with `tail -f`. `--load-judgements` feeds a saved file into a new run, which builds on it instead of starting from scratch.
@@ -124,13 +130,13 @@ Key settings:
 | Setting | Description |
 |---|---|
 | `judgements_per_item` | Average judgements per item. Total budget = `ceil(judgements_per_item * num_items / lineup_size)`. |
-| `judgements_per_refit` | Number of judgement attempts scheduled between scoring refits, including during uniform pairing. The lower this number is, the more efficient comparisons are, at the cost of slower results (due to having to use a lower number of simultaneous endpoint requests). |
+| `judgements_per_refit` | Number of judgement attempts scheduled between scoring refits, including during uniform pairing. Lower values choose comparisons more efficiently, but send fewer requests at once, so runs are slower. |
 | `lineup_size` | Items in each judgement. `2` is the default pairwise mode, and up to `9` is supported. |
-| `logprobs` | `true` to extract logprobs for continuous confidence (requires endpoint support, e.g. a local vLLM). `false` for text-based verdict parsing. Use this when available as it gives more information for NanoJudge to estimate strengths with. |
+| `logprobs` | `true` to read verdict confidence from logprobs, `false` to parse the verdict from text. Not all endpoints support logprobs. Use it when you can, as it gives NanoJudge more information to estimate strengths with. |
 | `judgement_distribution` | `"uniform"` or `"top-heavy"`. Top-heavy concentrates judgements on the contenders for the top spots. |
 | `selection_sharpness` / `cutoff` | Top-heavy tuning. `selection_sharpness` controls how sharply pairing weight concentrates on items near the anchor (lower = more exploration; default `0.7`). `cutoff` drops items below a minimum uncertainty ratio, keeping at least two (`[0,1)`, default `0` = off). |
 | `anchor_index` | Which rank anchors top-heavy selection, 0-based best-first (default `0` = leader). `9` = 10th-best, for "find the top ten." Fractional values interpolate between adjacent ranks. |
-| `stop_confidence` | Early stop for top-heavy runs: end once the probability that every item is on its correct side of the anchor reaches this value. In `(0.5, 1.0)`, e.g. `0.95`. No default = always use full budget. Top-heavy only. |
+| `stop_confidence` | Early stop for top-heavy runs: end once the probability that every item is on its correct side of the anchor reaches this value. In `(0.5, 1.0)`, e.g. `0.95`. Off by default. |
 
 Per-judge settings (in `[[judge]]` blocks):
 
@@ -145,7 +151,8 @@ Per-judge settings (in `[[judge]]` blocks):
 | `api_key_env` | No | Environment variable containing the API key |
 | `reasoning_effort` | No | Controls the model's reasoning (e.g. `"none"` to turn it off) |
 | `min_logprob_coverage` | No | Min fraction of verdict-token logprob mass required to trust a verdict, > 0.0 and ≤ 1.0 (default: 0.95) |
-| `verdict_temperature` | No | Tempers this judge's parsed verdict distribution before scoring: `q^(1/T)`, dividing each edge's log-odds by T. > 1 softens overconfident verdicts toward 50/50; distinct from the sampling `temperature`. Must be finite and > 0. Also settable top-level (default: 3.0 with deliberation enabled, 1.0 without) |
+| `verdict_temperature` | No | Softens (> 1) or sharpens (< 1) this judge's verdicts before scoring. Also settable top-level (default: 3.0 with deliberation, 1.0 without) |
+| `chat_template_kwargs` | No | Extra options passed to the model's chat template, e.g. `{ enable_thinking = false }` |
 | `provider` | For OpenRouter | Pins the OpenRouter provider that serves the judge, e.g. `{ only = ["xiaomi"], allow_fallbacks = false }` |
 
 Before using a judge for the first time, NanoJudge sends it a few short test requests to check that the endpoint does what the judge's settings ask. If it doesn't, the run is prevented from starting. See [Endpoint probe](docs/probe.md).
