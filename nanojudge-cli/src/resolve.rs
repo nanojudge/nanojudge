@@ -116,6 +116,7 @@ pub struct ResolvedJudge {
     pub max_tokens: u32,
     pub reasoning_effort: Option<String>,
     pub chat_template_kwargs: Option<HashMap<String, serde_json::Value>>,
+    pub provider: Option<HashMap<String, serde_json::Value>>,
     pub judge_id: u64,
     pub display_name: String,
 }
@@ -263,6 +264,19 @@ pub fn resolve_judges(
             jc.model.clone()
         };
 
+        // OpenRouter can serve each request from a different provider, so an
+        // unpinned judge's probe may describe a provider its run never uses.
+        let endpoint_url = reqwest::Url::parse(&jc.endpoint).unwrap_or_else(|e| {
+            bail(format!("Judge {}: invalid endpoint \"{}\": {}", jc.model, jc.endpoint, e));
+        });
+        if endpoint_url.host_str() == Some("openrouter.ai") && jc.provider.is_none() {
+            bail(format!(
+                "Judge {}: OpenRouter judges must pin a provider with `provider`, e.g. \
+                 provider = {{ only = [\"xiaomi\"], allow_fallbacks = false }}",
+                jc.model
+            ));
+        }
+
         let judge_id = judge_hash(&jc.endpoint, &jc.model);
         let weight = jc.weight.unwrap_or(1.0);
         if !weight.is_finite() || weight < 0.0 {
@@ -307,6 +321,9 @@ pub fn resolve_judges(
             max_tokens: jc.max_tokens.unwrap_or(default_max_tokens),
             reasoning_effort: jc.reasoning_effort.clone(),
             chat_template_kwargs: jc.chat_template_kwargs.as_ref().map(|m| {
+                m.iter().map(|(k, v)| (k.clone(), toml_to_json(v))).collect()
+            }),
+            provider: jc.provider.as_ref().map(|m| {
                 m.iter().map(|(k, v)| (k.clone(), toml_to_json(v))).collect()
             }),
             judge_id,
@@ -629,6 +646,7 @@ mod tests {
                 max_tokens: None,
                 reasoning_effort: None,
                 chat_template_kwargs: None,
+                provider: None,
             }]),
             ..Default::default()
         }

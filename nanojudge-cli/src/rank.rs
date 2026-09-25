@@ -331,6 +331,7 @@ pub async fn run(args: RankArgs) {
             max_tokens: j.max_tokens,
             reasoning_effort: j.reasoning_effort.clone(),
             chat_template_kwargs: j.chat_template_kwargs.clone(),
+            provider: j.provider.clone(),
         })
     }).collect();
 
@@ -371,6 +372,9 @@ pub async fn run(args: RankArgs) {
             }
         }
     }
+
+    // Weight-0 judges only contribute prior data; they send no requests.
+    crate::probe::check_judges(judges.iter().filter(|j| j.weight > 0.0)).await;
 
     let client = Client::new();
     let titles = Arc::new(titles);
@@ -652,6 +656,7 @@ pub async fn run(args: RankArgs) {
                 max_tokens: base_config.max_tokens,
                 reasoning_effort: base_config.reasoning_effort.clone(),
                 chat_template_kwargs: base_config.chat_template_kwargs.clone(),
+                provider: base_config.provider.clone(),
             });
             let texts = texts.clone();
             let titles = titles.clone();
@@ -1156,6 +1161,7 @@ async fn run_lineup_judgements(
             max_tokens: j.max_tokens,
             reasoning_effort: j.reasoning_effort.clone(),
             chat_template_kwargs: j.chat_template_kwargs.clone(),
+            provider: j.provider.clone(),
         })
     }).collect();
 
@@ -1181,6 +1187,9 @@ async fn run_lineup_judgements(
     };
 
     let template = Arc::new(resolved.prompt_template.clone());
+
+    // Weight-0 judges only contribute prior data; they send no requests.
+    crate::probe::check_judges(judges.iter().filter(|j| j.weight > 0.0)).await;
 
     let client = Client::new();
     let titles = Arc::new(titles);
@@ -1423,6 +1432,7 @@ async fn run_lineup_judgements(
                 max_tokens: base_config.max_tokens,
                 reasoning_effort: base_config.reasoning_effort.clone(),
                 chat_template_kwargs: base_config.chat_template_kwargs.clone(),
+                provider: base_config.provider.clone(),
             });
             let texts = texts.clone();
             let criterion = criteria[criterion_assignments[lineup_idx]].clone();

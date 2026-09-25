@@ -85,6 +85,7 @@ pub async fn run_benchmark(
         max_tokens: llm_config.max_tokens,
         reasoning_effort: llm_config.reasoning_effort.clone(),
         chat_template_kwargs: llm_config.chat_template_kwargs.clone(),
+        provider: llm_config.provider.clone(),
     });
 
     let client = Client::new();

@@ -5,6 +5,7 @@ mod items;
 mod llm;
 mod output;
 mod parse;
+mod probe;
 mod prompt;
 mod rank;
 mod resolve;
@@ -37,6 +38,7 @@ async fn main() {
         Commands::Rank(args) => rank::run(args).await,
         Commands::Score(args) => score::run(args),
         Commands::Benchmark(args) => run_benchmark_cmd(args).await,
+        Commands::Probe(args) => probe::run(args).await,
         Commands::Init => {
             let path = config::create_default_config();
             println!("Created config at {}", path.display());
@@ -55,6 +57,8 @@ async fn run_benchmark_cmd(args: BenchmarkArgs) {
         bail("--num-pairs must be at least 1");
     }
 
+    probe::check_judges(&judges).await;
+
     let template = &resolved.prompt_template;
 
     for judge in &judges {
@@ -70,6 +74,7 @@ async fn run_benchmark_cmd(args: BenchmarkArgs) {
             max_tokens: judge.max_tokens,
             reasoning_effort: judge.reasoning_effort.clone(),
             chat_template_kwargs: judge.chat_template_kwargs.clone(),
+            provider: judge.provider.clone(),
         };
 
         benchmark::run_benchmark(

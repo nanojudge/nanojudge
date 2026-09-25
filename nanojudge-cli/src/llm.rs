@@ -48,20 +48,20 @@ pub struct LlmConfig {
     pub logprobs: bool,
     /// Maximum tokens in the LLM response.
     pub max_tokens: u32,
-    /// OpenRouter extension: reasoning effort level (e.g. "none" to disable Qwen thinking).
+    /// Reasoning effort level, sent as `reasoning_effort` (e.g. "none" to turn reasoning off).
     pub reasoning_effort: Option<String>,
     pub chat_template_kwargs: Option<HashMap<String, serde_json::Value>>,
+    /// OpenRouter provider routing options, sent as `provider`.
+    pub provider: Option<HashMap<String, serde_json::Value>>,
 }
+
+/// How many top logprobs runs ask for, per token, in logprobs mode.
+pub(crate) const TOP_LOGPROBS: u8 = 10;
 
 #[derive(Serialize)]
 struct ChatMessage {
     role: &'static str,
     content: String,
-}
-
-#[derive(Serialize)]
-struct ReasoningConfig {
-    effort: String,
 }
 
 #[derive(Serialize)]
@@ -83,12 +83,14 @@ struct ChatCompletionRequest {
     /// vLLM extension: include the stop string in the output text.
     #[serde(skip_serializing_if = "Option::is_none")]
     include_stop_str_in_output: Option<bool>,
-    /// OpenRouter extension: controls reasoning/thinking mode.
-    /// Used to disable chain-of-thought for models like Qwen.
+    /// Controls the model's reasoning (e.g. "none" to turn it off).
     #[serde(skip_serializing_if = "Option::is_none")]
-    reasoning: Option<ReasoningConfig>,
+    reasoning_effort: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     chat_template_kwargs: Option<HashMap<String, serde_json::Value>>,
+    /// OpenRouter extension: provider routing options.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    provider: Option<HashMap<String, serde_json::Value>>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -177,7 +179,7 @@ pub struct PairJudgementResult {
 /// If the endpoint has no path (just `scheme://host` or `scheme://host:port`),
 /// assumes OpenAI-style and appends `/v1/chat/completions`. Otherwise appends
 /// `/chat/completions` to whatever path the user provided.
-fn build_completions_url(endpoint: &str) -> String {
+pub(crate) fn build_completions_url(endpoint: &str) -> String {
     let base = endpoint.trim_end_matches('/');
     // Find the start of the path: skip past "scheme://host(:port)"
     let after_scheme = base.find("://").map(|i| i + 3).unwrap_or(0);
@@ -273,15 +275,14 @@ async fn send_chat_raw(
         temperature: config.temperature,
         max_tokens: config.max_tokens,
         logprobs: if config.logprobs { Some(true) } else { None },
-        top_logprobs: if config.logprobs { Some(10) } else { None },
+        top_logprobs: if config.logprobs { Some(TOP_LOGPROBS) } else { None },
         presence_penalty: config.presence_penalty,
         top_p: config.top_p,
         stop: vec![],
         include_stop_str_in_output: None,
-        reasoning: config.reasoning_effort.as_ref().map(|effort| ReasoningConfig {
-            effort: effort.clone(),
-        }),
+        reasoning_effort: config.reasoning_effort.clone(),
         chat_template_kwargs: config.chat_template_kwargs.clone(),
+        provider: config.provider.clone(),
     };
 
     let url = build_completions_url(&config.endpoint);

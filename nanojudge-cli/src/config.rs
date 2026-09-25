@@ -27,11 +27,13 @@ pub struct JudgeConfig {
     pub verdict_temperature: Option<f64>,
     pub api_key_env: Option<String>,
     pub max_tokens: Option<u32>,
-    /// OpenRouter extension: controls model reasoning/thinking mode.
-    /// Set to "none" to disable chain-of-thought for models like Qwen
-    /// that otherwise produce <think>...</think> blocks.
+    /// Sent as `reasoning_effort`: controls the model's reasoning.
+    /// Set to "none" to turn reasoning off.
     pub reasoning_effort: Option<String>,
     pub chat_template_kwargs: Option<HashMap<String, toml::Value>>,
+    /// OpenRouter provider routing options, sent as `provider`. Required
+    /// for OpenRouter judges.
+    pub provider: Option<HashMap<String, toml::Value>>,
 }
 
 #[derive(Deserialize, Default, Debug)]
@@ -234,8 +236,9 @@ const DEFAULT_CONFIG_TEMPLATE: &str = "\
 #   verdict_temperature    - Temper this judge's parsed verdicts, q^(1/T); > 1 softens overconfidence, must be > 0 (default: global value, else 3.0 deliberation / 1.0 no-deliberation)
 #   max_tokens             - Maximum tokens in LLM response (default: 2048, or average of specified judges)
 #   api_key_env            - Environment variable name containing the API key
-#   reasoning_effort       - OpenRouter: controls reasoning/thinking mode (e.g. \\\"none\\\" to disable Qwen thinking)
+#   reasoning_effort       - Controls the model's reasoning (e.g. \"none\" to turn it off)
 #   chat_template_kwargs   - Extra kwargs passed to the server's chat template (e.g. enable_thinking = false for llama.cpp)
+#   provider               - OpenRouter provider routing options, required for OpenRouter judges (e.g. { only = [\"xiaomi\"], allow_fallbacks = false })
 
 [[judge]]
 endpoint = \"http://localhost:8000\"

@@ -35,6 +35,8 @@ pub enum Commands {
     Score(ScoreArgs),
     /// Benchmark an LLM endpoint for throughput, latency, and reliability
     Benchmark(BenchmarkArgs),
+    /// Send each judge a few test requests and record how its endpoint behaves
+    Probe(ProbeArgs),
     /// Create a default config file at ~/.config/nanojudge/config.toml
     Init,
 }
@@ -306,6 +308,16 @@ pub struct BenchmarkArgs {
     /// Number of judgement pairs to run (each pair runs both directions)
     #[arg(short, long, default_value = DEFAULT_BENCHMARK_PAIRS)]
     pub num_pairs: usize,
+
+    /// Path to config file (default: ~/.config/nanojudge/config.toml)
+    #[arg(long)]
+    pub config: Option<PathBuf>,
+}
+
+#[derive(Parser)]
+pub struct ProbeArgs {
+    #[command(flatten)]
+    pub cfg: ConfigArgs,
 
     /// Path to config file (default: ~/.config/nanojudge/config.toml)
     #[arg(long)]
