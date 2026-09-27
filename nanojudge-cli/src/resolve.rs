@@ -19,9 +19,14 @@ const DEFAULT_TEMPERATURE_JITTER: f64 = 0.0;
 const DEFAULT_MAX_RETRIES: usize = 3;
 const DEFAULT_DELIBERATION_LENGTH: &str = "2 paragraphs";
 
-/// `max_tokens` for pairwise judgements with deliberation disabled: just the
-/// verdict. The endpoint probe also uses it for its short requests.
+/// Default `max_tokens` for pairwise judgements with deliberation disabled:
+/// just the verdict. The endpoint probe also uses it for its short requests.
 pub const NO_DELIBERATION_MAX_TOKENS: u32 = 16;
+
+/// Default output tokens per ranking line for lineups with deliberation
+/// disabled. A line reads "First place is Option A" — about 7 tokens; 16
+/// leaves room for tokenizer variation across models.
+const TOKENS_PER_RANKING_LINE: u32 = 16;
 const DEFAULT_TARGET_PRIOR_EDGES: f64 = 5.0;
 // A verdict token written after deliberation is near-deterministic, so
 // its logprobs read overconfident and get decompressed by default. Without
@@ -146,6 +151,7 @@ pub fn resolve_judges(
     cfg: &config::NanojudgeConfig,
     config_path: &Path,
     deliberation_enabled: bool,
+    lineup_size: usize,
 ) -> Vec<ResolvedJudge> {
     let judge_configs = cfg.judge.as_ref().filter(|j| !j.is_empty())
         .unwrap_or_else(|| {
@@ -201,18 +207,26 @@ pub fn resolve_judges(
     let cli_api_key = shared.api_key.clone()
         .or_else(|| std::env::var("OPENAI_API_KEY").ok());
 
-    // Resolve max_tokens: per-judge → average of specified judges → 2048
+    // Resolve max_tokens: per-judge → mode default. With deliberation off the
+    // default fits just the verdict (one ranking line per item for lineups);
+    // with it on, the average of specified judges, else 2048.
     let specified_max_tokens: Vec<u32> = judge_configs.iter()
         .filter_map(|jc| jc.max_tokens)
         .collect();
-    let default_max_tokens = if specified_max_tokens.is_empty() {
+    let default_max_tokens = if !deliberation_enabled {
+        if lineup_size >= 3 {
+            TOKENS_PER_RANKING_LINE * lineup_size as u32
+        } else {
+            NO_DELIBERATION_MAX_TOKENS
+        }
+    } else if specified_max_tokens.is_empty() {
         2048
     } else {
         let sum: u32 = specified_max_tokens.iter().sum();
         sum / specified_max_tokens.len() as u32
     };
     // Print message if some judges are missing max_tokens and we're using the average
-    if !specified_max_tokens.is_empty() && specified_max_tokens.len() < judge_configs.len() {
+    if deliberation_enabled && !specified_max_tokens.is_empty() && specified_max_tokens.len() < judge_configs.len() {
         let missing: Vec<&str> = judge_configs.iter()
             .filter(|jc| jc.max_tokens.is_none())
             .map(|jc| jc.model.as_str())
@@ -345,16 +359,6 @@ pub fn resolve_judges(
 
     if judges.iter().map(|j| j.weight).sum::<f64>() <= 0.0 {
         bail("At least one judge must have positive weight.".to_string());
-    }
-
-    if !deliberation_enabled {
-        let any_explicit_max_tokens = judge_configs.iter().any(|jc| jc.max_tokens.is_some());
-        if any_explicit_max_tokens {
-            eprintln!("Warning: max_tokens is ignored when deliberation is disabled (forced down to fit just the verdict)");
-        }
-        for j in &mut judges {
-            j.max_tokens = NO_DELIBERATION_MAX_TOKENS;
-        }
     }
 
     judges
@@ -675,15 +679,38 @@ mod tests {
         let judge = &mut cfg.judge.as_mut().unwrap()[0];
         judge.max_tokens = None;
         judge.reasoning_effort = Some("none".into());
-        let judges = resolve_judges(&cli, &cfg, Path::new("test.toml"), true);
+        let judges = resolve_judges(&cli, &cfg, Path::new("test.toml"), true, 2);
         assert_eq!(judges[0].max_tokens, 2048);
+    }
+
+    #[test]
+    fn test_max_tokens_default_without_deliberation_fits_the_verdict() {
+        let cli = default_cli();
+        let mut cfg = one_judge_config();
+        let judge = &mut cfg.judge.as_mut().unwrap()[0];
+        judge.max_tokens = None;
+        judge.reasoning_effort = Some("none".into());
+        let pairwise = resolve_judges(&cli, &cfg, Path::new("test.toml"), false, 2);
+        assert_eq!(pairwise[0].max_tokens, NO_DELIBERATION_MAX_TOKENS);
+        let lineup = resolve_judges(&cli, &cfg, Path::new("test.toml"), false, 4);
+        assert_eq!(lineup[0].max_tokens, TOKENS_PER_RANKING_LINE * 4);
+    }
+
+    #[test]
+    fn test_max_tokens_explicit_kept_without_deliberation() {
+        let cli = default_cli();
+        let cfg = one_judge_config();
+        let pairwise = resolve_judges(&cli, &cfg, Path::new("test.toml"), false, 2);
+        assert_eq!(pairwise[0].max_tokens, 2048);
+        let lineup = resolve_judges(&cli, &cfg, Path::new("test.toml"), false, 4);
+        assert_eq!(lineup[0].max_tokens, 2048);
     }
 
     #[test]
     fn test_min_logprob_coverage_default() {
         let cli = default_cli();
         let cfg = one_judge_config();
-        let judges = resolve_judges(&cli, &cfg, Path::new("test.toml"), true);
+        let judges = resolve_judges(&cli, &cfg, Path::new("test.toml"), true, 2);
         assert_eq!(judges[0].min_logprob_coverage, parse::DEFAULT_MIN_LOGPROB_COVERAGE);
     }
 
@@ -692,7 +719,7 @@ mod tests {
         let mut cli = default_cli();
         cli.min_logprob_coverage = Some(0.9);
         let cfg = one_judge_config();
-        let judges = resolve_judges(&cli, &cfg, Path::new("test.toml"), true);
+        let judges = resolve_judges(&cli, &cfg, Path::new("test.toml"), true, 2);
         assert_eq!(judges[0].min_logprob_coverage, 0.9);
     }
 
@@ -701,7 +728,7 @@ mod tests {
         let cli = default_cli();
         let mut cfg = one_judge_config();
         cfg.min_logprob_coverage = Some(0.85);
-        let judges = resolve_judges(&cli, &cfg, Path::new("test.toml"), true);
+        let judges = resolve_judges(&cli, &cfg, Path::new("test.toml"), true, 2);
         assert_eq!(judges[0].min_logprob_coverage, 0.85);
     }
 
@@ -711,7 +738,7 @@ mod tests {
         cli.min_logprob_coverage = Some(0.9);
         let mut cfg = one_judge_config();
         cfg.min_logprob_coverage = Some(0.85);
-        let judges = resolve_judges(&cli, &cfg, Path::new("test.toml"), true);
+        let judges = resolve_judges(&cli, &cfg, Path::new("test.toml"), true, 2);
         assert_eq!(judges[0].min_logprob_coverage, 0.9);
     }
 
@@ -721,7 +748,7 @@ mod tests {
         cli.min_logprob_coverage = Some(0.9);
         let mut cfg = one_judge_config();
         cfg.judge.as_mut().unwrap()[0].min_logprob_coverage = Some(0.7);
-        let judges = resolve_judges(&cli, &cfg, Path::new("test.toml"), true);
+        let judges = resolve_judges(&cli, &cfg, Path::new("test.toml"), true, 2);
         assert_eq!(judges[0].min_logprob_coverage, 0.7);
     }
 
@@ -729,7 +756,7 @@ mod tests {
     fn test_verdict_temperature_default_deliberation() {
         let cli = default_cli();
         let cfg = one_judge_config();
-        let judges = resolve_judges(&cli, &cfg, Path::new("test.toml"), true);
+        let judges = resolve_judges(&cli, &cfg, Path::new("test.toml"), true, 2);
         assert_eq!(judges[0].verdict_temperature, DEFAULT_VERDICT_TEMPERATURE_DELIBERATION);
     }
 
@@ -737,7 +764,7 @@ mod tests {
     fn test_verdict_temperature_default_no_deliberation() {
         let cli = default_cli();
         let cfg = one_judge_config();
-        let judges = resolve_judges(&cli, &cfg, Path::new("test.toml"), false);
+        let judges = resolve_judges(&cli, &cfg, Path::new("test.toml"), false, 2);
         assert_eq!(judges[0].verdict_temperature, DEFAULT_VERDICT_TEMPERATURE_NO_DELIBERATION);
     }
 
@@ -746,7 +773,7 @@ mod tests {
         let mut cli = default_cli();
         cli.verdict_temperature = Some(6.0);
         let cfg = one_judge_config();
-        let judges = resolve_judges(&cli, &cfg, Path::new("test.toml"), true);
+        let judges = resolve_judges(&cli, &cfg, Path::new("test.toml"), true, 2);
         assert_eq!(judges[0].verdict_temperature, 6.0);
     }
 
@@ -755,7 +782,7 @@ mod tests {
         let cli = default_cli();
         let mut cfg = one_judge_config();
         cfg.verdict_temperature = Some(2.0);
-        let judges = resolve_judges(&cli, &cfg, Path::new("test.toml"), true);
+        let judges = resolve_judges(&cli, &cfg, Path::new("test.toml"), true, 2);
         assert_eq!(judges[0].verdict_temperature, 2.0);
     }
 
@@ -765,7 +792,7 @@ mod tests {
         cli.verdict_temperature = Some(6.0);
         let mut cfg = one_judge_config();
         cfg.verdict_temperature = Some(2.0);
-        let judges = resolve_judges(&cli, &cfg, Path::new("test.toml"), true);
+        let judges = resolve_judges(&cli, &cfg, Path::new("test.toml"), true, 2);
         assert_eq!(judges[0].verdict_temperature, 6.0);
     }
 
@@ -775,7 +802,7 @@ mod tests {
         cli.verdict_temperature = Some(6.0);
         let mut cfg = one_judge_config();
         cfg.judge.as_mut().unwrap()[0].verdict_temperature = Some(2.5);
-        let judges = resolve_judges(&cli, &cfg, Path::new("test.toml"), true);
+        let judges = resolve_judges(&cli, &cfg, Path::new("test.toml"), true, 2);
         assert_eq!(judges[0].verdict_temperature, 2.5);
     }
 
@@ -786,7 +813,7 @@ mod tests {
         let cli = default_cli();
         let mut cfg = one_judge_config();
         cfg.verdict_temperature = Some(4.0);
-        let judges = resolve_judges(&cli, &cfg, Path::new("test.toml"), false);
+        let judges = resolve_judges(&cli, &cfg, Path::new("test.toml"), false, 2);
         assert_eq!(judges[0].verdict_temperature, 4.0);
     }
 
@@ -795,7 +822,7 @@ mod tests {
         let mut cli = default_cli();
         cli.concurrency = Some(32);
         let cfg = one_judge_config();
-        let judges = resolve_judges(&cli, &cfg, Path::new("test.toml"), true);
+        let judges = resolve_judges(&cli, &cfg, Path::new("test.toml"), true, 2);
         assert_eq!(judges[0].concurrency, 32);
     }
 
@@ -805,7 +832,7 @@ mod tests {
         cli.concurrency = Some(32);
         let mut cfg = one_judge_config();
         cfg.concurrency = Some(8);
-        let judges = resolve_judges(&cli, &cfg, Path::new("test.toml"), true);
+        let judges = resolve_judges(&cli, &cfg, Path::new("test.toml"), true, 2);
         assert_eq!(judges[0].concurrency, 32);
     }
 
@@ -814,7 +841,7 @@ mod tests {
         let mut cli = default_cli();
         cli.logprobs = Some(true);
         let cfg = one_judge_config();
-        let judges = resolve_judges(&cli, &cfg, Path::new("test.toml"), true);
+        let judges = resolve_judges(&cli, &cfg, Path::new("test.toml"), true, 2);
         assert!(judges[0].logprobs);
     }
 
@@ -824,7 +851,7 @@ mod tests {
         cli.logprobs = Some(false);
         let mut cfg = one_judge_config();
         cfg.logprobs = Some(true);
-        let judges = resolve_judges(&cli, &cfg, Path::new("test.toml"), true);
+        let judges = resolve_judges(&cli, &cfg, Path::new("test.toml"), true, 2);
         assert!(!judges[0].logprobs);
     }
 

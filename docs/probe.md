@@ -45,7 +45,7 @@ number.":
 - **Top logprobs:** a 16-token request for 20 top logprobs, to record how many
   come back.
 - **`max_tokens`:** a request limited to 16 tokens, to check the limit is kept.
-  16 is what runs use with deliberation disabled.
+  16 is the default for pairwise runs with deliberation disabled.
 
 Each finding is yes, no, or can't tell. The probe can't tell when the endpoint
 gives no usable reply, or leaves out the data a finding needs, such as the

@@ -31,11 +31,7 @@ struct JudgeStats {
 }
 
 /// Print max_tokens warnings (always, not just verbose).
-/// Suppressed when deliberation is disabled — max_tokens is intentionally low.
-fn print_max_tokens_warnings(judges: &[ResolvedJudge], judge_stats: &[JudgeStats], deliberation_enabled: bool) {
-    if !deliberation_enabled {
-        return;
-    }
+fn print_max_tokens_warnings(judges: &[ResolvedJudge], judge_stats: &[JudgeStats]) {
     let mut any_max_tokens_hit = false;
     for (judge, stats) in judges.iter().zip(judge_stats) {
         if stats.max_tokens_hits > 0 {
@@ -68,11 +64,6 @@ fn resolve_save_path(path: &Path, prefix: &str) -> PathBuf {
         path.to_path_buf()
     }
 }
-
-/// Output tokens to allow per ranking line in no-deliberation mode. A line reads
-/// "First place is Option A" — about 7 tokens; 16 leaves room for tokenizer
-/// variation across models.
-const TOKENS_PER_RANKING_LINE: u32 = 16;
 
 /// Temper a parsed verdict distribution before it becomes an edge:
 /// q_i ← q_i^(1/temperature), renormalized — equivalent to dividing the
@@ -300,7 +291,7 @@ pub async fn run(args: RankArgs) {
     }
 
     // Resolve judges from [[judge]] blocks
-    let judges = resolve_judges(&args.cfg, &cfg, &config_path, resolved.deliberation_enabled);
+    let judges = resolve_judges(&args.cfg, &cfg, &config_path, resolved.deliberation_enabled, resolved.lineup_size);
     let logprobs_mode = judges[0].logprobs;
 
     if !logprobs_mode {
@@ -1033,7 +1024,7 @@ pub async fn run(args: RankArgs) {
         eprintln!("Unparseable responses: {failed_parse}");
     }
 
-    print_max_tokens_warnings(&judges, &judge_stats, resolved.deliberation_enabled);
+    print_max_tokens_warnings(&judges, &judge_stats);
 
     // Build judge_id → display_name and token count maps for output
     let judge_names: HashMap<u64, String> = judges.iter()
@@ -1098,19 +1089,8 @@ async fn run_lineup_judgements(
     resolved: &crate::resolve::ResolvedConfig,
     judgements_per_item: usize,
 ) {
-    let mut judges = resolve_judges(&args.cfg, cfg, config_path, resolved.deliberation_enabled);
+    let judges = resolve_judges(&args.cfg, cfg, config_path, resolved.deliberation_enabled, resolved.lineup_size);
     let logprobs_mode = judges[0].logprobs;
-
-    // No-deliberation mode forces max_tokens to 16 (calibrated for a single verdict
-    // line). A lineup ranking is one line per item (~7 tokens each), which 16
-    // truncates — cutting off the trailing lines so the parser discards the
-    // whole judgement. Give it enough room for every rank.
-    if !resolved.deliberation_enabled {
-        let ranking_tokens = TOKENS_PER_RANKING_LINE * resolved.lineup_size as u32;
-        for j in &mut judges {
-            j.max_tokens = ranking_tokens;
-        }
-    }
 
     if !logprobs_mode {
         eprintln!(
@@ -1776,7 +1756,7 @@ async fn run_lineup_judgements(
         eprintln!("Unparseable rankings: {failed_parse}");
     }
 
-    print_max_tokens_warnings(&judges, &judge_stats, resolved.deliberation_enabled);
+    print_max_tokens_warnings(&judges, &judge_stats);
 
     let judge_names: HashMap<u64, String> = judges.iter()
         .map(|j| (j.judge_id, j.display_name.clone()))

@@ -149,7 +149,7 @@ Per-judge settings (in `[[judge]]` blocks):
 | `temperature` | Yes | Sampling temperature |
 | `weight` | No | Relative weight for pair assignment (default: 1) |
 | `concurrency` | No | Max concurrent requests (default: 16) |
-| `max_tokens` | Unless `reasoning_effort = "none"` | Max tokens in response. Reasoning length varies too much between models for a default, so it's only optional with reasoning off (default: 2048) |
+| `max_tokens` | Unless `reasoning_effort = "none"` | Max tokens in response. Reasoning length varies too much between models for a default, so it's only optional with reasoning off (default: 2048, or just enough for the verdict without deliberation) |
 | `api_key_env` | No | Environment variable containing the API key |
 | `reasoning_effort` | No | Controls the model's reasoning (e.g. `"none"` to turn it off) |
 | `min_logprob_coverage` | No | Min fraction of verdict-token logprob mass required to trust a verdict, > 0.0 and ≤ 1.0 (default: 0.95) |

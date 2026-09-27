@@ -106,8 +106,9 @@ const DEFAULT_CONFIG_TEMPLATE: &str = "\
 
 # Whether to have the LLM deliberate before giving its verdict.
 # When false, the LLM skips deliberation and outputs only the verdict.
-# Faster and cheaper, but may reduce accuracy. max_tokens is forced down to
-# fit just the verdict (16 for pairs, one ranking line per item for lineups).
+# Faster and cheaper, but may reduce accuracy. Judges without max_tokens
+# default to just enough for the verdict (16 for pairs, one ranking line per
+# item for lineups).
 # With a custom prompt_template, set this to match what the template asks for:
 # false means the template must ask for the verdict only.
 # deliberation_enabled = true
@@ -234,7 +235,7 @@ const DEFAULT_CONFIG_TEMPLATE: &str = "\
 #   top_p                  - Nucleus sampling threshold, range 0.0 to 1.0
 #   min_logprob_coverage   - Min verdict-token logprob mass to trust a verdict, > 0.0 and <= 1.0 (default: 0.95)
 #   verdict_temperature    - Temper this judge's parsed verdicts, q^(1/T); > 1 softens overconfidence, must be > 0 (default: global value, else 3.0 deliberation / 1.0 no-deliberation)
-#   max_tokens             - Maximum tokens in LLM response, required unless reasoning_effort = \"none\" (then default: 2048, or average of specified judges)
+#   max_tokens             - Maximum tokens in LLM response, required unless reasoning_effort = \"none\" (then default: 2048, or average of specified judges; without deliberation, just enough for the verdict)
 #   api_key_env            - Environment variable name containing the API key
 #   reasoning_effort       - Controls the model's reasoning (e.g. \"none\" to turn it off)
 #   chat_template_kwargs   - Extra kwargs passed to the server's chat template (e.g. enable_thinking = false for llama.cpp)
