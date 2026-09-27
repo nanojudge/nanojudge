@@ -13,7 +13,7 @@ use crate::args::ProbeArgs;
 use crate::bail;
 use crate::config;
 use crate::llm::{build_completions_url, TOP_LOGPROBS};
-use crate::resolve::{resolve_config, resolve_judges, ResolvedJudge};
+use crate::resolve::{resolve_config, resolve_judges, ResolvedJudge, NO_DELIBERATION_MAX_TOKENS};
 
 /// Bumped whenever the record layout or the set of test requests changes.
 const PROBE_FORMAT_VERSION: u32 = 4;
@@ -29,8 +29,6 @@ const PROBE_SPECIAL_TOKEN_ALLOWANCE: u64 = 5;
 /// Largest `top_logprobs` the probe asks for.
 const PROBE_TOP_LOGPROBS: u32 = 20;
 
-/// `max_tokens` for the request that checks whether `max_tokens` is respected.
-const PROBE_SMALL_MAX_TOKENS: u32 = 5;
 
 /// Where probe records are kept: `<data dir>/nanojudge/probes.jsonl`.
 pub fn probes_path() -> PathBuf {
@@ -206,21 +204,21 @@ async fn probe_judge(client: &Client, judge: &ResolvedJudge) -> Value {
     // so an endpoint without them can still be probed for reasoning.
     let reasoning = base_request(judge);
 
-    // Logprobs and top logprobs: one token is enough to see what comes back.
+    // Logprobs and top logprobs: a short reply is enough to see what comes back.
     // Separate requests, so a rejected top_logprobs doesn't hide whether
     // logprobs work at all.
     let mut logprobs = base_request(judge);
-    logprobs.insert("max_tokens".into(), json!(1));
+    logprobs.insert("max_tokens".into(), json!(NO_DELIBERATION_MAX_TOKENS));
     logprobs.insert("logprobs".into(), json!(true));
 
     let mut top_logprobs = base_request(judge);
-    top_logprobs.insert("max_tokens".into(), json!(1));
+    top_logprobs.insert("max_tokens".into(), json!(NO_DELIBERATION_MAX_TOKENS));
     top_logprobs.insert("logprobs".into(), json!(true));
     top_logprobs.insert("top_logprobs".into(), json!(PROBE_TOP_LOGPROBS));
 
     // Max tokens: a limit the answer can't fit in.
     let mut max_tokens = base_request(judge);
-    max_tokens.insert("max_tokens".into(), json!(PROBE_SMALL_MAX_TOKENS));
+    max_tokens.insert("max_tokens".into(), json!(NO_DELIBERATION_MAX_TOKENS));
 
     let tests = [
         ("reasoning", reasoning),
@@ -320,7 +318,7 @@ fn top_logprobs_returned(response: &Value) -> Option<usize> {
 fn max_tokens_respected(response: &Value) -> Option<bool> {
     first_choice(response)?;
     let completion_tokens = response.pointer("/usage/completion_tokens").and_then(Value::as_u64)?;
-    Some(completion_tokens <= u64::from(PROBE_SMALL_MAX_TOKENS))
+    Some(completion_tokens <= u64::from(NO_DELIBERATION_MAX_TOKENS))
 }
 
 /// Whether a reply shows the model reasoned.
@@ -656,8 +654,8 @@ mod tests {
     #[test]
     fn max_tokens_respected_compares_completion_tokens() {
         let with_usage = |n: u64| json!({"choices": [{"message": {"content": null}}], "usage": {"completion_tokens": n}});
-        assert_eq!(max_tokens_respected(&with_usage(5)), Some(true));
-        assert_eq!(max_tokens_respected(&with_usage(6)), Some(false));
+        assert_eq!(max_tokens_respected(&with_usage(16)), Some(true));
+        assert_eq!(max_tokens_respected(&with_usage(17)), Some(false));
         assert_eq!(max_tokens_respected(&reply(json!({"content": "935"}), None)), None);
         assert_eq!(max_tokens_respected(&json!({"error": {"message": "nope"}})), None);
     }

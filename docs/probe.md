@@ -40,11 +40,12 @@ number.":
   tokens beyond the answer's length in bytes (plus a few special tokens, like
   the end-of-turn token) are reasoning that the endpoint counted but didn't
   show. The prompt asks for a short answer so that hidden reasoning stands out.
-- **Logprobs:** a one-token request with logprobs, to check that logprobs come
+- **Logprobs:** a 16-token request with logprobs, to check that logprobs come
   back.
-- **Top logprobs:** a one-token request for 20 top logprobs, to record how many
+- **Top logprobs:** a 16-token request for 20 top logprobs, to record how many
   come back.
-- **`max_tokens`:** a request limited to 5 tokens, to check the limit is kept.
+- **`max_tokens`:** a request limited to 16 tokens, to check the limit is kept.
+  16 is what runs use with deliberation disabled.
 
 Each finding is yes, no, or can't tell. The probe can't tell when the endpoint
 gives no usable reply, or leaves out the data a finding needs, such as the

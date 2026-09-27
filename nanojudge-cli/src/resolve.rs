@@ -18,6 +18,10 @@ const DEFAULT_CONCURRENCY: usize = 16;
 const DEFAULT_TEMPERATURE_JITTER: f64 = 0.0;
 const DEFAULT_MAX_RETRIES: usize = 3;
 const DEFAULT_DELIBERATION_LENGTH: &str = "2 paragraphs";
+
+/// `max_tokens` for pairwise judgements with deliberation disabled: just the
+/// verdict. The endpoint probe also uses it for its short requests.
+pub const NO_DELIBERATION_MAX_TOKENS: u32 = 16;
 const DEFAULT_TARGET_PRIOR_EDGES: f64 = 5.0;
 // A verdict token written after deliberation is near-deterministic, so
 // its logprobs read overconfident and get decompressed by default. Without
@@ -349,7 +353,7 @@ pub fn resolve_judges(
             eprintln!("Warning: max_tokens is ignored when deliberation is disabled (forced down to fit just the verdict)");
         }
         for j in &mut judges {
-            j.max_tokens = 16;
+            j.max_tokens = NO_DELIBERATION_MAX_TOKENS;
         }
     }
 
