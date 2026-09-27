@@ -57,7 +57,9 @@ async fn run_benchmark_cmd(args: BenchmarkArgs) {
         bail("--num-pairs must be at least 1");
     }
 
-    probe::check_judges(&judges).await;
+    if !args.skip_probe {
+        probe::check_judges(&judges).await;
+    }
 
     let template = &resolved.prompt_template;
 

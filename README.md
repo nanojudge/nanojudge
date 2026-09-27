@@ -157,7 +157,7 @@ Per-judge settings (in `[[judge]]` blocks):
 | `chat_template_kwargs` | No | Extra options passed to the model's chat template, e.g. `{ enable_thinking = false }` |
 | `provider` | For OpenRouter | Pins the OpenRouter provider that serves the judge, e.g. `{ only = ["xiaomi"], allow_fallbacks = false }` |
 
-Before using a judge for the first time, NanoJudge sends it a few short test requests to check that the endpoint does what the judge's settings ask. If it doesn't, the run is prevented from starting. See [Endpoint probe](docs/probe.md).
+Before using a judge for the first time, NanoJudge sends it a few short test requests to check that the endpoint does what the judge's settings ask. If it doesn't, the run is prevented from starting. Pass `--skip-probe` to skip the check. See [Endpoint probe](docs/probe.md).
 
 ## How it works
 

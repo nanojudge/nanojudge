@@ -395,7 +395,9 @@ pub async fn run(args: RankArgs) {
     }
 
     // Weight-0 judges only contribute prior data; they send no requests.
-    crate::probe::check_judges(judges.iter().filter(|j| j.weight > 0.0)).await;
+    if !args.skip_probe {
+        crate::probe::check_judges(judges.iter().filter(|j| j.weight > 0.0)).await;
+    }
 
     let client = Client::new();
     let titles = Arc::new(titles);
@@ -1194,7 +1196,9 @@ async fn run_lineup_judgements(
     let template = Arc::new(resolved.prompt_template.clone());
 
     // Weight-0 judges only contribute prior data; they send no requests.
-    crate::probe::check_judges(judges.iter().filter(|j| j.weight > 0.0)).await;
+    if !args.skip_probe {
+        crate::probe::check_judges(judges.iter().filter(|j| j.weight > 0.0)).await;
+    }
 
     let client = Client::new();
     let titles = Arc::new(titles);

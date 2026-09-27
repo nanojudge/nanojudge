@@ -147,7 +147,8 @@ pub async fn run(
         .arg(config.judgement_distribution)
         .arg("--seed")
         .arg(cli_seed.to_string())
-        .arg("--emit-interim-rankings");
+        .arg("--emit-interim-rankings")
+        .arg("--skip-probe");
 
     // Forward top-heavy selection tuning if the bench was given it.
     if let Some(selection_sharpness) = config.selection_sharpness {

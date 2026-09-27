@@ -309,6 +309,10 @@ pub struct BenchmarkArgs {
     #[arg(short, long, default_value = DEFAULT_BENCHMARK_PAIRS)]
     pub num_pairs: usize,
 
+    /// Skip the endpoint probe that normally checks each judge before the run.
+    #[arg(long)]
+    pub skip_probe: bool,
+
     /// Path to config file (default: ~/.config/nanojudge/config.toml)
     #[arg(long)]
     pub config: Option<PathBuf>,
@@ -353,6 +357,10 @@ pub struct RankArgs {
     /// from it). The budget still refers to new judgements only.
     #[arg(long)]
     pub load_judgements: Option<PathBuf>,
+
+    /// Skip the endpoint probe that normally checks each judge before the run.
+    #[arg(long)]
+    pub skip_probe: bool,
 
     /// Path to config file (default: ~/.config/nanojudge/config.toml)
     #[arg(long)]

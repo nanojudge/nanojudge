@@ -66,6 +66,9 @@ shows any of these:
 A finding the probe can't make counts against the judge. `rank` only checks
 judges with a weight above 0, since judges with weight 0 send no requests.
 
+`--skip-probe` (on `rank` and `benchmark`) skips the check entirely: no probe
+is sent, no saved result is read, and nothing is refused.
+
 ## Storage
 
 Probe results are saved to `probes.jsonl` in a `nanojudge` folder in the user
