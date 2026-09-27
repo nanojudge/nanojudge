@@ -18,7 +18,7 @@ use crate::config;
 use crate::items::load_items;
 use crate::llm::{LlmConfig, judge_pair, judge_lineup};
 use crate::output;
-use crate::resolve::{resolve_config, resolve_judges};
+use crate::resolve::{resolve_config, resolve_judges, ResolvedJudge};
 
 #[derive(Default)]
 struct JudgeStats {
@@ -28,6 +28,27 @@ struct JudgeStats {
     total_responses: usize,
     wall_time_sum: f64,
     collection_count: usize,
+}
+
+/// Print max_tokens warnings (always, not just verbose).
+/// Suppressed when deliberation is disabled — max_tokens is intentionally low.
+fn print_max_tokens_warnings(judges: &[ResolvedJudge], judge_stats: &[JudgeStats], deliberation_enabled: bool) {
+    if !deliberation_enabled {
+        return;
+    }
+    let mut any_max_tokens_hit = false;
+    for (judge, stats) in judges.iter().zip(judge_stats) {
+        if stats.max_tokens_hits > 0 {
+            any_max_tokens_hit = true;
+            eprintln!(
+                "Warning: {} hit max_tokens on {}/{} responses.",
+                judge.display_name, stats.max_tokens_hits, stats.total_responses,
+            );
+        }
+    }
+    if any_max_tokens_hit {
+        eprintln!("Consider increasing max_tokens or adjusting the length instruction in the prompt.");
+    }
 }
 
 fn resolve_save_path(path: &Path, prefix: &str) -> PathBuf {
@@ -1009,23 +1030,7 @@ pub async fn run(args: RankArgs) {
         eprintln!("Unparseable responses: {failed_parse}");
     }
 
-    // Print max_tokens warnings (always, not just verbose)
-    // Suppressed when deliberation is disabled — max_tokens is intentionally low.
-    if resolved.deliberation_enabled {
-        let mut any_max_tokens_hit = false;
-        for (i, judge) in judges.iter().enumerate() {
-            if judge_stats[i].max_tokens_hits > 0 {
-                any_max_tokens_hit = true;
-                eprintln!(
-                    "Warning: {} hit max_tokens on {}/{} responses.",
-                    judge.display_name, judge_stats[i].max_tokens_hits, judge_stats[i].total_responses,
-                );
-            }
-        }
-        if any_max_tokens_hit {
-            eprintln!("Consider increasing max_tokens or adjusting the length instruction in the prompt.");
-        }
-    }
+    print_max_tokens_warnings(&judges, &judge_stats, resolved.deliberation_enabled);
 
     // Build judge_id → display_name and token count maps for output
     let judge_names: HashMap<u64, String> = judges.iter()
@@ -1764,6 +1769,8 @@ async fn run_lineup_judgements(
     if failed_parse > 0 {
         eprintln!("Unparseable rankings: {failed_parse}");
     }
+
+    print_max_tokens_warnings(&judges, &judge_stats, resolved.deliberation_enabled);
 
     let judge_names: HashMap<u64, String> = judges.iter()
         .map(|j| (j.judge_id, j.display_name.clone()))
