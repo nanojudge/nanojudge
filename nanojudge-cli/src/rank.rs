@@ -18,7 +18,7 @@ use crate::config;
 use crate::items::load_items;
 use crate::llm::{LlmConfig, judge_pair, judge_lineup};
 use crate::output;
-use crate::resolve::{resolve_config, resolve_judges, ResolvedJudge};
+use crate::resolve::{resolve_config, resolve_judgements_per_item, resolve_judges, ResolvedJudge};
 
 #[derive(Default)]
 struct JudgeStats {
@@ -290,11 +290,12 @@ pub async fn run(args: RankArgs) {
     let config_path = args.config.clone().unwrap_or_else(config::config_path);
     let cfg = config::load_config(&config_path);
     let resolved = resolve_config(&args.cfg, &cfg);
+    let judgements_per_item = resolve_judgements_per_item(&args.cfg, &cfg);
 
     // Lineup judgements (3+ items) run a separate acquisition loop; the
     // pairwise path below is left untouched.
     if resolved.lineup_size >= 3 {
-        run_lineup_judgements(&args, &config_path, &cfg, &resolved).await;
+        run_lineup_judgements(&args, &config_path, &cfg, &resolved, judgements_per_item).await;
         return;
     }
 
@@ -324,7 +325,7 @@ pub async fn run(args: RankArgs) {
         ));
     }
 
-    let budget = calculate_budget(texts.len(), resolved.judgements_per_item, 2);
+    let budget = calculate_budget(texts.len(), judgements_per_item, 2);
     let default_judgements_per_refit =
         judgements_needed_for_every_item_to_appear_once(texts.len(), 2);
     let judgements_per_refit = resolved
@@ -408,7 +409,7 @@ pub async fn run(args: RankArgs) {
             "Ranking {} items ({} judgements planned, {} per item)",
             texts.len(),
             budget,
-            resolved.judgements_per_item,
+            judgements_per_item,
         );
         if criteria.len() == 1 {
             eprintln!("Criterion: \"{}\"", criteria[0]);
@@ -1095,6 +1096,7 @@ async fn run_lineup_judgements(
     config_path: &Path,
     cfg: &config::NanojudgeConfig,
     resolved: &crate::resolve::ResolvedConfig,
+    judgements_per_item: usize,
 ) {
     let mut judges = resolve_judges(&args.cfg, cfg, config_path, resolved.deliberation_enabled);
     let logprobs_mode = judges[0].logprobs;
@@ -1142,7 +1144,7 @@ async fn run_lineup_judgements(
     }
 
     let lineup_size = resolved.lineup_size;
-    let budget = calculate_budget(texts.len(), resolved.judgements_per_item, lineup_size);
+    let budget = calculate_budget(texts.len(), judgements_per_item, lineup_size);
     let default_judgements_per_refit =
         judgements_needed_for_every_item_to_appear_once(texts.len(), lineup_size);
     let judgements_per_refit = resolved
@@ -1207,7 +1209,7 @@ async fn run_lineup_judgements(
     if resolved.verbose {
         eprintln!(
             "Ranking {} items ({} lineup judgements planned, {} per item)",
-            texts.len(), budget, resolved.judgements_per_item,
+            texts.len(), budget, judgements_per_item,
         );
         if criteria.len() == 1 {
             eprintln!("Criterion: \"{}\"", criteria[0]);

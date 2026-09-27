@@ -48,7 +48,6 @@ fn merge_opt<T: PartialEq + std::fmt::Display>(
 /// Resolved configuration — CLI args merged with config file values.
 /// All required values are concrete (no Options except genuinely optional ones).
 pub struct ResolvedConfig {
-    pub judgements_per_item: usize,
     pub judgement_distribution: JudgementDistribution,
     /// Number of items in each judged lineup: 2 (default) up to 9.
     pub lineup_size: usize,
@@ -357,9 +356,9 @@ pub fn resolve_judges(
     judges
 }
 
-/// Resolve CLI args + config file + defaults into final config.
-/// Judge-specific settings (endpoint, model, temperature, etc.) are handled by resolve_judges().
-pub fn resolve_config(shared: &ConfigArgs, cfg: &config::NanojudgeConfig) -> ResolvedConfig {
+/// Resolve the ranking budget. Kept out of resolve_config() because only
+/// `rank` uses it; `probe` and `benchmark` shouldn't have to set it.
+pub fn resolve_judgements_per_item(shared: &ConfigArgs, cfg: &config::NanojudgeConfig) -> usize {
     let judgements_per_item = merge_opt(shared.judgements_per_item, cfg.judgements_per_item, "judgements-per-item")
         .unwrap_or_else(|| {
             bail("--judgements-per-item is required (set it on the CLI or in the config file)");
@@ -367,7 +366,12 @@ pub fn resolve_config(shared: &ConfigArgs, cfg: &config::NanojudgeConfig) -> Res
     if judgements_per_item == 0 {
         bail("--judgements-per-item must be at least 1");
     }
+    judgements_per_item
+}
 
+/// Resolve CLI args + config file + defaults into final config.
+/// Judge-specific settings (endpoint, model, temperature, etc.) are handled by resolve_judges().
+pub fn resolve_config(shared: &ConfigArgs, cfg: &config::NanojudgeConfig) -> ResolvedConfig {
     let judgement_distribution_str = merge_opt(shared.judgement_distribution.clone(), cfg.judgement_distribution.clone(), "judgement-distribution")
         .unwrap_or_else(|| "top-heavy".to_string());
     let judgement_distribution = match judgement_distribution_str.as_str() {
@@ -558,7 +562,6 @@ pub fn resolve_config(shared: &ConfigArgs, cfg: &config::NanojudgeConfig) -> Res
     };
 
     ResolvedConfig {
-        judgements_per_item,
         judgement_distribution,
         lineup_size,
         selection_sharpness,
@@ -821,15 +824,9 @@ mod tests {
         assert!(!judges[0].logprobs);
     }
 
-    fn cli_with_budget() -> ConfigArgs {
-        let mut cli = default_cli();
-        cli.judgements_per_item = Some(10);
-        cli
-    }
-
     #[test]
     fn test_deliberation_from_cli() {
-        let mut cli = cli_with_budget();
+        let mut cli = default_cli();
         cli.deliberation = Some(false);
         let cfg = NanojudgeConfig::default();
         let resolved = resolve_config(&cli, &cfg);
@@ -838,7 +835,7 @@ mod tests {
 
     #[test]
     fn test_deliberation_cli_overrides_config() {
-        let mut cli = cli_with_budget();
+        let mut cli = default_cli();
         cli.deliberation = Some(true);
         let cfg = NanojudgeConfig { deliberation_enabled: Some(false), ..Default::default() };
         let resolved = resolve_config(&cli, &cfg);
@@ -847,15 +844,15 @@ mod tests {
 
     #[test]
     fn test_deliberation_from_config() {
-        let cli = cli_with_budget();
-        let cfg = NanojudgeConfig { deliberation_enabled: Some(false), judgements_per_item: Some(10), ..Default::default() };
+        let cli = default_cli();
+        let cfg = NanojudgeConfig { deliberation_enabled: Some(false), ..Default::default() };
         let resolved = resolve_config(&cli, &cfg);
         assert!(!resolved.deliberation_enabled);
     }
 
     #[test]
     fn test_stop_confidence_absent_means_no_early_stop() {
-        let cli = cli_with_budget();
+        let cli = default_cli();
         let cfg = NanojudgeConfig::default();
         let resolved = resolve_config(&cli, &cfg);
         assert_eq!(resolved.stop_confidence, None);
@@ -863,7 +860,7 @@ mod tests {
 
     #[test]
     fn test_judgements_per_refit_is_literal() {
-        let mut cli = cli_with_budget();
+        let mut cli = default_cli();
         cli.judgements_per_refit = Some(3);
         let resolved = resolve_config(&cli, &NanojudgeConfig::default());
         assert_eq!(resolved.judgements_per_refit, Some(3));
@@ -871,7 +868,7 @@ mod tests {
 
     #[test]
     fn test_stop_confidence_from_cli_with_top_heavy() {
-        let mut cli = cli_with_budget();
+        let mut cli = default_cli();
         cli.judgement_distribution = Some("top-heavy".into());
         cli.stop_confidence = Some(0.95);
         let cfg = NanojudgeConfig::default();
@@ -881,7 +878,7 @@ mod tests {
 
     #[test]
     fn test_stop_confidence_cli_overrides_config() {
-        let mut cli = cli_with_budget();
+        let mut cli = default_cli();
         cli.judgement_distribution = Some("top-heavy".into());
         cli.stop_confidence = Some(0.99);
         let cfg = NanojudgeConfig { stop_confidence: Some(0.9), ..Default::default() };
@@ -891,7 +888,7 @@ mod tests {
 
     #[test]
     fn test_judgement_distribution_defaults_to_top_heavy() {
-        let cli = cli_with_budget();
+        let cli = default_cli();
         let cfg = NanojudgeConfig::default();
         let resolved = resolve_config(&cli, &cfg);
         assert_eq!(resolved.judgement_distribution, JudgementDistribution::TopHeavy);
