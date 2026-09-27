@@ -122,6 +122,7 @@ pub async fn run(
          endpoint = \"http://127.0.0.1:{port}\"\n\
          model = \"synthetic-judge\"\n\
          temperature = 0.0\n\
+         reasoning_effort = \"none\"\n\
          concurrency = 1\n",
     );
     std::fs::write(config_file.path(), &config_toml).map_err(|e| e.to_string())?;

@@ -234,7 +234,7 @@ const DEFAULT_CONFIG_TEMPLATE: &str = "\
 #   top_p                  - Nucleus sampling threshold, range 0.0 to 1.0
 #   min_logprob_coverage   - Min verdict-token logprob mass to trust a verdict, > 0.0 and <= 1.0 (default: 0.95)
 #   verdict_temperature    - Temper this judge's parsed verdicts, q^(1/T); > 1 softens overconfidence, must be > 0 (default: global value, else 3.0 deliberation / 1.0 no-deliberation)
-#   max_tokens             - Maximum tokens in LLM response (default: 2048, or average of specified judges)
+#   max_tokens             - Maximum tokens in LLM response, required unless reasoning_effort = \"none\" (then default: 2048, or average of specified judges)
 #   api_key_env            - Environment variable name containing the API key
 #   reasoning_effort       - Controls the model's reasoning (e.g. \"none\" to turn it off)
 #   chat_template_kwargs   - Extra kwargs passed to the server's chat template (e.g. enable_thinking = false for llama.cpp)
@@ -244,9 +244,9 @@ const DEFAULT_CONFIG_TEMPLATE: &str = "\
 endpoint = \"http://localhost:8000\"
 model = \"my-model\"
 temperature = 0.7
+max_tokens = 2048
 # concurrency = 16
 # weight = 1
-# max_tokens = 2048
 
 # [[judge]]
 # endpoint = \"https://api.openai.com/v1\"
@@ -255,6 +255,7 @@ temperature = 0.7
 # concurrency = 5
 # weight = 3
 # temperature = 1.0
+# max_tokens = 2048
 
 # --- Scoring hyperparameters ---
 # Most users should not need to change these.

@@ -240,6 +240,15 @@ pub fn resolve_judges(
                 ));
             });
 
+        // Reasoning length varies too much between models for any default to fit.
+        if jc.reasoning_effort.as_deref() != Some("none") && jc.max_tokens.is_none() {
+            bail(format!(
+                "No max_tokens specified for judge {}. Set max_tokens in the [[judge]] block \
+                 (required unless reasoning_effort = \"none\").",
+                jc.model,
+            ));
+        }
+
         let api_key = if let Some(ref env_name) = jc.api_key_env {
             match std::env::var(env_name) {
                 Ok(key) => Some(key),
@@ -643,13 +652,24 @@ mod tests {
                 min_logprob_coverage: None,
                 verdict_temperature: None,
                 api_key_env: None,
-                max_tokens: None,
+                max_tokens: Some(2048),
                 reasoning_effort: None,
                 chat_template_kwargs: None,
                 provider: None,
             }]),
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn test_max_tokens_optional_with_reasoning_off() {
+        let cli = default_cli();
+        let mut cfg = one_judge_config();
+        let judge = &mut cfg.judge.as_mut().unwrap()[0];
+        judge.max_tokens = None;
+        judge.reasoning_effort = Some("none".into());
+        let judges = resolve_judges(&cli, &cfg, Path::new("test.toml"), true);
+        assert_eq!(judges[0].max_tokens, 2048);
     }
 
     #[test]

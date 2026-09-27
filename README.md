@@ -38,6 +38,7 @@ endpoint = "http://localhost:8000"
 model = "Qwen/Qwen3-4B-Instruct-2507"
 weight = 2
 temperature = 0.8
+max_tokens = 2048
 
 [[judge]]
 endpoint = "https://api.openai.com/v1"
@@ -45,6 +46,7 @@ model = "gpt-4o"
 api_key_env = "OPENAI_API_KEY"
 weight = 3
 temperature = 1.0
+max_tokens = 2048
 concurrency = 5
 ```
 
@@ -147,7 +149,7 @@ Per-judge settings (in `[[judge]]` blocks):
 | `temperature` | Yes | Sampling temperature |
 | `weight` | No | Relative weight for pair assignment (default: 1) |
 | `concurrency` | No | Max concurrent requests (default: 16) |
-| `max_tokens` | No | Max tokens in response (default: 2048) |
+| `max_tokens` | Unless `reasoning_effort = "none"` | Max tokens in response. Reasoning length varies too much between models for a default, so it's only optional with reasoning off (default: 2048) |
 | `api_key_env` | No | Environment variable containing the API key |
 | `reasoning_effort` | No | Controls the model's reasoning (e.g. `"none"` to turn it off) |
 | `min_logprob_coverage` | No | Min fraction of verdict-token logprob mass required to trust a verdict, > 0.0 and ≤ 1.0 (default: 0.95) |
