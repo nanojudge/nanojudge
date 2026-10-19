@@ -1,5 +1,6 @@
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use nanojudge_core::constants::{MAX_LINEUP_SIZE, MIN_LINEUP_SIZE};
 use nanojudge_core::{JudgementDistribution, judge_hash};
@@ -125,6 +126,8 @@ pub struct ResolvedJudge {
     pub reasoning_effort: Option<String>,
     pub chat_template_kwargs: Option<HashMap<String, serde_json::Value>>,
     pub provider: Option<HashMap<String, serde_json::Value>>,
+    /// None waits indefinitely (see `JudgeConfig::request_timeout_secs`).
+    pub request_timeout: Option<Duration>,
     pub judge_id: u64,
     pub display_name: String,
 }
@@ -325,6 +328,16 @@ pub fn resolve_judges(
             ));
         }
 
+        let request_timeout = jc.request_timeout_secs.map(|secs| {
+            match Duration::try_from_secs_f64(secs) {
+                Ok(timeout) if !timeout.is_zero() => timeout,
+                _ => bail(format!(
+                    "Judge {} has request_timeout_secs={}, must be finite and > 0",
+                    jc.model, secs
+                )),
+            }
+        });
+
         judges.push(ResolvedJudge {
             endpoint: jc.endpoint.clone(),
             model: jc.model.clone(),
@@ -352,6 +365,7 @@ pub fn resolve_judges(
             provider: jc.provider.as_ref().map(|m| {
                 m.iter().map(|(k, v)| (k.clone(), toml_to_json(v))).collect()
             }),
+            request_timeout,
             judge_id,
             display_name,
         });
@@ -667,9 +681,22 @@ mod tests {
                 reasoning_effort: None,
                 chat_template_kwargs: None,
                 provider: None,
+                request_timeout_secs: None,
             }]),
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn test_request_timeout_unset_waits_indefinitely() {
+        let cli = default_cli();
+        let mut cfg = one_judge_config();
+        let judges = resolve_judges(&cli, &cfg, Path::new("test.toml"), true, 2);
+        assert_eq!(judges[0].request_timeout, None);
+
+        cfg.judge.as_mut().unwrap()[0].request_timeout_secs = Some(2.5);
+        let judges = resolve_judges(&cli, &cfg, Path::new("test.toml"), true, 2);
+        assert_eq!(judges[0].request_timeout, Some(Duration::from_millis(2500)));
     }
 
     #[test]

@@ -9,6 +9,7 @@ use rand::Rng;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::time::Duration;
 
 pub(crate) enum LlmError {
     Retryable(String),
@@ -29,6 +30,15 @@ fn truncate_for_log(s: &str, max: usize) -> String {
     }
     let truncated = &s[..s.floor_char_boundary(max)];
     format!("{}...[{} chars truncated]", truncated, s.len() - truncated.len())
+}
+
+/// Describe a failed request. reqwest's message for a timeout ("error sending
+/// request for url ...") does not say it timed out, so name the limit instead.
+pub(crate) fn describe_request_error(e: &reqwest::Error, timeout: Option<Duration>) -> String {
+    match timeout {
+        Some(t) if e.is_timeout() => format!("timed out after {}s (request_timeout_secs)", t.as_secs_f64()),
+        _ => e.to_string(),
+    }
 }
 
 /// Configuration for the LLM endpoint.
@@ -53,6 +63,8 @@ pub struct LlmConfig {
     pub chat_template_kwargs: Option<HashMap<String, serde_json::Value>>,
     /// OpenRouter provider routing options, sent as `provider`.
     pub provider: Option<HashMap<String, serde_json::Value>>,
+    /// Whole-request limit, connect through response body. None waits indefinitely.
+    pub request_timeout: Option<Duration>,
 }
 
 /// How many top logprobs runs ask for, per token, in logprobs mode.
@@ -291,8 +303,13 @@ async fn send_chat_raw(
     if let Some(ref key) = config.api_key {
         req_builder = req_builder.bearer_auth(key);
     }
+    if let Some(timeout) = config.request_timeout {
+        req_builder = req_builder.timeout(timeout);
+    }
 
-    let resp = req_builder.send().await.map_err(|e| LlmError::Retryable(format!("HTTP request failed: {e}")))?;
+    let resp = req_builder.send().await.map_err(|e| {
+        LlmError::Retryable(format!("HTTP request failed: {}", describe_request_error(&e, config.request_timeout)))
+    })?;
 
     if !resp.status().is_success() {
         let status = resp.status();
@@ -308,7 +325,9 @@ async fn send_chat_raw(
     let data: ChatCompletionResponse = resp
         .json()
         .await
-        .map_err(|e| LlmError::Retryable(format!("Failed to parse LLM response JSON: {e}")))?;
+        .map_err(|e| {
+            LlmError::Retryable(format!("Failed to parse LLM response JSON: {}", describe_request_error(&e, config.request_timeout)))
+        })?;
 
     let choice = data
         .choices

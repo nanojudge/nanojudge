@@ -391,6 +391,7 @@ async fn setup_run(
             reasoning_effort: j.reasoning_effort.clone(),
             chat_template_kwargs: j.chat_template_kwargs.clone(),
             provider: j.provider.clone(),
+            request_timeout: j.request_timeout,
         })
     }).collect();
 
@@ -1039,6 +1040,7 @@ pub async fn run(args: RankArgs) {
                 reasoning_effort: base_config.reasoning_effort.clone(),
                 chat_template_kwargs: base_config.chat_template_kwargs.clone(),
                 provider: base_config.provider.clone(),
+                request_timeout: base_config.request_timeout,
             });
             let texts = texts.clone();
             let titles = titles.clone();
@@ -1438,6 +1440,7 @@ async fn run_lineup_judgements(
                 reasoning_effort: base_config.reasoning_effort.clone(),
                 chat_template_kwargs: base_config.chat_template_kwargs.clone(),
                 provider: base_config.provider.clone(),
+                request_timeout: base_config.request_timeout,
             });
             let texts = texts.clone();
             let criterion = criteria[criterion_assignments[lineup_idx]].clone();

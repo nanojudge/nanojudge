@@ -231,6 +231,7 @@ Per-judge settings (in `[[judge]]` blocks):
 | `verdict_temperature` | No | Softens (> 1) or sharpens (< 1) this judge's verdicts before scoring. Also settable top-level (default: 3.0 with deliberation, 1.0 without) |
 | `chat_template_kwargs` | No | Extra options passed to the model's chat template, e.g. `{ enable_thinking = false }` |
 | `provider` | For OpenRouter | Pins the OpenRouter provider that serves the judge, e.g. `{ only = ["xiaomi"], allow_fallbacks = false }` |
+| `request_timeout_secs` | No | Seconds before a request is abandoned and retried, > 0 (e.g. `300` or `2.5`). No default, because a reasonable limit depends heavily on the prompt, the model and the hardware it runs on. Unset waits indefinitely |
 
 ## Related work
 

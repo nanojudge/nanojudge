@@ -77,6 +77,7 @@ async fn run_benchmark_cmd(args: BenchmarkArgs) {
             reasoning_effort: judge.reasoning_effort.clone(),
             chat_template_kwargs: judge.chat_template_kwargs.clone(),
             provider: judge.provider.clone(),
+            request_timeout: judge.request_timeout,
         };
 
         benchmark::run_benchmark(

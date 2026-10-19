@@ -34,6 +34,10 @@ pub struct JudgeConfig {
     /// OpenRouter provider routing options, sent as `provider`. Required
     /// for OpenRouter judges.
     pub provider: Option<HashMap<String, toml::Value>>,
+    /// Seconds before a request to this judge is abandoned and retried. No
+    /// default: a reasonable limit varies too much with the prompt, the model
+    /// and the hardware the model runs on. Unset waits indefinitely.
+    pub request_timeout_secs: Option<f64>,
 }
 
 #[derive(Deserialize, Default, Debug)]
@@ -240,6 +244,8 @@ const DEFAULT_CONFIG_TEMPLATE: &str = "\
 #   reasoning_effort       - Controls the model's reasoning (e.g. \"none\" to turn it off)
 #   chat_template_kwargs   - Extra kwargs passed to the server's chat template (e.g. enable_thinking = false for llama.cpp)
 #   provider               - OpenRouter provider routing options, required for OpenRouter judges (e.g. { only = [\"xiaomi\"], allow_fallbacks = false })
+#   request_timeout_secs   - Seconds before a request is abandoned and retried, > 0 (e.g. 300 or 2.5). No default, as a
+#                            reasonable limit depends heavily on the prompt, the model and its hardware; unset waits indefinitely
 
 [[judge]]
 endpoint = \"http://localhost:8000\"
@@ -428,6 +434,7 @@ model = "qwen-32b"
 concurrency = 50
 weight = 5.0
 temperature = 0.6
+request_timeout_secs = 300
 
 [[judge]]
 endpoint = "https://api.openai.com/v1"
@@ -447,6 +454,8 @@ temperature = 1.0
         assert_eq!(judges[0].concurrency.unwrap(), 50);
         assert_eq!(judges[0].weight.unwrap(), 5.0);
         assert_eq!(judges[0].temperature.unwrap(), 0.6);
+        assert_eq!(judges[0].request_timeout_secs, Some(300.0));
+        assert_eq!(judges[1].request_timeout_secs, None);
         assert_eq!(judges[1].endpoint, "https://api.openai.com/v1");
         assert_eq!(judges[1].model, "gpt-4o");
         assert_eq!(judges[1].api_key_env.as_deref().unwrap(), "OPENAI_API_KEY");

@@ -12,7 +12,7 @@ use serde_json::{json, Value};
 use crate::args::ProbeArgs;
 use crate::bail;
 use crate::config;
-use crate::llm::{build_completions_url, TOP_LOGPROBS};
+use crate::llm::{build_completions_url, describe_request_error, TOP_LOGPROBS};
 use crate::resolve::{resolve_config, resolve_judges, ResolvedJudge, NO_DELIBERATION_MAX_TOKENS};
 
 /// Bumped whenever the record layout or the set of test requests changes.
@@ -69,7 +69,9 @@ pub async fn run(args: ProbeArgs) {
 ///
 /// A probe belongs to a judge when the URL, model, `reasoning_effort`,
 /// `chat_template_kwargs` and `provider` match, and it's in the current
-/// format. Other settings don't change what the probe tests.
+/// format. Other settings don't change what the probe tests, except that a
+/// failed probe is redone under a longer `request_timeout_secs` (see
+/// `reusable`).
 pub async fn check_judges<'a>(judges: impl IntoIterator<Item = &'a ResolvedJudge>) {
     let path = probes_path();
     let records = read_records(&path);
@@ -77,10 +79,18 @@ pub async fn check_judges<'a>(judges: impl IntoIterator<Item = &'a ResolvedJudge
 
     let mut problems = Vec::new();
     for judge in judges {
-        let record = match latest_record(&records, judge) {
+        let latest = latest_record(&records, judge);
+        let record = match latest.filter(|record| reusable(record, judge)) {
             Some(record) => record.clone(),
             None => {
-                eprintln!("No probe of {} yet. Probing it now; records: {}", judge.display_name, path.display());
+                if latest.is_some() {
+                    eprintln!(
+                        "The last probe of {} failed under a shorter request_timeout_secs. Probing it again; records: {}",
+                        judge.display_name, path.display()
+                    );
+                } else {
+                    eprintln!("No probe of {} yet. Probing it now; records: {}", judge.display_name, path.display());
+                }
                 let record = probe_judge(&client, judge).await;
                 append_record(&path, &record);
                 record
@@ -129,6 +139,24 @@ fn latest_record<'a>(records: &'a [Value], judge: &ResolvedJudge) -> Option<&'a 
             && r["settings"]["chat_template_kwargs"] == json!(judge.chat_template_kwargs)
             && r["settings"]["provider"] == json!(judge.provider)
     })
+}
+
+/// Whether a judge's latest probe can stand in for a new one. A passed probe
+/// always can. A failed one can unless `request_timeout_secs` is now longer,
+/// since the old timeout may be why it failed. Unset waits indefinitely, so
+/// it counts as the longest.
+fn reusable(record: &Value, judge: &ResolvedJudge) -> bool {
+    if judge_problems(judge, &record["findings"]).is_empty() {
+        return true;
+    }
+    let old = record["settings"]["request_timeout_secs"].as_f64();
+    let new = judge.request_timeout.map(|t| t.as_secs_f64());
+    let longer = match (old, new) {
+        (Some(old), Some(new)) => new > old,
+        (Some(_), None) => true,
+        (None, _) => false,
+    };
+    !longer
 }
 
 /// Why runs can't use this judge, given its probe findings. Empty if they can.
@@ -258,6 +286,7 @@ async fn probe_judge(client: &Client, judge: &ResolvedJudge) -> Value {
             "reasoning_effort": judge.reasoning_effort,
             "chat_template_kwargs": judge.chat_template_kwargs,
             "provider": judge.provider,
+            "request_timeout_secs": judge.request_timeout.map(|t| t.as_secs_f64()),
         },
         "findings": {
             "responded": responded,
@@ -363,6 +392,9 @@ async fn send_test(client: &Client, judge: &ResolvedJudge, url: &str, test: &str
     if let Some(ref key) = judge.api_key {
         req = req.bearer_auth(key);
     }
+    if let Some(timeout) = judge.request_timeout {
+        req = req.timeout(timeout);
+    }
 
     let start = Instant::now();
     let (http_status, response, error) = match req.send().await {
@@ -374,10 +406,14 @@ async fn send_test(client: &Client, judge: &ResolvedJudge, url: &str, test: &str
                     let response = serde_json::from_str::<Value>(&text).unwrap_or(Value::String(text));
                     (Some(status), Some(response), None)
                 }
-                Err(e) => (Some(status), None, Some(format!("reading the response failed: {e}"))),
+                Err(e) => (Some(status), None, Some(format!(
+                    "reading the response failed: {}", describe_request_error(&e, judge.request_timeout),
+                ))),
             }
         }
-        Err(e) => (None, None, Some(format!("the request failed: {e}"))),
+        Err(e) => (None, None, Some(format!(
+            "the request failed: {}", describe_request_error(&e, judge.request_timeout),
+        ))),
     };
     let elapsed_ms = start.elapsed().as_millis() as u64;
 
@@ -500,6 +536,7 @@ mod tests {
             reasoning_effort: reasoning_effort.map(String::from),
             chat_template_kwargs: None,
             provider: None,
+            request_timeout: None,
             judge_id: 0,
             display_name: "m".into(),
         }
@@ -549,6 +586,28 @@ mod tests {
         j.chat_template_kwargs = None;
         j.reasoning_effort = Some("low".into());
         assert!(latest_record(&records, &j).is_none());
+    }
+
+    #[test]
+    fn failed_probe_is_redone_only_under_a_longer_timeout() {
+        use std::time::Duration;
+        let url = "http://127.0.0.1:8001/v1/chat/completions";
+        let mut passed = record(url, "m", None, Value::Null, 1);
+        passed["findings"] = good_findings();
+        let mut failed = record(url, "m", None, Value::Null, 2);
+        failed["findings"] = json!({"responded": false});
+        failed["settings"]["request_timeout_secs"] = json!(5);
+        let mut failed_unset = record(url, "m", None, Value::Null, 3);
+        failed_unset["findings"] = json!({"responded": false});
+
+        let mut j = judge(None, false);
+        for (timeout, failed_reusable) in [(Some(1.0), true), (Some(5.0), true), (Some(5.5), false), (None, false)] {
+            j.request_timeout = timeout.map(Duration::from_secs_f64);
+            assert!(reusable(&passed, &j));
+            assert_eq!(reusable(&failed, &j), failed_reusable, "timeout {timeout:?}");
+            // A failed probe with no timeout already waited indefinitely.
+            assert!(reusable(&failed_unset, &j));
+        }
     }
 
     #[test]
