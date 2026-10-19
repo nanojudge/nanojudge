@@ -975,12 +975,14 @@ pub async fn run(args: RankArgs) {
         eprintln!("\nCancelled. {} judgements completed before interrupt.", total_judgements);
     }
 
-    // Zero new judgements is a failure only when we did not deliberately stop.
-    // A run that stopped before collecting (its loaded data already met
-    // stop_confidence) has seeded edges to score and produces a ranking; a run
-    // where every collected judgement failed has nothing valid and bails.
-    if total_judgements == 0 && !early_stop {
-        bail("All judgements failed. No results to score.");
+    // Zero new judgements is a failure only when we did not deliberately stop
+    // (early stop or Ctrl-C). A deliberate stop scores whatever edges exist,
+    // including ones seeded from --load-judgements.
+    if total_judgements == 0 && !early_stop && !cancelled.load(Ordering::Relaxed) {
+        bail("All judgements failed.");
+    }
+    if engine.completed_edges.is_empty() {
+        bail("Cancelled before any judgements completed. No results to score.");
     }
 
     if resolved.verbose {
@@ -1093,11 +1095,7 @@ async fn run_lineup_judgements(
     let logprobs_mode = judges[0].logprobs;
 
     if !logprobs_mode {
-        eprintln!(
-            "Warning: lineups without logprobs keep only each lineup's winner ({} edges instead of {}, dropping the ordering below 1st place). Enable logprobs for full information.",
-            resolved.lineup_size - 1,
-            resolved.lineup_size * (resolved.lineup_size - 1) / 2,
-        );
+        eprintln!("Warning: Running without logprobs. Requires more judgements to reach equivalent accuracy as when using logprobs.");
     }
 
     let (titles, texts) = load_items(args);
@@ -1193,12 +1191,30 @@ async fn run_lineup_judgements(
         );
         if criteria.len() == 1 {
             eprintln!("Criterion: \"{}\"", criteria[0]);
+        } else {
+            eprintln!("Criteria ({} variants):", criteria.len());
+            for (i, c) in criteria.iter().enumerate() {
+                eprintln!("  {}: \"{}\"", i + 1, c);
+            }
         }
+
         if judges.len() == 1 {
             eprintln!(
                 "Endpoint: {} | Model: {} | Verdict temperature: {}",
                 judges[0].endpoint, judges[0].model, judges[0].verdict_temperature,
             );
+        } else {
+            eprintln!("Judge panel ({} judges):", judges.len());
+            for j in &judges {
+                eprintln!(
+                    "  {} — {} (concurrency: {}, weight: {:.0}%, verdict temp: {})",
+                    j.display_name,
+                    j.endpoint,
+                    j.concurrency,
+                    j.weight / total_weight * 100.0,
+                    j.verdict_temperature,
+                );
+            }
         }
     }
 
@@ -1708,12 +1724,14 @@ async fn run_lineup_judgements(
         eprintln!("\nCancelled. {} lineup judgements completed before interrupt.", total_judgements);
     }
 
-    // Zero new judgements is a failure only when we did not deliberately stop.
-    // A run that stopped before collecting (its loaded data already met
-    // stop_confidence) has seeded edges to score and produces a ranking; a run
-    // where every collected judgement failed has nothing valid and bails.
-    if total_judgements == 0 && !early_stop {
-        bail("All lineup judgements failed. No results to score.");
+    // Zero new judgements is a failure only when we did not deliberately stop
+    // (early stop or Ctrl-C). A deliberate stop scores whatever edges exist,
+    // including ones seeded from --load-judgements.
+    if total_judgements == 0 && !early_stop && !cancelled.load(Ordering::Relaxed) {
+        bail("All lineup judgements failed.");
+    }
+    if engine.completed_edges.is_empty() {
+        bail("Cancelled before any lineup judgements completed. No results to score.");
     }
 
     if resolved.verbose {
