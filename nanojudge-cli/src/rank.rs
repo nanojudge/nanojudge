@@ -1,23 +1,28 @@
 use nanojudge_core::{
     Edge, EngineConfig, JudgeInfo, RankingEngine, ScoringOptions,
     JudgementDistribution, calculate_budget,
-    judgements_needed_for_every_item_to_appear_once, run_scoring, item_hash, lineup_verdict_to_edges,
+    judgements_needed_for_every_item_to_appear_once, run_scoring, item_hash, judge_hash, prompt_hash,
+    lineup_verdict_to_edges, LineupVerdict,
 };
 use nanojudge_core::seed;
 use rand::seq::SliceRandom;
 use reqwest::Client;
 use std::collections::HashMap;
+use std::future::Future;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use tokio::sync::OnceCell;
 
 use crate::args::{OutputFormat, RankArgs};
 use crate::bail;
 use crate::config;
 use crate::items::load_items;
-use crate::llm::{LlmConfig, judge_pair, judge_lineup};
+use crate::llm::{LineupJudgementResult, LlmConfig, PairJudgementResult, judge_pair, judge_lineup};
 use crate::output;
+use crate::parse::ParseResult;
+use crate::prompt::{build_lineup_prompt, build_prompt};
 use crate::resolve::{resolve_config, resolve_judgements_per_item, resolve_judges, ResolvedConfig, ResolvedJudge};
 
 #[derive(Default)]
@@ -44,6 +49,224 @@ fn print_max_tokens_warnings(judges: &[ResolvedJudge], judge_stats: &[JudgeStats
     }
     if any_max_tokens_hit {
         eprintln!("Consider increasing max_tokens or adjusting the length instruction in the prompt.");
+    }
+}
+
+/// One judgement and the temperature its request was sent at.
+struct Judged<R> {
+    result: R,
+    temperature: f64,
+}
+
+/// Judgement results keyed by (judge index, prompt hash). A judge with
+/// deliberation off and `reasoning_effort = "none"` answers an identical prompt
+/// identically when its verdict isn't sampled: in logprobs mode, or in text
+/// mode at temperature 0. A repeat then reuses the stored result instead of
+/// being sent again. It still counts as a judgement of its own, like any other.
+/// Loaded judgements fill the cache too (see `loaded_reuse_entries`).
+type ReuseCache<R> = HashMap<(usize, u64), ReuseCell<R>>;
+
+/// One prompt's entry in a `ReuseCache`: empty until a judgement with a verdict
+/// fills it.
+type ReuseCell<R> = Arc<OnceCell<Arc<Judged<R>>>>;
+
+/// Why a judgement did not fill its reuse cell.
+enum Unfilled<R> {
+    Failed(String),
+    NoVerdict(Arc<Judged<R>>),
+}
+
+/// Send a judgement, or reuse the identical prompt's result when `cell` is
+/// given. Concurrent copies of a prompt wait for the first to finish. Only a
+/// judgement with a verdict fills the cell, so after a failed request or an
+/// unparseable reply the next copy is sent for real. Returns the judgement and
+/// whether it was reused.
+async fn judge_or_reuse<R, Fut>(
+    cell: Option<ReuseCell<R>>,
+    has_verdict: fn(&R) -> bool,
+    send: impl FnOnce() -> Fut,
+) -> Result<(Arc<Judged<R>>, bool), String>
+where
+    Fut: Future<Output = Result<Judged<R>, String>>,
+{
+    let Some(cell) = cell else {
+        return send().await.map(|judged| (Arc::new(judged), false));
+    };
+    let mut sent = false;
+    let outcome = cell
+        .get_or_try_init(|| async {
+            sent = true;
+            let judged = Arc::new(send().await.map_err(Unfilled::Failed)?);
+            if has_verdict(&judged.result) {
+                Ok(judged)
+            } else {
+                Err(Unfilled::NoVerdict(judged))
+            }
+        })
+        .await;
+    match outcome {
+        Ok(judged) => Ok((judged.clone(), !sent)),
+        Err(Unfilled::Failed(e)) => Err(e),
+        Err(Unfilled::NoVerdict(judged)) => Ok((judged, false)),
+    }
+}
+
+/// Whether a judge's repeated prompts reuse earlier results (see `ReuseCache`).
+fn reuses_results(judge: &ResolvedJudge, deliberation_enabled: bool) -> bool {
+    !deliberation_enabled
+        && judge.reasoning_effort.as_deref() == Some("none")
+        && (judge.logprobs || judge.temperature == 0.0)
+}
+
+/// What one judgement asks: its items in presentation order and the prompt.
+struct Slot {
+    item_ids: Vec<i64>,
+    prompt: Arc<String>,
+    prompt_hash: u64,
+}
+
+impl Slot {
+    fn new(item_ids: Vec<i64>, prompt: String) -> Self {
+        let prompt_hash = prompt_hash(&prompt);
+        Slot { item_ids, prompt: Arc::new(prompt), prompt_hash }
+    }
+}
+
+/// A loaded judgement that repeats of its prompt in this run reuse. `record`
+/// passed `load_edges`, so its verdict fields are valid.
+struct LoadedReuse {
+    key: (usize, u64),
+    record: serde_json::Value,
+    temperature: f64,
+    hit_max_tokens: bool,
+    response_text: Option<String>,
+    reasoning_text: Option<String>,
+}
+
+/// Pick the loaded judgements this run can reuse. A loaded judgement qualifies
+/// when its judge reuses results in this run and it was made with the same
+/// deliberation, `reasoning_effort`, `provider` and `chat_template_kwargs`,
+/// and, in text mode, at temperature 0. Every judge in `records` must be in
+/// `judges`.
+fn loaded_reuse_entries(
+    records: Vec<serde_json::Value>,
+    judges: &[ResolvedJudge],
+    deliberation_enabled: bool,
+    path: &Path,
+) -> Vec<LoadedReuse> {
+    let field = |record: &serde_json::Value, name: &str| -> serde_json::Value {
+        match record.get(name) {
+            Some(v) => v.clone(),
+            None => bail(format!("A judgement in {} has no {name} field", path.display())),
+        }
+    };
+    let malformed = |name: &str| -> ! {
+        bail(format!("A judgement in {} has a malformed {name} field", path.display()))
+    };
+    let mut entries = Vec::new();
+    for record in records {
+        let judge_id = judge_hash(
+            record["judge_endpoint"].as_str().expect("load_edges requires judge_endpoint"),
+            record["judge_model"].as_str().expect("load_edges requires judge_model"),
+        );
+        let judge_idx = judges
+            .iter()
+            .position(|j| j.judge_id == judge_id)
+            .expect("seed_prior_edges requires every loaded judge to be in the run");
+        let judge = &judges[judge_idx];
+        if !reuses_results(judge, deliberation_enabled) {
+            continue;
+        }
+        let same_settings = field(&record, "deliberation") == serde_json::json!(deliberation_enabled)
+            && field(&record, "reasoning_effort") == serde_json::json!(judge.reasoning_effort)
+            && field(&record, "provider") == serde_json::json!(judge.provider)
+            && field(&record, "chat_template_kwargs") == serde_json::json!(judge.chat_template_kwargs);
+        if !same_settings {
+            continue;
+        }
+        let hash = match field(&record, "prompt_hash").as_str() {
+            Some(h) if h.len() == 16 => u64::from_str_radix(h, 16).unwrap_or_else(|_| malformed("prompt_hash")),
+            _ => malformed("prompt_hash"),
+        };
+        let temperature = field(&record, "temperature").as_f64().unwrap_or_else(|| malformed("temperature"));
+        if !judge.logprobs && temperature != 0.0 {
+            continue;
+        }
+        let hit_max_tokens = field(&record, "hit_max_tokens").as_bool().unwrap_or_else(|| malformed("hit_max_tokens"));
+        // A text field is absent when its run didn't save it, and null when the
+        // endpoint returned none; either way there is no text to carry over.
+        let text = |name: &str| record.get(name).and_then(|v| v.as_str()).map(str::to_owned);
+        let response_text = text("response");
+        let reasoning_text = text("reasoning");
+        entries.push(LoadedReuse {
+            key: (judge_idx, hash),
+            record,
+            temperature,
+            hit_max_tokens,
+            response_text,
+            reasoning_text,
+        });
+    }
+    entries
+}
+
+/// Fill a reuse cache from loaded judgements, keeping the first of any repeats.
+fn seed_reuse_cache<R>(
+    loaded: Vec<LoadedReuse>,
+    result: fn(&serde_json::Value, Option<String>, Option<String>, bool) -> R,
+) -> ReuseCache<R> {
+    let mut cache: ReuseCache<R> = HashMap::new();
+    for l in loaded {
+        cache.entry(l.key).or_insert_with(|| {
+            let judged = Judged {
+                result: result(&l.record, l.response_text, l.reasoning_text, l.hit_max_tokens),
+                temperature: l.temperature,
+            };
+            Arc::new(OnceCell::from(Arc::new(judged)))
+        });
+    }
+    cache
+}
+
+/// A loaded pair record as a reusable result. It sent no request, so it
+/// carries no retries or usage.
+fn loaded_pair_result(
+    record: &serde_json::Value,
+    response_text: Option<String>,
+    reasoning_text: Option<String>,
+    hit_max_tokens: bool,
+) -> PairJudgementResult {
+    let probs = &record["category_probs"];
+    let prob = |i: usize| probs[i].as_f64().expect("load_edges validates category_probs");
+    PairJudgementResult {
+        parse_result: ParseResult { category_probs: Some([prob(0), prob(1)]) },
+        response_text,
+        reasoning_text,
+        retries_used: 0,
+        usage: None,
+        hit_max_tokens,
+    }
+}
+
+/// A loaded lineup record as a reusable result, like `loaded_pair_result`.
+fn loaded_lineup_result(
+    record: &serde_json::Value,
+    response_text: Option<String>,
+    reasoning_text: Option<String>,
+    hit_max_tokens: bool,
+) -> LineupJudgementResult {
+    let numbers = |name: &str| record[name].as_array().expect("load_edges validates lineup verdicts");
+    let verdict = LineupVerdict {
+        ranking: numbers("ranking").iter().map(|v| v.as_u64().expect("load_edges validates ranking") as usize).collect(),
+        place_probs: numbers("place_probs").iter().map(|v| v.as_f64().expect("load_edges validates place_probs")).collect(),
+    };
+    LineupJudgementResult {
+        verdict: Some(verdict),
+        response_text,
+        reasoning_text,
+        retries_used: 0,
+        usage: None,
+        hit_max_tokens,
     }
 }
 
@@ -183,7 +406,7 @@ fn assign_judgements_to_judges(
 /// current run), and records the survivors so they inform pairing and scoring.
 /// Loaded edges are kept out of the judge balancer's ledger by design: this
 /// only ever touches the engine. Returns how many loaded judgements contributed
-/// at least one edge to this run.
+/// at least one edge to this run, and their records.
 fn seed_prior_edges(
     engine: &mut RankingEngine,
     path: &Path,
@@ -193,9 +416,9 @@ fn seed_prior_edges(
     run_logprobs_mode: bool,
     per_judge_verdict_temperatures: &HashMap<String, f64>,
     verbose: bool,
-) -> usize {
+) -> (usize, Vec<serde_json::Value>) {
     let (mut edges, edge_judgements, _names, file_judge_ids, file_judge_display_names, _flag_keys,
-         total_judgements, file_logprobs_mode, _temps, hash_keys) =
+         total_judgements, file_logprobs_mode, _temps, hash_keys, records) =
         crate::score::load_edges(path, None, per_judge_verdict_temperatures, Some(lineup_size));
 
     if edges.is_empty() {
@@ -239,7 +462,7 @@ fn seed_prior_edges(
 
     let mut seeded: Vec<Edge> = Vec::with_capacity(edges.len());
     let mut covered: std::collections::HashSet<i64> = std::collections::HashSet::new();
-    let mut contributing: std::collections::HashSet<usize> = std::collections::HashSet::new();
+    let mut contributing: std::collections::BTreeSet<usize> = std::collections::BTreeSet::new();
     let mut skipped = 0usize;
     for (edge, &judgement) in edges.iter_mut().zip(&edge_judgements) {
         let h1 = hash_keys[edge.item1 as usize].as_str();
@@ -278,7 +501,13 @@ fn seed_prior_edges(
     if skipped > 0 {
         eprintln!("{skipped} of {} loaded edges skipped (referenced items not in this run)", edges.len());
     }
-    contributing.len()
+    let contributing_records = records
+        .into_iter()
+        .enumerate()
+        .filter(|(i, _)| contributing.contains(i))
+        .map(|(_, record)| record)
+        .collect();
+    (contributing.len(), contributing_records)
 }
 
 /// Everything both runs build before their refit loop: judges, items, budget,
@@ -309,6 +538,8 @@ struct RunSetup {
     /// Loaded judgements that contributed edges to this run; None without
     /// `--load-judgements`. Added to displayed judgement counts only.
     loaded_judgements: Option<usize>,
+    /// Loaded judgements that repeats of their prompts reuse.
+    loaded_reuse: Vec<LoadedReuse>,
     interim_scoring_options: ScoringOptions,
     judge_display_names: Arc<Vec<String>>,
     judge_models: Arc<Vec<String>>,
@@ -540,12 +771,12 @@ async fn setup_run(
     // the very first selection pass and the final ranking. Kept out of the judge
     // balancer's ledger — this only touches the engine. The lineup-size guard in
     // load_edges rejects any file whose judgements are not this run's lineup size.
-    let loaded_judgements = if let Some(ref load_path) = args.load_judgements {
+    let (loaded_judgements, loaded_reuse) = if let Some(ref load_path) = args.load_judgements {
         let per_judge_verdict_temps: HashMap<String, f64> = judges
             .iter()
             .map(|j| (format!("{}@{}", j.model, j.endpoint), j.verdict_temperature))
             .collect();
-        Some(seed_prior_edges(
+        let (loaded, records) = seed_prior_edges(
             &mut engine,
             load_path,
             &text_hashes,
@@ -554,9 +785,11 @@ async fn setup_run(
             logprobs_mode,
             &per_judge_verdict_temps,
             resolved.verbose,
-        ))
+        );
+        let reuse = loaded_reuse_entries(records, &judges, resolved.deliberation_enabled, load_path);
+        (Some(loaded), reuse)
     } else {
-        None
+        (None, Vec::new())
     };
 
     // Scoring options are constant across refits, so build them once and share
@@ -615,6 +848,7 @@ async fn setup_run(
         failures_file,
         engine,
         loaded_judgements,
+        loaded_reuse,
         interim_scoring_options,
         judge_display_names,
         judge_models,
@@ -758,6 +992,9 @@ struct RunTotals {
     /// From `RunSetup::loaded_judgements`; added to displayed counts only.
     loaded_judgements: Option<usize>,
     judgements_done: usize,
+    /// Judgements that reused an identical earlier prompt's result (see
+    /// `ReuseCache`). Included in `total_judgements`.
+    reused_judgements: usize,
     total_retries: usize,
     failed_http: usize,
     failed_parse: usize,
@@ -785,6 +1022,7 @@ fn finish_run(
         total_judgements,
         loaded_judgements,
         judgements_done,
+        reused_judgements,
         total_retries,
         failed_http,
         failed_parse,
@@ -841,6 +1079,9 @@ fn finish_run(
             "{} of {} judgements succeeded",
             total_judgements, judgements_done
         );
+    }
+    if reused_judgements > 0 {
+        eprintln!("Reused results of identical earlier prompts: {reused_judgements}");
     }
     if total_retries > 0 {
         eprintln!("HTTP retries: {total_retries}");
@@ -942,6 +1183,7 @@ pub async fn run(args: RankArgs) {
         failures_file,
         mut engine,
         loaded_judgements,
+        loaded_reuse,
         interim_scoring_options,
         judge_display_names,
         judge_models,
@@ -974,6 +1216,9 @@ pub async fn run(args: RankArgs) {
     let mut early_stop = prime_from_seed(
         &mut engine, &item_ids, &interim_scoring_options, &judge_info, &resolved,
     );
+    let reusing: Vec<bool> = judges.iter().map(|j| reuses_results(j, resolved.deliberation_enabled)).collect();
+    let mut reuse_cache = seed_reuse_cache(loaded_reuse, loaded_pair_result);
+    let mut reused_judgements = 0usize;
     let mut refits_run = 0usize;
     let mut judgements_done = 0usize;
 
@@ -1043,48 +1288,56 @@ pub async fn run(args: RankArgs) {
                 request_timeout: base_config.request_timeout,
             });
             let texts = texts.clone();
-            let titles = titles.clone();
-            let criterion = criteria[criterion_assignments[pair_idx]].clone();
-            let deliberation_length = deliberation_length.clone();
-            let template = template.clone();
-            let id_a = *id_a;
-            let id_b = *id_b;
+            let (a, b) = (*id_a as usize, *id_b as usize);
+            let slot = Slot::new(vec![*id_a, *id_b], build_prompt(
+                &template,
+                &criteria[criterion_assignments[pair_idx]],
+                &texts[a],
+                &texts[b],
+                &titles[a],
+                &titles[b],
+                &deliberation_length,
+            ));
+            let prompt = slot.prompt.clone();
             let min_logprob_coverage = judge_min_logprob_coverages[judge_idx];
             let assigned_judge_id = judge_ids[judge_idx];
             let judge_name = judge_display_names[judge_idx].clone();
+            let temperature = precomputed_temperatures[pair_idx];
+            let cell = reusing[judge_idx].then(|| {
+                reuse_cache.entry((judge_idx, slot.prompt_hash)).or_default().clone()
+            });
 
             let verbose = resolved.verbose;
             let handle = tokio::spawn(async move {
-                let _permit = sem.acquire().await.unwrap();
-                let result = judge_pair(
-                    &client,
-                    &llm_config,
-                    &template,
-                    &criterion,
-                    &texts[id_a as usize],
-                    &texts[id_b as usize],
-                    &titles[id_a as usize],
-                    &titles[id_b as usize],
-                    id_a,
-                    id_b,
-                    min_logprob_coverage,
-                    &deliberation_length,
-                    max_retries,
-                    verbose,
-                    &judge_name,
-                )
+                let has_verdict = |r: &PairJudgementResult| r.parse_result.category_probs.is_some();
+                let result = judge_or_reuse(cell, has_verdict, move || async move {
+                    let _permit = sem.acquire().await.unwrap();
+                    let result = judge_pair(
+                        &client,
+                        &llm_config,
+                        &prompt,
+                        &texts[a],
+                        &texts[b],
+                        min_logprob_coverage,
+                        max_retries,
+                        verbose,
+                        &judge_name,
+                    )
+                    .await?;
+                    Ok(Judged { result, temperature })
+                })
                 .await;
                 (result, assigned_judge_id, judge_idx, std::time::Instant::now())
             });
 
-            handles.push((handle, judge_idx));
+            handles.push((handle, judge_idx, slot));
         }
 
         let mut refit_results: Vec<Edge> = Vec::new();
         let mut judge_last_finish: Vec<Option<std::time::Instant>> = vec![None; judges.len()];
         let mut judge_aborted: Vec<usize> = vec![0; judges.len()];
 
-        for (pair_result_idx, (handle, handle_judge_idx)) in handles.into_iter().enumerate() {
+        for (pair_result_idx, (handle, handle_judge_idx, slot)) in handles.into_iter().enumerate() {
             // Once cancelled, every uncollected request is aborted, including
             // ones that have already finished. Harvesting finished results
             // would keep only the fast responses from the tail of the batch,
@@ -1107,47 +1360,59 @@ pub async fn run(args: RankArgs) {
                 }
             };
             match result {
-                Ok((Ok(result), assigned_judge_id, judge_idx, finished_at)) => {
-                    let actual_temperature = precomputed_temperatures[pair_result_idx];
+                Ok((Ok((judged, reused)), assigned_judge_id, judge_idx, finished_at)) => {
+                    let result = &judged.result;
+                    let actual_temperature = judged.temperature;
                     let criterion = &criteria[criterion_assignments[pair_result_idx]];
+                    let (id1, id2) = (slot.item_ids[0], slot.item_ids[1]);
                     // Track latest finish time per judge before this refit.
                     let entry = &mut judge_last_finish[judge_idx];
                     if entry.is_none() || finished_at > entry.unwrap() {
                         *entry = Some(finished_at);
                     }
-                    total_retries += result.retries_used;
-                    judge_stats[judge_idx].total_responses += 1;
-                    if result.hit_max_tokens {
-                        judge_stats[judge_idx].max_tokens_hits += 1;
-                    }
-                    if let Some(usage) = &result.usage {
-                        judge_stats[judge_idx].input_tokens += usage.prompt_tokens;
-                        judge_stats[judge_idx].output_tokens += usage.completion_tokens;
+                    // A reused judgement sent no request, so it adds no retries,
+                    // responses or tokens.
+                    if reused {
+                        reused_judgements += 1;
+                    } else {
+                        total_retries += result.retries_used;
+                        judge_stats[judge_idx].total_responses += 1;
+                        if result.hit_max_tokens {
+                            judge_stats[judge_idx].max_tokens_hits += 1;
+                        }
+                        if let Some(usage) = &result.usage {
+                            judge_stats[judge_idx].input_tokens += usage.prompt_tokens;
+                            judge_stats[judge_idx].output_tokens += usage.completion_tokens;
+                        }
                     }
                     if let Some(category_probs) = result.parse_result.category_probs {
                         if let Some(ref file_mutex) = save_file {
                             let mut line = serde_json::json!({
                                 "refit": refits_run,
-                                "item1": titles[result.item1_id as usize],
-                                "item2": titles[result.item2_id as usize],
-                                "item1_text_hash": text_hashes[result.item1_id as usize],
-                                "item2_text_hash": text_hashes[result.item2_id as usize],
+                                "item1": titles[id1 as usize],
+                                "item2": titles[id2 as usize],
+                                "item1_text_hash": text_hashes[id1 as usize],
+                                "item2_text_hash": text_hashes[id2 as usize],
                                 "category_probs": category_probs,
                                 "judge_model": judge_models[judge_idx],
                                 "judge_endpoint": judge_endpoints[judge_idx],
                                 "temperature": actual_temperature,
                                 "deliberation": resolved.deliberation_enabled,
                                 "reasoning_effort": judge_reasoning_efforts[judge_idx],
+                                "provider": judges[judge_idx].provider,
+                                "chat_template_kwargs": judges[judge_idx].chat_template_kwargs,
                                 "criterion": criterion,
+                                "prompt_hash": format!("{:016x}", slot.prompt_hash),
                                 "logprobs": logprobs_mode,
-                                "retries_used": result.retries_used,
+                                "retries_used": if reused { 0 } else { result.retries_used },
                                 "hit_max_tokens": result.hit_max_tokens,
+                                "reused": reused,
                             });
-                            if let Some(ref usage) = result.usage {
+                            if let (false, Some(usage)) = (reused, &result.usage) {
                                 line["usage"] = usage.to_json();
                             }
                             if save_prompt_text {
-                                line["prompt"] = serde_json::json!(result.prompt);
+                                line["prompt"] = serde_json::json!(*slot.prompt);
                             }
                             if save_response_text {
                                 line["response"] = serde_json::json!(result.response_text);
@@ -1163,8 +1428,8 @@ pub async fn run(args: RankArgs) {
                         // The raw distribution is what went to the JSONL above;
                         // the tempered one is what the scoring engine sees.
                         refit_results.push(Edge::new(
-                            result.item1_id,
-                            result.item2_id,
+                            id1,
+                            id2,
                             temper_verdict(category_probs, judge_verdict_temperatures[judge_idx]),
                             assigned_judge_id,
                         ));
@@ -1173,20 +1438,23 @@ pub async fn run(args: RankArgs) {
                         if let Some(ref file_mutex) = failures_file {
                             let mut line = serde_json::json!({
                                 "refit": refits_run,
-                                "item1": titles[result.item1_id as usize],
-                                "item2": titles[result.item2_id as usize],
-                                "item1_text_hash": text_hashes[result.item1_id as usize],
-                                "item2_text_hash": text_hashes[result.item2_id as usize],
+                                "item1": titles[id1 as usize],
+                                "item2": titles[id2 as usize],
+                                "item1_text_hash": text_hashes[id1 as usize],
+                                "item2_text_hash": text_hashes[id2 as usize],
                                 "judge_model": judge_models[judge_idx],
                                 "judge_endpoint": judge_endpoints[judge_idx],
                                 "temperature": actual_temperature,
                                 "deliberation": resolved.deliberation_enabled,
                                 "reasoning_effort": judge_reasoning_efforts[judge_idx],
+                                "provider": judges[judge_idx].provider,
+                                "chat_template_kwargs": judges[judge_idx].chat_template_kwargs,
                                 "criterion": criterion,
+                                "prompt_hash": format!("{:016x}", slot.prompt_hash),
                                 "logprobs": logprobs_mode,
                                 "retries_used": result.retries_used,
                                 "hit_max_tokens": result.hit_max_tokens,
-                                "prompt": result.prompt,
+                                "prompt": *slot.prompt,
                                 "response": result.response_text,
                                 "reasoning": result.reasoning_text,
                             });
@@ -1201,15 +1469,15 @@ pub async fn run(args: RankArgs) {
                             if judges.len() > 1 {
                                 eprintln!(
                                     "  Warning: unparseable response for {} vs {} [{}], skipping",
-                                    titles[result.item1_id as usize],
-                                    titles[result.item2_id as usize],
+                                    titles[id1 as usize],
+                                    titles[id2 as usize],
                                     judge_display_names[judge_idx],
                                 );
                             } else {
                                 eprintln!(
                                     "  Warning: unparseable response for {} vs {}, skipping",
-                                    titles[result.item1_id as usize],
-                                    titles[result.item2_id as usize],
+                                    titles[id1 as usize],
+                                    titles[id2 as usize],
                                 );
                             }
                         }
@@ -1299,7 +1567,7 @@ pub async fn run(args: RankArgs) {
 
     finish_run(
         &resolved, "judgements", &judges, &judge_info, &item_ids, &titles, &text_hashes, &engine,
-        RunTotals { total_judgements, loaded_judgements, judgements_done, total_retries, failed_http, failed_parse, judge_stats },
+        RunTotals { total_judgements, loaded_judgements, judgements_done, reused_judgements, total_retries, failed_http, failed_parse, judge_stats },
         early_stop, cancelled.load(Ordering::Relaxed), &interim_rankings,
     );
 }
@@ -1340,6 +1608,7 @@ async fn run_lineup_judgements(
         failures_file,
         mut engine,
         loaded_judgements,
+        loaded_reuse,
         interim_scoring_options,
         judge_display_names,
         judge_models,
@@ -1376,6 +1645,9 @@ async fn run_lineup_judgements(
     let mut early_stop = prime_from_seed(
         &mut engine, &item_ids, &interim_scoring_options, &judge_info, resolved,
     );
+    let reusing: Vec<bool> = judges.iter().map(|j| reuses_results(j, resolved.deliberation_enabled)).collect();
+    let mut reuse_cache = seed_reuse_cache(loaded_reuse, loaded_lineup_result);
+    let mut reused_judgements = 0usize;
     let mut refits_run = 0usize;
     let mut judgements_done = 0usize;
 
@@ -1419,8 +1691,7 @@ async fn run_lineup_judgements(
         for (lineup_idx, lineup) in lineups.iter().enumerate() {
             // Shuffle the lineup into random slot order so no item has a fixed
             // presentation position (every permutation equally likely).
-            // The verdict stays aligned because judge_lineup maps option
-            // A/B/C/... to whatever ids we pass here, in order.
+            // The verdict indexes options A/B/C/... in this slot order.
             let mut slot_ids = lineup.clone();
             slot_ids.shuffle(&mut slot_rng);
             let judge_idx = judge_assignments[lineup_idx];
@@ -1442,29 +1713,37 @@ async fn run_lineup_judgements(
                 provider: base_config.provider.clone(),
                 request_timeout: base_config.request_timeout,
             });
-            let texts = texts.clone();
-            let criterion = criteria[criterion_assignments[lineup_idx]].clone();
-            let deliberation_length = deliberation_length.clone();
-            let template = template.clone();
+            let option_texts: Vec<&str> = slot_ids.iter().map(|&id| texts[id as usize].as_str()).collect();
+            let slot = Slot::new(slot_ids, build_lineup_prompt(
+                &template,
+                &criteria[criterion_assignments[lineup_idx]],
+                &option_texts,
+                &deliberation_length,
+            ));
+            let prompt = slot.prompt.clone();
             let min_logprob_coverage = judge_min_logprob_coverages[judge_idx];
             let assigned_judge_id = judge_ids[judge_idx];
             let judge_name = judge_display_names[judge_idx].clone();
             let verbose = resolved.verbose;
+            let temperature = precomputed_temperatures[lineup_idx];
+            let cell = reusing[judge_idx].then(|| {
+                reuse_cache.entry((judge_idx, slot.prompt_hash)).or_default().clone()
+            });
 
             let handle = tokio::spawn(async move {
-                let _permit = sem.acquire().await.unwrap();
-                let option_texts: Vec<&str> = slot_ids
-                    .iter()
-                    .map(|&id| texts[id as usize].as_str())
-                    .collect();
-                let result = judge_lineup(
-                    &client, &llm_config, &template, &criterion,
-                    &option_texts, &slot_ids,
-                    min_logprob_coverage, &deliberation_length, max_retries, verbose, &judge_name,
-                ).await;
+                let has_verdict = |r: &LineupJudgementResult| r.verdict.is_some();
+                let result = judge_or_reuse(cell, has_verdict, move || async move {
+                    let _permit = sem.acquire().await.unwrap();
+                    let result = judge_lineup(
+                        &client, &llm_config, &prompt, lineup_size,
+                        min_logprob_coverage, max_retries, verbose, &judge_name,
+                    ).await?;
+                    Ok(Judged { result, temperature })
+                })
+                .await;
                 (result, assigned_judge_id, judge_idx, std::time::Instant::now())
             });
-            handles.push((handle, judge_idx));
+            handles.push((handle, judge_idx, slot));
         }
 
         let mut refit_results: Vec<Edge> = Vec::new();
@@ -1472,7 +1751,7 @@ async fn run_lineup_judgements(
         let mut judge_last_finish: Vec<Option<std::time::Instant>> = vec![None; judges.len()];
         let mut judge_aborted: Vec<usize> = vec![0; judges.len()];
 
-        for (lineup_result_idx, (handle, handle_judge_idx)) in handles.into_iter().enumerate() {
+        for (lineup_result_idx, (handle, handle_judge_idx, slot)) in handles.into_iter().enumerate() {
             // Once cancelled, every uncollected request is aborted, including
             // ones that have already finished. Harvesting finished results
             // would keep only the fast responses from the tail of the batch,
@@ -1495,30 +1774,37 @@ async fn run_lineup_judgements(
                 }
             };
             match result {
-                Ok((Ok(tw), assigned_judge_id, judge_idx, finished_at)) => {
-                    let actual_temperature = precomputed_temperatures[lineup_result_idx];
+                Ok((Ok((judged, reused)), assigned_judge_id, judge_idx, finished_at)) => {
+                    let tw = &judged.result;
+                    let actual_temperature = judged.temperature;
                     let criterion = &criteria[criterion_assignments[lineup_result_idx]];
                     let entry = &mut judge_last_finish[judge_idx];
                     if entry.is_none() || finished_at > entry.unwrap() {
                         *entry = Some(finished_at);
                     }
-                    total_retries += tw.retries_used;
-                    judge_stats[judge_idx].total_responses += 1;
-                    if tw.hit_max_tokens {
-                        judge_stats[judge_idx].max_tokens_hits += 1;
+                    // A reused judgement sent no request, so it adds no retries,
+                    // responses or tokens.
+                    if reused {
+                        reused_judgements += 1;
+                    } else {
+                        total_retries += tw.retries_used;
+                        judge_stats[judge_idx].total_responses += 1;
+                        if tw.hit_max_tokens {
+                            judge_stats[judge_idx].max_tokens_hits += 1;
+                        }
+                        if let Some(usage) = &tw.usage {
+                            judge_stats[judge_idx].input_tokens += usage.prompt_tokens;
+                            judge_stats[judge_idx].output_tokens += usage.completion_tokens;
+                        }
                     }
-                    if let Some(usage) = &tw.usage {
-                        judge_stats[judge_idx].input_tokens += usage.prompt_tokens;
-                        judge_stats[judge_idx].output_tokens += usage.completion_tokens;
-                    }
-                    if let Some(verdict) = tw.verdict {
+                    if let Some(verdict) = &tw.verdict {
                         calls_before_refit += 1;
                         if let Some(ref file_mutex) = save_file {
-                            let lineup_titles: Vec<&str> = tw.item_ids
+                            let lineup_titles: Vec<&str> = slot.item_ids
                                 .iter()
                                 .map(|&id| titles[id as usize].as_str())
                                 .collect();
-                            let lineup_hashes: Vec<&str> = tw.item_ids
+                            let lineup_hashes: Vec<&str> = slot.item_ids
                                 .iter()
                                 .map(|&id| text_hashes[id as usize].as_str())
                                 .collect();
@@ -1533,16 +1819,20 @@ async fn run_lineup_judgements(
                                 "temperature": actual_temperature,
                                 "deliberation": resolved.deliberation_enabled,
                                 "reasoning_effort": judge_reasoning_efforts[judge_idx],
+                                "provider": judges[judge_idx].provider,
+                                "chat_template_kwargs": judges[judge_idx].chat_template_kwargs,
                                 "criterion": criterion,
+                                "prompt_hash": format!("{:016x}", slot.prompt_hash),
                                 "logprobs": logprobs_mode,
-                                "retries_used": tw.retries_used,
+                                "retries_used": if reused { 0 } else { tw.retries_used },
                                 "hit_max_tokens": tw.hit_max_tokens,
+                                "reused": reused,
                             });
-                            if let Some(ref usage) = tw.usage {
+                            if let (false, Some(usage)) = (reused, &tw.usage) {
                                 line["usage"] = usage.to_json();
                             }
                             if save_prompt_text {
-                                line["prompt"] = serde_json::json!(tw.prompt);
+                                line["prompt"] = serde_json::json!(*slot.prompt);
                             }
                             if save_response_text {
                                 line["response"] = serde_json::json!(tw.response_text);
@@ -1557,8 +1847,8 @@ async fn run_lineup_judgements(
 
                         // Decomposed edges for engine and scoring.
                         let mut edges = lineup_verdict_to_edges(
-                            &tw.item_ids,
-                            &verdict,
+                            &slot.item_ids,
+                            verdict,
                             assigned_judge_id,
                         );
                         temper_edges_in_place(&mut edges, judge_verdict_temperatures[judge_idx]);
@@ -1566,11 +1856,11 @@ async fn run_lineup_judgements(
                     } else {
                         failed_parse += 1;
                         if let Some(ref file_mutex) = failures_file {
-                            let lineup_titles: Vec<&str> = tw.item_ids
+                            let lineup_titles: Vec<&str> = slot.item_ids
                                 .iter()
                                 .map(|&id| titles[id as usize].as_str())
                                 .collect();
-                            let lineup_hashes: Vec<&str> = tw.item_ids
+                            let lineup_hashes: Vec<&str> = slot.item_ids
                                 .iter()
                                 .map(|&id| text_hashes[id as usize].as_str())
                                 .collect();
@@ -1583,11 +1873,14 @@ async fn run_lineup_judgements(
                                 "temperature": actual_temperature,
                                 "deliberation": resolved.deliberation_enabled,
                                 "reasoning_effort": judge_reasoning_efforts[judge_idx],
+                                "provider": judges[judge_idx].provider,
+                                "chat_template_kwargs": judges[judge_idx].chat_template_kwargs,
                                 "criterion": criterion,
+                                "prompt_hash": format!("{:016x}", slot.prompt_hash),
                                 "logprobs": logprobs_mode,
                                 "retries_used": tw.retries_used,
                                 "hit_max_tokens": tw.hit_max_tokens,
-                                "prompt": tw.prompt,
+                                "prompt": *slot.prompt,
                                 "response": tw.response_text,
                                 "reasoning": tw.reasoning_text,
                             });
@@ -1599,7 +1892,7 @@ async fn run_lineup_judgements(
                             let _ = f.flush();
                         }
                         if resolved.verbose {
-                            let lineup_titles: Vec<&str> = tw.item_ids
+                            let lineup_titles: Vec<&str> = slot.item_ids
                                 .iter()
                                 .map(|&id| titles[id as usize].as_str())
                                 .collect();
@@ -1698,7 +1991,7 @@ async fn run_lineup_judgements(
 
     finish_run(
         resolved, "lineup judgements", &judges, &judge_info, &item_ids, &titles, &text_hashes, &engine,
-        RunTotals { total_judgements, loaded_judgements, judgements_done, total_retries, failed_http, failed_parse, judge_stats },
+        RunTotals { total_judgements, loaded_judgements, judgements_done, reused_judgements, total_retries, failed_http, failed_parse, judge_stats },
         early_stop, cancelled.load(Ordering::Relaxed), &interim_rankings,
     );
 }
@@ -1898,7 +2191,7 @@ mod tests {
         let mut temps = HashMap::new();
         temps.insert("m@http://e".to_string(), 1.0);
 
-        let loaded = seed_prior_edges(&mut engine, f.path(), &text_hashes, 2, &[judge_id], true, &temps, false);
+        let (loaded, _) = seed_prior_edges(&mut engine, f.path(), &text_hashes, 2, &[judge_id], true, &temps, false);
 
         // Both records load; each pairwise record is one edge.
         assert_eq!(loaded, 2);
@@ -1923,7 +2216,7 @@ mod tests {
         let mut temps = HashMap::new();
         temps.insert("m@http://e".to_string(), 1.0);
 
-        let loaded = seed_prior_edges(&mut engine, f.path(), &text_hashes, 2, &[judge_id], true, &temps, false);
+        let (loaded, _) = seed_prior_edges(&mut engine, f.path(), &text_hashes, 2, &[judge_id], true, &temps, false);
 
         // Only A>B survives; it remaps to (0, 1).
         assert_eq!(loaded, 1);
@@ -1953,9 +2246,171 @@ mod tests {
         let mut temps = HashMap::new();
         temps.insert("m@http://e".to_string(), 1.0);
 
-        let loaded = seed_prior_edges(&mut engine, f.path(), &text_hashes, 3, &[judge_id], true, &temps, false);
+        let (loaded, _) = seed_prior_edges(&mut engine, f.path(), &text_hashes, 3, &[judge_id], true, &temps, false);
 
         assert_eq!(loaded, 2);
         assert_eq!(engine.completed_edges.len(), 4);
+    }
+
+    use std::sync::atomic::AtomicUsize;
+
+    /// A stand-in judgement: `Some` is a verdict, `None` an unparseable reply.
+    fn reply(verdict: Option<u8>) -> Result<Judged<Option<u8>>, String> {
+        Ok(Judged { result: verdict, temperature: 0.5 })
+    }
+
+    async fn judge_counted(
+        cell: Option<ReuseCell<Option<u8>>>,
+        sends: &AtomicUsize,
+        outcome: Result<Judged<Option<u8>>, String>,
+    ) -> Result<(Option<u8>, bool), String> {
+        judge_or_reuse(cell, Option::is_some, || async {
+            sends.fetch_add(1, Ordering::SeqCst);
+            tokio::task::yield_now().await;
+            outcome
+        })
+        .await
+        .map(|(judged, reused)| (judged.result, reused))
+    }
+
+    #[tokio::test]
+    async fn test_judge_or_reuse_sends_once_per_prompt() {
+        let sends = AtomicUsize::new(0);
+        let cell = Arc::new(OnceCell::new());
+        assert_eq!(judge_counted(Some(cell.clone()), &sends, reply(Some(1))).await, Ok((Some(1), false)));
+        // The stored verdict comes back, not this attempt's.
+        assert_eq!(judge_counted(Some(cell.clone()), &sends, reply(Some(2))).await, Ok((Some(1), true)));
+        assert_eq!(sends.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn test_judge_or_reuse_without_cell_always_sends() {
+        let sends = AtomicUsize::new(0);
+        assert_eq!(judge_counted(None, &sends, reply(Some(1))).await, Ok((Some(1), false)));
+        assert_eq!(judge_counted(None, &sends, reply(Some(2))).await, Ok((Some(2), false)));
+        assert_eq!(sends.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn test_judge_or_reuse_resends_after_failure_or_no_verdict() {
+        let sends = AtomicUsize::new(0);
+        let cell = Arc::new(OnceCell::new());
+        assert_eq!(judge_counted(Some(cell.clone()), &sends, Err("down".into())).await, Err("down".into()));
+        assert_eq!(judge_counted(Some(cell.clone()), &sends, reply(None)).await, Ok((None, false)));
+        assert_eq!(judge_counted(Some(cell.clone()), &sends, reply(Some(3))).await, Ok((Some(3), false)));
+        assert_eq!(judge_counted(Some(cell.clone()), &sends, reply(Some(4))).await, Ok((Some(3), true)));
+        assert_eq!(sends.load(Ordering::SeqCst), 3);
+    }
+
+    #[tokio::test]
+    async fn test_judge_or_reuse_concurrent_copies_wait_for_the_first() {
+        let sends = AtomicUsize::new(0);
+        let cell = Arc::new(OnceCell::new());
+        let (first, second) = tokio::join!(
+            judge_counted(Some(cell.clone()), &sends, reply(Some(1))),
+            judge_counted(Some(cell.clone()), &sends, reply(Some(2))),
+        );
+        assert_eq!(first, Ok((Some(1), false)));
+        assert_eq!(second, Ok((Some(1), true)));
+        assert_eq!(sends.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn test_judge_or_reuse_concurrent_copy_sends_after_first_fails() {
+        let sends = AtomicUsize::new(0);
+        let cell = Arc::new(OnceCell::new());
+        let (first, second) = tokio::join!(
+            judge_counted(Some(cell.clone()), &sends, Err("down".into())),
+            judge_counted(Some(cell.clone()), &sends, reply(Some(2))),
+        );
+        assert_eq!(first, Err("down".into()));
+        assert_eq!(second, Ok((Some(2), false)));
+        assert_eq!(sends.load(Ordering::SeqCst), 2);
+    }
+
+    /// A judge that reuses results with deliberation off, unless `temperature`
+    /// is above 0 in text mode.
+    fn reuse_judge(temperature: f64, logprobs: bool) -> ResolvedJudge {
+        ResolvedJudge {
+            endpoint: "http://e".into(),
+            model: "m".into(),
+            api_key: None,
+            temperature,
+            temperature_jitter: 0.0,
+            presence_penalty: None,
+            top_p: None,
+            logprobs,
+            concurrency: 1,
+            weight: 1.0,
+            min_logprob_coverage: 0.0,
+            verdict_temperature: 1.0,
+            max_tokens: 16,
+            reasoning_effort: Some("none".into()),
+            chat_template_kwargs: None,
+            provider: None,
+            request_timeout: None,
+            judge_id: judge_hash("http://e", "m"),
+            display_name: "m".into(),
+        }
+    }
+
+    /// A saved pair record from `reuse_judge`'s judge with matching settings.
+    fn reuse_record(temperature: f64) -> serde_json::Value {
+        serde_json::json!({
+            "judge_model": "m", "judge_endpoint": "http://e",
+            "deliberation": false, "reasoning_effort": "none",
+            "provider": null, "chat_template_kwargs": null,
+            "prompt_hash": "00000000000000ff", "temperature": temperature,
+            "hit_max_tokens": false, "category_probs": [1.0, 0.0],
+            "response": "Verdict: Option 1",
+        })
+    }
+
+    fn reused_keys(records: Vec<serde_json::Value>, judge: ResolvedJudge) -> Vec<(usize, u64)> {
+        loaded_reuse_entries(records, &[judge], false, Path::new("f.jsonl"))
+            .iter()
+            .map(|l| l.key)
+            .collect()
+    }
+
+    #[test]
+    fn test_reuses_results_only_for_unsampled_verdicts() {
+        assert!(reuses_results(&reuse_judge(0.0, false), false));
+        assert!(reuses_results(&reuse_judge(0.7, true), false));
+        assert!(!reuses_results(&reuse_judge(0.7, false), false));
+        assert!(!reuses_results(&reuse_judge(0.0, false), true));
+        let mut reasoning = reuse_judge(0.0, false);
+        reasoning.reasoning_effort = None;
+        assert!(!reuses_results(&reasoning, false));
+    }
+
+    #[test]
+    fn test_loaded_reuse_keeps_matching_judgement() {
+        let entries = loaded_reuse_entries(vec![reuse_record(0.0)], &[reuse_judge(0.0, false)], false, Path::new("f.jsonl"));
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].key, (0, 0xff));
+        assert_eq!(entries[0].temperature, 0.0);
+        assert_eq!(entries[0].response_text.as_deref(), Some("Verdict: Option 1"));
+        assert_eq!(entries[0].reasoning_text, None);
+    }
+
+    #[test]
+    fn test_loaded_reuse_skips_changed_settings() {
+        for (field, value) in [
+            ("deliberation", serde_json::json!(true)),
+            ("reasoning_effort", serde_json::json!("low")),
+            ("provider", serde_json::json!({"order": ["x"]})),
+            ("chat_template_kwargs", serde_json::json!({"enable_thinking": false})),
+        ] {
+            let mut record = reuse_record(0.0);
+            record[field] = value;
+            assert!(reused_keys(vec![record], reuse_judge(0.0, false)).is_empty(), "{field}");
+        }
+    }
+
+    #[test]
+    fn test_loaded_reuse_text_mode_needs_temperature_zero() {
+        assert!(reused_keys(vec![reuse_record(0.7)], reuse_judge(0.0, false)).is_empty());
+        assert_eq!(reused_keys(vec![reuse_record(0.7)], reuse_judge(0.7, true)), vec![(0, 0xff)]);
     }
 }

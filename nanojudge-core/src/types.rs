@@ -15,6 +15,11 @@ pub fn item_hash(text: &str) -> u64 {
     truncated_sha256(format!("item:{text}").as_bytes())
 }
 
+/// Stable identity hash for the full text of a prompt sent to a judge. Truncated SHA-256.
+pub fn prompt_hash(text: &str) -> u64 {
+    truncated_sha256(format!("prompt:{text}").as_bytes())
+}
+
 /// Stable identity hash for a judge (endpoint + model). Truncated SHA-256.
 pub fn judge_hash(endpoint: &str, model: &str) -> u64 {
     truncated_sha256(format!("judge:{endpoint}\0{model}").as_bytes())

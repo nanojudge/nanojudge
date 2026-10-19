@@ -33,14 +33,17 @@ Each successful record is a JSON object with these fields:
 | `item1_text_hash`, `item2_text_hash` | SHA-256 hashes (truncated to 64 bits) of the full item text. `nanojudge score` and `--load-judgements` use them as identity keys, and `nanojudge score` rejects records without them |
 | `category_probs` | The judge's raw verdict: `[P(item1 wins), P(item2 wins)]`, before any verdict tempering |
 | `judge_model`, `judge_endpoint` | The judge that made the judgement |
-| `temperature` | The temperature actually sent to the API, after jitter |
+| `temperature` | The temperature actually sent to the API, after jitter. For a reused judgement, the temperature of the request it reuses |
 | `deliberation` | Whether deliberation was on |
 | `reasoning_effort` | The judge's `reasoning_effort` setting, or `null` if unset |
+| `provider`, `chat_template_kwargs` | The judge's `provider` and `chat_template_kwargs` settings, or `null` if unset |
 | `criterion` | The criterion the judge was asked about |
+| `prompt_hash` | SHA-256 hash (truncated to 64 bits) of the full prompt sent to the judge |
 | `logprobs` | Whether the run was in logprobs mode |
-| `retries_used` | How many retries the judgement needed |
+| `retries_used` | How many retries the judgement needed. `0` for a reused judgement |
 | `hit_max_tokens` | Whether the response was cut off by `max_tokens` |
-| `usage` | Token counts, when the endpoint provides them: `prompt_tokens`, `completion_tokens`, `reasoning_tokens` and `visible_tokens`. The last two are `null` if the endpoint doesn't report reasoning tokens |
+| `reused` | Whether the judgement reused an identical earlier prompt's result instead of sending a request (see [Repeated prompts](#repeated-prompts)) |
+| `usage` | Token counts, when the endpoint provides them; absent for a reused judgement: `prompt_tokens`, `completion_tokens`, `reasoning_tokens` and `visible_tokens`. The last two are `null` if the endpoint doesn't report reasoning tokens |
 
 Text is left out of successful records by default. Each flag adds one field:
 
@@ -51,7 +54,9 @@ Text is left out of successful records by default. Each flag adds one field:
 | `--save-reasoning-text` | `reasoning` | The model's own reasoning text |
 
 A text field is `null` when the endpoint sent nothing, and `""` when it sent
-an empty string.
+an empty string. A reused judgement carries the response and reasoning of the
+result it reuses; they are `null` if that result came from a loaded file that
+didn't save them.
 
 Failed records always include `prompt`, `response` and `reasoning`, plus the
 same metadata fields. They have no `category_probs`, since no verdict could be
@@ -74,6 +79,24 @@ fixed number of members:
 
 Pairwise runs are unaffected: a reader written against the two-item shape
 keeps working for `lineup_size = 2`.
+
+### Repeated prompts
+
+A judge with deliberation off and `reasoning_effort = "none"` gives the same
+answer to the same prompt, as long as its verdict isn't sampled: in logprobs
+mode, or in text mode at `temperature = 0`. When a run sends such a judge a
+prompt it has already answered, the run reuses the earlier result instead of sending the
+request again. Prompts are matched by `prompt_hash`. The reused judgement still
+counts as a judgement of its own: it is scored, counted and saved like any
+other, with `reused` set to `true`. The run's summary reports how many
+judgements were reused.
+
+Results from a file passed to `--load-judgements` are reused too, when the
+loaded judgement was made by the same judge with the same `deliberation`,
+`reasoning_effort`, `provider` and `chat_template_kwargs` as this run, and, in
+text mode, at temperature 0. If a
+loaded judgement from a judge that reuses results is missing any of these
+fields, or `prompt_hash`, the load fails.
 
 ## Reusing saved judgements
 

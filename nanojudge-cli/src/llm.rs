@@ -3,7 +3,6 @@ use crate::parse::{
     LogprobContent, ParseResult, parse_response, parse_response_text, parse_lineup,
     parse_lineup_text,
 };
-use crate::prompt::{build_prompt, build_lineup_prompt};
 use nanojudge_core::LineupVerdict;
 use rand::Rng;
 use reqwest::Client;
@@ -172,14 +171,11 @@ struct ChoiceLogprobs {
 
 /// Result of a single LLM judgement call.
 pub struct PairJudgementResult {
-    pub item1_id: i64,
-    pub item2_id: i64,
     pub parse_result: ParseResult,
     /// The visible answer. None if the endpoint returned no content.
     pub response_text: Option<String>,
     /// The model's reasoning text. None if the endpoint returned none.
     pub reasoning_text: Option<String>,
-    pub prompt: String,
     pub retries_used: usize,
     pub usage: Option<Usage>,
     /// True if the response was truncated due to hitting max_tokens.
@@ -385,7 +381,8 @@ pub async fn send_pair_judgement_request(
     Ok((parse_result, reply))
 }
 
-/// Call the LLM to compare two items, with retries on HTTP errors.
+/// Send a built pair prompt to the LLM, with retries on HTTP errors.
+/// `item1_name` and `item2_name` only label retry messages.
 ///
 /// Retries up to `max_retries` times with exponential backoff (1s, 4s, 16s).
 /// Only HTTP/network errors trigger retries — unparseable verdicts do not.
@@ -393,33 +390,22 @@ pub async fn send_pair_judgement_request(
 pub async fn judge_pair(
     client: &Client,
     config: &LlmConfig,
-    template: &str,
-    criterion: &str,
+    prompt: &str,
     item1_name: &str,
     item2_name: &str,
-    item1_title: &str,
-    item2_title: &str,
-    item1_id: i64,
-    item2_id: i64,
     min_logprob_coverage: f64,
-    deliberation_length: &str,
     max_retries: usize,
     verbose: bool,
     judge_name: &str,
 ) -> Result<PairJudgementResult, String> {
-    let prompt = build_prompt(template, criterion, item1_name, item2_name, item1_title, item2_title, deliberation_length);
-
     let mut last_err = String::new();
     for attempt in 0..=max_retries {
-        match send_pair_judgement_request(client, config, &prompt, min_logprob_coverage).await {
+        match send_pair_judgement_request(client, config, prompt, min_logprob_coverage).await {
             Ok((parse_result, reply)) => {
                 return Ok(PairJudgementResult {
-                    item1_id,
-                    item2_id,
                     parse_result,
                     response_text: reply.content,
                     reasoning_text: reply.reasoning,
-                    prompt: prompt.clone(),
                     retries_used: attempt,
                     usage: reply.usage,
                     hit_max_tokens: reply.hit_max_tokens,
@@ -452,16 +438,13 @@ pub async fn judge_pair(
 
 /// Result of a single lineup judgement call.
 pub struct LineupJudgementResult {
-    /// The lineup's item IDs, in presentation order (slot A first).
-    pub item_ids: Vec<i64>,
-    /// The judge's ranking and place probabilities, indexing into `item_ids`.
-    /// None if the response was unparseable.
+    /// The judge's ranking and place probabilities, indexing into the lineup's
+    /// presentation order (slot A first). None if the response was unparseable.
     pub verdict: Option<LineupVerdict>,
     /// The visible answer. None if the endpoint returned no content.
     pub response_text: Option<String>,
     /// The model's reasoning text. None if the endpoint returned none.
     pub reasoning_text: Option<String>,
-    pub prompt: String,
     pub retries_used: usize,
     pub usage: Option<Usage>,
     pub hit_max_tokens: bool,
@@ -488,42 +471,28 @@ async fn send_lineup_judgement_request(
     Ok((verdict, reply))
 }
 
-/// Call the LLM to rank a lineup's items, with retries on HTTP errors. Mirrors
-/// `judge_pair`: retries only HTTP/network errors, never an unparseable
-/// ranking. `option_texts` and `item_ids` are in presentation order and must be
-/// the same length.
+/// Send a built lineup prompt of `lineup_size` options to the LLM, with
+/// retries on HTTP errors. Mirrors `judge_pair`: retries only HTTP/network
+/// errors, never an unparseable ranking.
 #[allow(clippy::too_many_arguments)]
 pub async fn judge_lineup(
     client: &Client,
     config: &LlmConfig,
-    template: &str,
-    criterion: &str,
-    option_texts: &[&str],
-    item_ids: &[i64],
+    prompt: &str,
+    lineup_size: usize,
     min_logprob_coverage: f64,
-    deliberation_length: &str,
     max_retries: usize,
     verbose: bool,
     judge_name: &str,
 ) -> Result<LineupJudgementResult, String> {
-    assert_eq!(
-        option_texts.len(),
-        item_ids.len(),
-        "option_texts and item_ids must describe the same lineup"
-    );
-    let lineup_size = item_ids.len();
-    let prompt = build_lineup_prompt(template, criterion, option_texts, deliberation_length);
-
     let mut last_err = String::new();
     for attempt in 0..=max_retries {
-        match send_lineup_judgement_request(client, config, &prompt, lineup_size, min_logprob_coverage).await {
+        match send_lineup_judgement_request(client, config, prompt, lineup_size, min_logprob_coverage).await {
             Ok((verdict, reply)) => {
                 return Ok(LineupJudgementResult {
-                    item_ids: item_ids.to_vec(),
                     verdict,
                     response_text: reply.content,
                     reasoning_text: reply.reasoning,
-                    prompt: prompt.clone(),
                     retries_used: attempt,
                     usage: reply.usage,
                     hit_max_tokens: reply.hit_max_tokens,

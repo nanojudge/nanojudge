@@ -82,6 +82,6 @@ pub use pairing::{
 pub use scoring::run_scoring;
 pub use lineup::{lineup_verdict_to_edges, LineupVerdict};
 pub use types::{
-    item_hash, judge_hash, Edge, JudgeAnalytics, JudgeInfo, Pair, RankedItem,
+    item_hash, judge_hash, prompt_hash, Edge, JudgeAnalytics, JudgeInfo, Pair, RankedItem,
     ScoringOptions, ScoringResult,
 };
