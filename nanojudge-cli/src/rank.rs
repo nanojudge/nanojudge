@@ -182,7 +182,8 @@ fn assign_judgements_to_judges(
 /// run's indices by text hash (skipping any edge whose items are not in the
 /// current run), and records the survivors so they inform pairing and scoring.
 /// Loaded edges are kept out of the judge balancer's ledger by design: this
-/// only ever touches the engine.
+/// only ever touches the engine. Returns how many loaded judgements contributed
+/// at least one edge to this run.
 fn seed_prior_edges(
     engine: &mut RankingEngine,
     path: &Path,
@@ -192,8 +193,8 @@ fn seed_prior_edges(
     run_logprobs_mode: bool,
     per_judge_verdict_temperatures: &HashMap<String, f64>,
     verbose: bool,
-) {
-    let (mut edges, _names, file_judge_ids, file_judge_display_names, _flag_keys,
+) -> usize {
+    let (mut edges, edge_judgements, _names, file_judge_ids, file_judge_display_names, _flag_keys,
          total_judgements, file_logprobs_mode, _temps, hash_keys) =
         crate::score::load_edges(path, None, per_judge_verdict_temperatures, Some(lineup_size));
 
@@ -238,8 +239,9 @@ fn seed_prior_edges(
 
     let mut seeded: Vec<Edge> = Vec::with_capacity(edges.len());
     let mut covered: std::collections::HashSet<i64> = std::collections::HashSet::new();
+    let mut contributing: std::collections::HashSet<usize> = std::collections::HashSet::new();
     let mut skipped = 0usize;
-    for edge in &mut edges {
+    for (edge, &judgement) in edges.iter_mut().zip(&edge_judgements) {
         let h1 = hash_keys[edge.item1 as usize].as_str();
         let h2 = hash_keys[edge.item2 as usize].as_str();
         match (hash_to_idx.get(h1), hash_to_idx.get(h2)) {
@@ -248,6 +250,7 @@ fn seed_prior_edges(
                 edge.item2 = i2;
                 covered.insert(i1);
                 covered.insert(i2);
+                contributing.insert(judgement);
                 seeded.push(*edge);
             }
             _ => skipped += 1,
@@ -275,6 +278,7 @@ fn seed_prior_edges(
     if skipped > 0 {
         eprintln!("{skipped} of {} loaded edges skipped (referenced items not in this run)", edges.len());
     }
+    contributing.len()
 }
 
 /// Everything both runs build before their refit loop: judges, items, budget,
@@ -302,6 +306,9 @@ struct RunSetup {
     save_file: Option<std::sync::Mutex<std::fs::File>>,
     failures_file: Option<std::sync::Mutex<std::fs::File>>,
     engine: RankingEngine,
+    /// Loaded judgements that contributed edges to this run; None without
+    /// `--load-judgements`. Added to displayed judgement counts only.
+    loaded_judgements: Option<usize>,
     interim_scoring_options: ScoringOptions,
     judge_display_names: Arc<Vec<String>>,
     judge_models: Arc<Vec<String>>,
@@ -532,12 +539,12 @@ async fn setup_run(
     // the very first selection pass and the final ranking. Kept out of the judge
     // balancer's ledger — this only touches the engine. The lineup-size guard in
     // load_edges rejects any file whose judgements are not this run's lineup size.
-    if let Some(ref load_path) = args.load_judgements {
+    let loaded_judgements = if let Some(ref load_path) = args.load_judgements {
         let per_judge_verdict_temps: HashMap<String, f64> = judges
             .iter()
             .map(|j| (format!("{}@{}", j.model, j.endpoint), j.verdict_temperature))
             .collect();
-        seed_prior_edges(
+        Some(seed_prior_edges(
             &mut engine,
             load_path,
             &text_hashes,
@@ -546,8 +553,10 @@ async fn setup_run(
             logprobs_mode,
             &per_judge_verdict_temps,
             resolved.verbose,
-        );
-    }
+        ))
+    } else {
+        None
+    };
 
     // Scoring options are constant across refits, so build them once and share
     // them between the pre-loop priming pass and the per-refit interim scoring.
@@ -604,6 +613,7 @@ async fn setup_run(
         save_file,
         failures_file,
         engine,
+        loaded_judgements,
         interim_scoring_options,
         judge_display_names,
         judge_models,
@@ -670,7 +680,8 @@ fn prime_from_seed(
 /// Update the rating state after a refit's edges are recorded. Runs full
 /// interim scoring when something needs it (top-heavy selection weights and
 /// early stopping, `--live-top`, `--emit-interim-rankings`); otherwise a cheap
-/// MLE fit for matchmaking. Returns true on an early stop.
+/// MLE fit for matchmaking. Returns true on an early stop. `total_judgements`
+/// counts this run's judgements; displayed counts add `loaded_judgements`.
 #[allow(clippy::too_many_arguments)]
 fn refit_interim_scoring(
     engine: &mut RankingEngine,
@@ -682,6 +693,7 @@ fn refit_interim_scoring(
     interim_rankings: &mut Vec<(usize, Vec<String>)>,
     refits_run: usize,
     total_judgements: usize,
+    loaded_judgements: Option<usize>,
 ) -> bool {
     let top_heavy = matches!(resolved.judgement_distribution, JudgementDistribution::TopHeavy);
     let need_interim = top_heavy
@@ -692,6 +704,7 @@ fn refit_interim_scoring(
         return false;
     }
 
+    let shown_judgements = total_judgements + loaded_judgements.unwrap_or(0);
     let mut early_stop = false;
     let interim = run_scoring(
         item_ids,
@@ -705,7 +718,7 @@ fn refit_interim_scoring(
             .iter()
             .map(|r| titles[r.item as usize].clone())
             .collect();
-        interim_rankings.push((total_judgements, ranked_names));
+        interim_rankings.push((shown_judgements, ranked_names));
     }
     if top_heavy {
         engine.set_current_posterior(&interim.item_means, &interim.item_stds);
@@ -714,8 +727,9 @@ fn refit_interim_scoring(
                 .expect("top-heavy interim scoring always computes selection ratios");
             if log_conf >= c.ln() {
                 eprintln!(
-                    "Early stop: P(every item on its side of the anchor) = {:.1}% >= {:.1}% after {} judgements.",
-                    log_conf.exp() * 100.0, c * 100.0, total_judgements
+                    "Early stop: P(every item on its side of the anchor) = {:.1}% >= {:.1}% after {}.",
+                    log_conf.exp() * 100.0, c * 100.0,
+                    output::judgement_count(shown_judgements, loaded_judgements, "judgements"),
                 );
                 early_stop = true;
             }
@@ -729,7 +743,8 @@ fn refit_interim_scoring(
             &interim.rankings,
             titles,
             refits_run,
-            total_judgements,
+            shown_judgements,
+            loaded_judgements,
             limit,
         );
     }
@@ -739,6 +754,8 @@ fn refit_interim_scoring(
 /// Counters a refit loop accumulates, reported once it ends.
 struct RunTotals {
     total_judgements: usize,
+    /// From `RunSetup::loaded_judgements`; added to displayed counts only.
+    loaded_judgements: Option<usize>,
     judgements_done: usize,
     total_retries: usize,
     failed_http: usize,
@@ -765,6 +782,7 @@ fn finish_run(
 ) {
     let RunTotals {
         total_judgements,
+        loaded_judgements,
         judgements_done,
         total_retries,
         failed_http,
@@ -786,8 +804,14 @@ fn finish_run(
         bail(format!("Cancelled before any {noun} completed. No results to score."));
     }
 
+    // Displayed counts include loaded judgements; the bail above and the
+    // success ratio below describe this run's requests only.
+    let shown_judgements = total_judgements + loaded_judgements.unwrap_or(0);
     if resolved.verbose {
-        eprintln!("Running final scoring ({total_judgements} {noun})...");
+        eprintln!(
+            "Running final scoring ({})...",
+            output::judgement_count(shown_judgements, loaded_judgements, noun),
+        );
     }
 
     // Final scoring over all completed judgements.
@@ -853,7 +877,8 @@ fn finish_run(
             titles,
             text_hashes,
             &engine.edge_counts,
-            total_judgements,
+            shown_judgements,
+            loaded_judgements,
             &scoring_result.judge_analytics,
             scoring_result.panel_positional_bias,
             scoring_result.panel_positional_bias_ci,
@@ -867,7 +892,8 @@ fn finish_run(
             &scoring_result.rankings,
             titles,
             &engine.edge_counts,
-            total_judgements,
+            shown_judgements,
+            loaded_judgements,
             resolved.confidence_level,
             &scoring_result.judge_analytics,
             &judge_names,
@@ -914,6 +940,7 @@ pub async fn run(args: RankArgs) {
         save_file,
         failures_file,
         mut engine,
+        loaded_judgements,
         interim_scoring_options,
         judge_display_names,
         judge_models,
@@ -1261,7 +1288,7 @@ pub async fn run(args: RankArgs) {
 
         early_stop = refit_interim_scoring(
             &mut engine, &item_ids, &interim_scoring_options, &judge_info, &resolved,
-            &titles, &mut interim_rankings, refits_run, total_judgements,
+            &titles, &mut interim_rankings, refits_run, total_judgements, loaded_judgements,
         );
         if early_stop {
             break;
@@ -1270,7 +1297,7 @@ pub async fn run(args: RankArgs) {
 
     finish_run(
         &resolved, "judgements", &judges, &judge_info, &item_ids, &titles, &text_hashes, &engine,
-        RunTotals { total_judgements, judgements_done, total_retries, failed_http, failed_parse, judge_stats },
+        RunTotals { total_judgements, loaded_judgements, judgements_done, total_retries, failed_http, failed_parse, judge_stats },
         early_stop, cancelled.load(Ordering::Relaxed), &interim_rankings,
     );
 }
@@ -1310,6 +1337,7 @@ async fn run_lineup_judgements(
         save_file,
         failures_file,
         mut engine,
+        loaded_judgements,
         interim_scoring_options,
         judge_display_names,
         judge_models,
@@ -1658,7 +1686,7 @@ async fn run_lineup_judgements(
 
         early_stop = refit_interim_scoring(
             &mut engine, &item_ids, &interim_scoring_options, &judge_info, resolved,
-            &titles, &mut interim_rankings, refits_run, total_judgements,
+            &titles, &mut interim_rankings, refits_run, total_judgements, loaded_judgements,
         );
         if early_stop {
             break;
@@ -1667,7 +1695,7 @@ async fn run_lineup_judgements(
 
     finish_run(
         resolved, "lineup judgements", &judges, &judge_info, &item_ids, &titles, &text_hashes, &engine,
-        RunTotals { total_judgements, judgements_done, total_retries, failed_http, failed_parse, judge_stats },
+        RunTotals { total_judgements, loaded_judgements, judgements_done, total_retries, failed_http, failed_parse, judge_stats },
         early_stop, cancelled.load(Ordering::Relaxed), &interim_rankings,
     );
 }
@@ -1867,9 +1895,10 @@ mod tests {
         let mut temps = HashMap::new();
         temps.insert("m@http://e".to_string(), 1.0);
 
-        seed_prior_edges(&mut engine, f.path(), &text_hashes, 2, &[judge_id], true, &temps, false);
+        let loaded = seed_prior_edges(&mut engine, f.path(), &text_hashes, 2, &[judge_id], true, &temps, false);
 
         // Both records load; each pairwise record is one edge.
+        assert_eq!(loaded, 2);
         assert_eq!(engine.completed_edges.len(), 2);
         // A>B remaps to (1, 0); B>C remaps to (0, 2).
         let a_over_b = engine.completed_edges.iter().find(|e| e.item1 == 1 && e.item2 == 0);
@@ -1891,11 +1920,39 @@ mod tests {
         let mut temps = HashMap::new();
         temps.insert("m@http://e".to_string(), 1.0);
 
-        seed_prior_edges(&mut engine, f.path(), &text_hashes, 2, &[judge_id], true, &temps, false);
+        let loaded = seed_prior_edges(&mut engine, f.path(), &text_hashes, 2, &[judge_id], true, &temps, false);
 
         // Only A>B survives; it remaps to (0, 1).
+        assert_eq!(loaded, 1);
         assert_eq!(engine.completed_edges.len(), 1);
         assert_eq!(engine.completed_edges[0].item1, 0);
         assert_eq!(engine.completed_edges[0].item2, 1);
+    }
+
+    #[test]
+    fn test_seed_prior_edges_counts_contributing_lineup_judgements() {
+        // Three 3-item lineups; this run has only A, B, C. Lineup 1 seeds all 3
+        // of its edges, lineup 2 (A, B, D) seeds only A-B, and lineup 3
+        // (A, D, E) seeds nothing. Two judgements contributed, from 4 edges.
+        const HASH_D: &str = "dddddddddddddddd";
+        const HASH_E: &str = "eeeeeeeeeeeeeeee";
+        let mut f = tempfile::NamedTempFile::new().unwrap();
+        for (names, hashes) in [
+            (r#""A","B","C""#, [HASH_A, HASH_B, HASH_C]),
+            (r#""A","B","D""#, [HASH_A, HASH_B, HASH_D]),
+            (r#""A","D","E""#, [HASH_A, HASH_D, HASH_E]),
+        ] {
+            writeln!(f, r#"{{"refit":0,"items":[{names}],"item_text_hashes":["{}","{}","{}"],"ranking":[0,1,2],"place_probs":[0.9,0.8],"judge_model":"m","judge_endpoint":"http://e","logprobs":true}}"#, hashes[0], hashes[1], hashes[2]).unwrap();
+        }
+        let mut engine = seed_test_engine(3);
+        let text_hashes = vec![HASH_A.to_string(), HASH_B.to_string(), HASH_C.to_string()];
+        let judge_id = nanojudge_core::judge_hash("http://e", "m");
+        let mut temps = HashMap::new();
+        temps.insert("m@http://e".to_string(), 1.0);
+
+        let loaded = seed_prior_edges(&mut engine, f.path(), &text_hashes, 3, &[judge_id], true, &temps, false);
+
+        assert_eq!(loaded, 2);
+        assert_eq!(engine.completed_edges.len(), 4);
     }
 }

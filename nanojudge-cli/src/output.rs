@@ -28,7 +28,8 @@ struct JsonJudgeAnalytics {
 
 /// One refit's interim ranking, emitted only when `--emit-interim-rankings` is
 /// set. `order` lists item names best-to-worst after that refit; `judgements`
-/// is the cumulative successful-judgement count through that refit.
+/// is the cumulative successful-judgement count through that refit, including
+/// any loaded judgements.
 #[derive(Serialize)]
 struct JsonInterimRanking {
     judgements: usize,
@@ -38,13 +39,27 @@ struct JsonInterimRanking {
 #[derive(Serialize)]
 struct JsonOutput {
     items: Vec<JsonRankedItem>,
+    /// Every judgement the ranking is built on, including `loaded_judgements`.
     total_judgements: usize,
+    /// Judgements from `--load-judgements` that contributed to this ranking.
+    /// Absent when nothing was loaded.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    loaded_judgements: Option<usize>,
     positional_bias: f64,
     positional_bias_ci_low: f64,
     positional_bias_ci_high: f64,
     judge_analytics: Vec<JsonJudgeAnalytics>,
     #[serde(skip_serializing_if = "Option::is_none")]
     interim_rankings: Option<Vec<JsonInterimRanking>>,
+}
+
+/// Format a judgement count, e.g. "30 judgements, including 24 loaded".
+/// `total` already includes `loaded`; with nothing loaded it is "6 judgements".
+pub fn judgement_count(total: usize, loaded: Option<usize>, noun: &str) -> String {
+    match loaded {
+        Some(loaded) => format!("{total} {noun}, including {loaded} loaded"),
+        None => format!("{total} {noun}"),
+    }
 }
 
 /// Print results as a formatted terminal table.
@@ -54,6 +69,7 @@ pub fn print_table(
     names: &[String],
     edge_counts: &[usize],
     total_judgements: usize,
+    loaded_judgements: Option<usize>,
     confidence_level: f64,
     judge_analytics: &[JudgeAnalytics],
     judge_names: &HashMap<u64, String>,
@@ -100,9 +116,9 @@ pub fn print_table(
     }
 
     println!(
-        "\n{} items ranked ({} judgements)",
+        "\n{} items ranked ({})",
         rankings.len(),
-        total_judgements,
+        judgement_count(total_judgements, loaded_judgements, "judgements"),
     );
 
     // Print per-judge analytics
@@ -241,6 +257,7 @@ pub fn print_live_table(
     names: &[String],
     refit: usize,
     total_judgements: usize,
+    loaded_judgements: Option<usize>,
     limit: usize,
 ) {
     let show = if limit == 0 || limit >= rankings.len() {
@@ -256,7 +273,11 @@ pub fn print_live_table(
         .unwrap_or(4)
         .max(4);
 
-    eprintln!("\n── Refit {} ({} judgements) ──", refit, total_judgements);
+    eprintln!(
+        "\n── Refit {} ({}) ──",
+        refit,
+        judgement_count(total_judgements, loaded_judgements, "judgements"),
+    );
     for (i, r) in show.iter().enumerate() {
         eprintln!(
             " {:>2}. {:<name_width$}  {:>7.4}  [{:.2}, {:.2}]",
@@ -304,6 +325,7 @@ fn build_json(
     hashes: &[String],
     edge_counts: &[usize],
     total_judgements: usize,
+    loaded_judgements: Option<usize>,
     judge_analytics: &[JudgeAnalytics],
     panel_positional_bias: f64,
     panel_positional_bias_ci: (f64, f64),
@@ -347,6 +369,7 @@ fn build_json(
     let output = JsonOutput {
         items,
         total_judgements,
+        loaded_judgements,
         positional_bias: panel_positional_bias,
         positional_bias_ci_low: panel_positional_bias_ci.0,
         positional_bias_ci_high: panel_positional_bias_ci.1,
@@ -365,6 +388,7 @@ pub fn print_json(
     hashes: &[String],
     edge_counts: &[usize],
     total_judgements: usize,
+    loaded_judgements: Option<usize>,
     judge_analytics: &[JudgeAnalytics],
     panel_positional_bias: f64,
     panel_positional_bias_ci: (f64, f64),
@@ -378,6 +402,7 @@ pub fn print_json(
             hashes,
             edge_counts,
             total_judgements,
+            loaded_judgements,
             judge_analytics,
             panel_positional_bias,
             panel_positional_bias_ci,
@@ -435,7 +460,7 @@ mod tests {
     #[test]
     fn test_json_items_carry_text_hash() {
         let (rankings, names) = sample_rankings();
-        let json = build_json(&rankings, &names, &sample_hashes(), &[11, 22, 33], 30, &sample_analytics(), 0.523, (0.481, 0.567), None);
+        let json = build_json(&rankings, &names, &sample_hashes(), &[11, 22, 33], 30, None, &sample_analytics(), 0.523, (0.481, 0.567), None);
         let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
         let items = parsed["items"].as_array().unwrap();
         for it in items {
@@ -447,19 +472,37 @@ mod tests {
     #[test]
     fn test_json_contains_all_fields() {
         let (rankings, names) = sample_rankings();
-        let json = build_json(&rankings, &names, &sample_hashes(), &[11, 22, 33], 30, &sample_analytics(), 0.523, (0.481, 0.567), None);
+        let json = build_json(&rankings, &names, &sample_hashes(), &[11, 22, 33], 30, None, &sample_analytics(), 0.523, (0.481, 0.567), None);
         let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
 
         assert_eq!(parsed["total_judgements"], 30);
+        assert!(parsed.get("loaded_judgements").is_none());
         assert_eq!(parsed["positional_bias"], 0.523);
         assert_eq!(parsed["positional_bias_ci_low"], 0.481);
         assert_eq!(parsed["positional_bias_ci_high"], 0.567);
     }
 
     #[test]
+    fn test_json_loaded_judgements() {
+        let (rankings, names) = sample_rankings();
+        let json = build_json(&rankings, &names, &sample_hashes(), &[11, 22, 33], 30, Some(24), &sample_analytics(), 0.523, (0.481, 0.567), None);
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(parsed["total_judgements"], 30);
+        assert_eq!(parsed["loaded_judgements"], 24);
+    }
+
+    #[test]
+    fn test_judgement_count() {
+        assert_eq!(judgement_count(6, None, "judgements"), "6 judgements");
+        assert_eq!(judgement_count(30, Some(24), "judgements"), "30 judgements, including 24 loaded");
+        assert_eq!(judgement_count(30, Some(24), "lineup judgements"), "30 lineup judgements, including 24 loaded");
+    }
+
+    #[test]
     fn test_json_items_structure() {
         let (rankings, names) = sample_rankings();
-        let json = build_json(&rankings, &names, &sample_hashes(), &[11, 22, 33], 30, &sample_analytics(), 0.523, (0.481, 0.567), None);
+        let json = build_json(&rankings, &names, &sample_hashes(), &[11, 22, 33], 30, None, &sample_analytics(), 0.523, (0.481, 0.567), None);
         let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
 
         let items = parsed["items"].as_array().unwrap();
@@ -479,7 +522,7 @@ mod tests {
     #[test]
     fn test_json_is_valid() {
         let (rankings, names) = sample_rankings();
-        let json = build_json(&rankings, &names, &sample_hashes(), &[11, 22, 33], 15, &sample_analytics(), 0.523, (0.481, 0.567), None);
+        let json = build_json(&rankings, &names, &sample_hashes(), &[11, 22, 33], 15, None, &sample_analytics(), 0.523, (0.481, 0.567), None);
         let _: serde_json::Value = serde_json::from_str(&json).unwrap();
     }
 
