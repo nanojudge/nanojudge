@@ -18,7 +18,7 @@ use crate::config;
 use crate::items::load_items;
 use crate::llm::{LlmConfig, judge_pair, judge_lineup};
 use crate::output;
-use crate::resolve::{resolve_config, resolve_judgements_per_item, resolve_judges, ResolvedJudge};
+use crate::resolve::{resolve_config, resolve_judgements_per_item, resolve_judges, ResolvedConfig, ResolvedJudge};
 
 #[derive(Default)]
 struct JudgeStats {
@@ -277,31 +277,70 @@ fn seed_prior_edges(
     }
 }
 
-pub async fn run(args: RankArgs) {
-    let config_path = args.config.clone().unwrap_or_else(config::config_path);
-    let cfg = config::load_config(&config_path);
-    let resolved = resolve_config(&args.cfg, &cfg);
-    let judgements_per_item = resolve_judgements_per_item(&args.cfg, &cfg);
+/// Everything both runs build before their refit loop: judges, items, budget,
+/// per-judge request config, criteria, output files, the engine (with any
+/// loaded judgements seeded) and the Ctrl-C handler.
+struct RunSetup {
+    judges: Vec<ResolvedJudge>,
+    logprobs_mode: bool,
+    titles: Arc<Vec<String>>,
+    texts: Arc<Vec<String>>,
+    text_hashes: Vec<String>,
+    item_ids: Vec<i64>,
+    budget: usize,
+    judgements_per_refit: usize,
+    judge_ids: Vec<u64>,
+    judge_info: JudgeInfo,
+    judge_llm_configs: Vec<Arc<LlmConfig>>,
+    judge_semaphores: Vec<Arc<tokio::sync::Semaphore>>,
+    normalized_weights: Vec<f64>,
+    judge_min_logprob_coverages: Vec<f64>,
+    judge_verdict_temperatures: Vec<f64>,
+    criteria: Vec<String>,
+    template: Arc<String>,
+    client: Client,
+    save_file: Option<std::sync::Mutex<std::fs::File>>,
+    failures_file: Option<std::sync::Mutex<std::fs::File>>,
+    engine: RankingEngine,
+    interim_scoring_options: ScoringOptions,
+    judge_display_names: Arc<Vec<String>>,
+    judge_models: Arc<Vec<String>>,
+    judge_endpoints: Arc<Vec<String>>,
+    judge_reasoning_efforts: Arc<Vec<Option<String>>>,
+    cancelled: Arc<AtomicBool>,
+}
 
-    // Lineup judgements (3+ items) run a separate acquisition loop; the
-    // pairwise path below is left untouched.
-    if resolved.lineup_size >= 3 {
-        run_lineup_judgements(&args, &config_path, &cfg, &resolved, judgements_per_item).await;
-        return;
-    }
-
+/// Build the shared run state. All validation happens here, before any LLM
+/// spend. `noun` names one judgement in messages ("judgements" or "lineup
+/// judgements").
+async fn setup_run(
+    args: &RankArgs,
+    config_path: &Path,
+    cfg: &config::NanojudgeConfig,
+    resolved: &ResolvedConfig,
+    judgements_per_item: usize,
+    noun: &str,
+) -> RunSetup {
     // Resolve judges from [[judge]] blocks
-    let judges = resolve_judges(&args.cfg, &cfg, &config_path, resolved.deliberation_enabled, resolved.lineup_size);
+    let judges = resolve_judges(&args.cfg, cfg, config_path, resolved.deliberation_enabled, resolved.lineup_size);
     let logprobs_mode = judges[0].logprobs;
 
     if !logprobs_mode {
         eprintln!("Warning: Running without logprobs. Requires more judgements to reach equivalent accuracy as when using logprobs.");
     }
 
-    let (titles, texts) = load_items(&args);
+    let (titles, texts) = load_items(args);
     let (titles, texts, text_hashes) = sort_and_dedup_items(titles, texts);
 
     let item_ids: Vec<i64> = (0..texts.len() as i64).collect();
+
+    let lineup_size = resolved.lineup_size;
+    if texts.len() < lineup_size {
+        bail(format!(
+            "lineup-size={} needs at least {} items; got {}.",
+            lineup_size, lineup_size, texts.len()
+        ));
+    }
 
     // The anchor rank must exist: fail here, before any LLM spend, rather than
     // at the first scoring pass. Only top-heavy uses the anchor.
@@ -316,9 +355,9 @@ pub async fn run(args: RankArgs) {
         ));
     }
 
-    let budget = calculate_budget(texts.len(), judgements_per_item, 2);
+    let budget = calculate_budget(texts.len(), judgements_per_item, lineup_size);
     let default_judgements_per_refit =
-        judgements_needed_for_every_item_to_appear_once(texts.len(), 2);
+        judgements_needed_for_every_item_to_appear_once(texts.len(), lineup_size);
     let judgements_per_refit = resolved
         .judgements_per_refit
         .unwrap_or(default_judgements_per_refit);
@@ -352,7 +391,7 @@ pub async fn run(args: RankArgs) {
         .map(|j| Arc::new(tokio::sync::Semaphore::new(j.concurrency)))
         .collect();
 
-    // Compute normalized weights for pair assignment
+    // Compute normalized weights for judgement assignment
     let total_weight: f64 = judges.iter().map(|j| j.weight).sum();
     let normalized_weights: Vec<f64> = judges.iter().map(|j| j.weight / total_weight).collect();
     // Per-judge min_logprob_coverage values
@@ -371,9 +410,9 @@ pub async fn run(args: RankArgs) {
         vec![args.criterion.clone().unwrap()]
     };
 
-    let prompt_template = Arc::new(resolved.prompt_template.clone());
+    let template = Arc::new(resolved.prompt_template.clone());
 
-    if prompt_template.contains("$name1") || prompt_template.contains("$name2") {
+    if template.contains("$name1") || template.contains("$name2") {
         let mut seen = HashMap::new();
         for (i, title) in titles.iter().enumerate() {
             if let Some(_prev) = seen.insert(title.as_str(), i) {
@@ -397,7 +436,7 @@ pub async fn run(args: RankArgs) {
 
     if resolved.verbose {
         eprintln!(
-            "Ranking {} items ({} judgements planned, {} per item)",
+            "Ranking {} items ({} {noun} planned, {} per item)",
             texts.len(),
             budget,
             judgements_per_item,
@@ -449,9 +488,6 @@ pub async fn run(args: RankArgs) {
     } else {
         None
     };
-    let save_prompt_text = resolved.save_prompt_text;
-    let save_response_text = resolved.save_response_text;
-    let save_reasoning_text = resolved.save_reasoning_text;
 
     // Set up failure saving if requested
     let failures_file = if let Some(ref save_path) = resolved.save_failed_judgements {
@@ -475,7 +511,7 @@ pub async fn run(args: RankArgs) {
     let judgement_distribution = resolved.judgement_distribution;
 
     // Top-heavy selection: when active, each interim scoring pass turns the
-    // posterior into per-item pairing weights (sharpened uncertainty ratio
+    // posterior into per-item selection weights (sharpened uncertainty ratio
     // around the anchor).
     // `None` for uniform, which needs no selection weights.
     let selection_sharpness = match judgement_distribution {
@@ -493,8 +529,9 @@ pub async fn run(args: RankArgs) {
     let mut engine = RankingEngine::new(&item_ids, engine_config);
 
     // Seed prior judgements (if any) before the collection loop, so they inform
-    // the very first pairing pass and the final ranking. Kept out of the judge
-    // balancer's ledger — this only touches the engine.
+    // the very first selection pass and the final ranking. Kept out of the judge
+    // balancer's ledger — this only touches the engine. The lineup-size guard in
+    // load_edges rejects any file whose judgements are not this run's lineup size.
     if let Some(ref load_path) = args.load_judgements {
         let per_judge_verdict_temps: HashMap<String, f64> = judges
             .iter()
@@ -504,7 +541,7 @@ pub async fn run(args: RankArgs) {
             &mut engine,
             load_path,
             &text_hashes,
-            resolved.lineup_size,
+            lineup_size,
             &judge_ids,
             logprobs_mode,
             &per_judge_verdict_temps,
@@ -527,20 +564,11 @@ pub async fn run(args: RankArgs) {
         bias_prior_logit: resolved.bias_prior_logit,
     };
 
-    let deliberation_length = resolved.deliberation_length.clone();
-    let max_retries = resolved.retries;
-
     // Judge display names (Arc for sharing across tasks)
     let judge_display_names: Arc<Vec<String>> = Arc::new(judges.iter().map(|j| j.display_name.clone()).collect());
     let judge_models: Arc<Vec<String>> = Arc::new(judges.iter().map(|j| j.model.clone()).collect());
     let judge_endpoints: Arc<Vec<String>> = Arc::new(judges.iter().map(|j| j.endpoint.clone()).collect());
     let judge_reasoning_efforts: Arc<Vec<Option<String>>> = Arc::new(judges.iter().map(|j| j.reasoning_effort.clone()).collect());
-
-    let mut total_judgements: usize = 0;
-    let mut total_retries: usize = 0;
-    let mut failed_http: usize = 0;
-    let mut failed_parse: usize = 0;
-    let mut judge_stats: Vec<JudgeStats> = (0..judges.len()).map(|_| JudgeStats::default()).collect();
 
     let cancelled = Arc::new(AtomicBool::new(false));
     {
@@ -554,6 +582,358 @@ pub async fn run(args: RankArgs) {
         });
     }
 
+    RunSetup {
+        judges,
+        logprobs_mode,
+        titles,
+        texts,
+        text_hashes,
+        item_ids,
+        budget,
+        judgements_per_refit,
+        judge_ids,
+        judge_info,
+        judge_llm_configs,
+        judge_semaphores,
+        normalized_weights,
+        judge_min_logprob_coverages,
+        judge_verdict_temperatures,
+        criteria,
+        template,
+        client,
+        save_file,
+        failures_file,
+        engine,
+        interim_scoring_options,
+        judge_display_names,
+        judge_models,
+        judge_endpoints,
+        judge_reasoning_efforts,
+        cancelled,
+    }
+}
+
+/// Prime the rating state from any seeded edges before the loop. Without this,
+/// the first selection pass runs matchmaking on flat initial ratings, ignoring
+/// the loaded data entirely on refit 1. Returns true when the loaded
+/// judgements already meet `stop_confidence`.
+fn prime_from_seed(
+    engine: &mut RankingEngine,
+    item_ids: &[i64],
+    scoring_options: &ScoringOptions,
+    judge_info: &JudgeInfo,
+    resolved: &ResolvedConfig,
+) -> bool {
+    if engine.completed_edges.is_empty() {
+        return false;
+    }
+    let mut early_stop = false;
+    if matches!(resolved.judgement_distribution, JudgementDistribution::TopHeavy) {
+        // Seeding can already push every item past `min_uniform_edges`, so the
+        // first selection pass would be top-heavy and need `selection_weights` —
+        // normally produced by the first refit's interim scoring, which runs
+        // only after the first `generate_pairs`/`generate_lineups`. Compute them
+        // now. And if `stop_confidence` is set and the seed already meets it,
+        // stop before collecting anything: the loaded data is already
+        // conclusive, so the run scores it and prints the ranking with no new
+        // comparisons (this is the deliberate zero-new case, not a failure).
+        let primed = run_scoring(
+            item_ids,
+            &engine.completed_edges,
+            scoring_options,
+            judge_info,
+        );
+        engine.set_current_posterior(&primed.item_means, &primed.item_stds);
+        if let Some(c) = resolved.stop_confidence {
+            let log_conf = primed.partition_log_confidence
+                .expect("top-heavy interim scoring always computes selection ratios");
+            if log_conf >= c.ln() {
+                eprintln!(
+                    "Early stop before collecting: loaded judgements already meet stop_confidence \
+                     (P(every item on its side of the anchor) = {:.1}% >= {:.1}%). \
+                     Collecting no new comparisons.",
+                    log_conf.exp() * 100.0, c * 100.0,
+                );
+                early_stop = true;
+            }
+        }
+        engine.selection_weights = primed.selection_weights;
+    } else {
+        // Uniform mode uses `current_ratings` for info-gain matchmaking but
+        // needs no `selection_weights`. A cheap MLE fit over the seed is enough
+        // to make the first pass exploit the loaded data.
+        engine.update_current_ratings();
+    }
+    early_stop
+}
+
+/// Update the rating state after a refit's edges are recorded. Runs full
+/// interim scoring when something needs it (top-heavy selection weights and
+/// early stopping, `--live-top`, `--emit-interim-rankings`); otherwise a cheap
+/// MLE fit for matchmaking. Returns true on an early stop.
+#[allow(clippy::too_many_arguments)]
+fn refit_interim_scoring(
+    engine: &mut RankingEngine,
+    item_ids: &[i64],
+    scoring_options: &ScoringOptions,
+    judge_info: &JudgeInfo,
+    resolved: &ResolvedConfig,
+    titles: &[String],
+    interim_rankings: &mut Vec<(usize, Vec<String>)>,
+    refits_run: usize,
+    total_judgements: usize,
+) -> bool {
+    let top_heavy = matches!(resolved.judgement_distribution, JudgementDistribution::TopHeavy);
+    let need_interim = top_heavy
+        || resolved.live_top.is_some()
+        || resolved.emit_interim_rankings;
+    if !need_interim || engine.completed_edges.is_empty() {
+        engine.update_current_ratings();
+        return false;
+    }
+
+    let mut early_stop = false;
+    let interim = run_scoring(
+        item_ids,
+        &engine.completed_edges,
+        scoring_options,
+        judge_info,
+    );
+    if resolved.emit_interim_rankings {
+        let ranked_names: Vec<String> = interim
+            .rankings
+            .iter()
+            .map(|r| titles[r.item as usize].clone())
+            .collect();
+        interim_rankings.push((total_judgements, ranked_names));
+    }
+    if top_heavy {
+        engine.set_current_posterior(&interim.item_means, &interim.item_stds);
+        if let Some(c) = resolved.stop_confidence {
+            let log_conf = interim.partition_log_confidence
+                .expect("top-heavy interim scoring always computes selection ratios");
+            if log_conf >= c.ln() {
+                eprintln!(
+                    "Early stop: P(every item on its side of the anchor) = {:.1}% >= {:.1}% after {} judgements.",
+                    log_conf.exp() * 100.0, c * 100.0, total_judgements
+                );
+                early_stop = true;
+            }
+        }
+        engine.selection_weights = interim.selection_weights;
+    } else {
+        engine.update_current_ratings();
+    }
+    if let Some(limit) = resolved.live_top {
+        output::print_live_table(
+            &interim.rankings,
+            titles,
+            refits_run,
+            total_judgements,
+            limit,
+        );
+    }
+    early_stop
+}
+
+/// Counters a refit loop accumulates, reported once it ends.
+struct RunTotals {
+    total_judgements: usize,
+    judgements_done: usize,
+    total_retries: usize,
+    failed_http: usize,
+    failed_parse: usize,
+    judge_stats: Vec<JudgeStats>,
+}
+
+/// Bail if nothing usable was collected, run the final scoring, print the
+/// failure summary and print the ranking. `noun` as in `setup_run`.
+#[allow(clippy::too_many_arguments)]
+fn finish_run(
+    resolved: &ResolvedConfig,
+    noun: &str,
+    judges: &[ResolvedJudge],
+    judge_info: &JudgeInfo,
+    item_ids: &[i64],
+    titles: &[String],
+    text_hashes: &[String],
+    engine: &RankingEngine,
+    totals: RunTotals,
+    early_stop: bool,
+    cancelled: bool,
+    interim_rankings: &[(usize, Vec<String>)],
+) {
+    let RunTotals {
+        total_judgements,
+        judgements_done,
+        total_retries,
+        failed_http,
+        failed_parse,
+        judge_stats,
+    } = totals;
+
+    if cancelled {
+        eprintln!("\nCancelled. {total_judgements} {noun} completed before interrupt.");
+    }
+
+    // Zero new judgements is a failure only when we did not deliberately stop
+    // (early stop or Ctrl-C). A deliberate stop scores whatever edges exist,
+    // including ones seeded from --load-judgements.
+    if total_judgements == 0 && !early_stop && !cancelled {
+        bail(format!("All {noun} failed."));
+    }
+    if engine.completed_edges.is_empty() {
+        bail(format!("Cancelled before any {noun} completed. No results to score."));
+    }
+
+    if resolved.verbose {
+        eprintln!("Running final scoring ({total_judgements} {noun})...");
+    }
+
+    // Final scoring over all completed judgements.
+    let scoring_result = run_scoring(
+        item_ids,
+        &engine.completed_edges,
+        &ScoringOptions {
+            confidence_level: resolved.confidence_level,
+            selection_sharpness: None,
+            anchor_index: resolved.anchor_index,
+            selection_cutoff: resolved.selection_cutoff,
+            selection_coverage: resolved.selection_coverage,
+            target_prior_edges: resolved.target_prior_edges,
+            regularization_strength: resolved.regularization_strength,
+            prior_tau2: resolved.prior_tau2,
+            bias_prior_tau2: resolved.bias_prior_tau2,
+            bias_prior_logit: resolved.bias_prior_logit,
+        },
+        judge_info,
+    );
+
+    // Failure summary: always printed, not verbose-gated. A degraded run
+    // must be distinguishable from a clean one without extra flags.
+    if judgements_done > 0 {
+        eprintln!(
+            "{} of {} judgements succeeded",
+            total_judgements, judgements_done
+        );
+    }
+    if total_retries > 0 {
+        eprintln!("HTTP retries: {total_retries}");
+    }
+    if failed_http > 0 {
+        eprintln!("HTTP failures: {failed_http}");
+    }
+    if failed_parse > 0 {
+        eprintln!("Unparseable responses: {failed_parse}");
+    }
+
+    print_max_tokens_warnings(judges, &judge_stats);
+
+    // Build judge_id → display_name and token count maps for output
+    let judge_names: HashMap<u64, String> = judges.iter()
+        .map(|j| (j.judge_id, j.display_name.clone()))
+        .collect();
+    let judge_tokens: HashMap<u64, (u64, u64)> = judges.iter().enumerate()
+        .map(|(i, j)| (j.judge_id, (judge_stats[i].input_tokens, judge_stats[i].output_tokens)))
+        .collect();
+    let judge_avg_wall_time: HashMap<u64, f64> = judges.iter().enumerate()
+        .map(|(i, j)| {
+            let avg = if judge_stats[i].collection_count > 0 {
+                judge_stats[i].wall_time_sum / judge_stats[i].collection_count as f64
+            } else {
+                0.0
+            };
+            (j.judge_id, avg)
+        })
+        .collect();
+
+    match resolved.output_format {
+        OutputFormat::Json => output::print_json(
+            &scoring_result.rankings,
+            titles,
+            text_hashes,
+            &engine.edge_counts,
+            total_judgements,
+            &scoring_result.judge_analytics,
+            scoring_result.panel_positional_bias,
+            scoring_result.panel_positional_bias_ci,
+            if resolved.emit_interim_rankings {
+                Some(interim_rankings)
+            } else {
+                None
+            },
+        ),
+        OutputFormat::Table => output::print_table(
+            &scoring_result.rankings,
+            titles,
+            &engine.edge_counts,
+            total_judgements,
+            resolved.confidence_level,
+            &scoring_result.judge_analytics,
+            &judge_names,
+            &judge_tokens,
+            &judge_avg_wall_time,
+            scoring_result.panel_positional_bias,
+            scoring_result.panel_positional_bias_ci,
+        ),
+    }
+}
+
+pub async fn run(args: RankArgs) {
+    let config_path = args.config.clone().unwrap_or_else(config::config_path);
+    let cfg = config::load_config(&config_path);
+    let resolved = resolve_config(&args.cfg, &cfg);
+    let judgements_per_item = resolve_judgements_per_item(&args.cfg, &cfg);
+
+    // Lineup judgements (3+ items) run their own refit loop; setup and
+    // teardown are shared with the pairwise loop below.
+    if resolved.lineup_size >= 3 {
+        run_lineup_judgements(&args, &config_path, &cfg, &resolved, judgements_per_item).await;
+        return;
+    }
+
+    let RunSetup {
+        judges,
+        logprobs_mode,
+        titles,
+        texts,
+        text_hashes,
+        item_ids,
+        budget,
+        judgements_per_refit,
+        judge_ids,
+        judge_info,
+        judge_llm_configs,
+        judge_semaphores,
+        normalized_weights,
+        judge_min_logprob_coverages,
+        judge_verdict_temperatures,
+        criteria,
+        template,
+        client,
+        save_file,
+        failures_file,
+        mut engine,
+        interim_scoring_options,
+        judge_display_names,
+        judge_models,
+        judge_endpoints,
+        judge_reasoning_efforts,
+        cancelled,
+    } = setup_run(&args, &config_path, &cfg, &resolved, judgements_per_item, "judgements").await;
+
+    let save_prompt_text = resolved.save_prompt_text;
+    let save_response_text = resolved.save_response_text;
+    let save_reasoning_text = resolved.save_reasoning_text;
+    let deliberation_length = resolved.deliberation_length.clone();
+    let max_retries = resolved.retries;
+
+    let mut total_judgements: usize = 0;
+    let mut total_retries: usize = 0;
+    let mut failed_http: usize = 0;
+    let mut failed_parse: usize = 0;
+    let mut judge_stats: Vec<JudgeStats> = (0..judges.len()).map(|_| JudgeStats::default()).collect();
+
     let mut cumulative_judge_pairs: Vec<usize> = vec![0; judges.len()];
     let mut cumulative_criterion_pairs: Vec<usize> = vec![0; criteria.len()];
     let mut cumulative_total_pairs: usize = 0;
@@ -563,51 +943,11 @@ pub async fn run(args: RankArgs) {
     // When --emit-interim-rankings is set, record (cumulative judgements, ranked
     // names) after each refit so the benchmark can plot convergence by refit.
     let mut interim_rankings: Vec<(usize, Vec<String>)> = Vec::new();
-    let mut early_stop = false;
+    let mut early_stop = prime_from_seed(
+        &mut engine, &item_ids, &interim_scoring_options, &judge_info, &resolved,
+    );
     let mut refits_run = 0usize;
     let mut judgements_done = 0usize;
-
-    // Prime the rating state from any seeded edges before the loop. Without this,
-    // the first pairing pass runs matchmaking on flat initial ratings, ignoring
-    // the loaded data entirely on refit 1.
-    if !engine.completed_edges.is_empty() {
-        if matches!(judgement_distribution, JudgementDistribution::TopHeavy) {
-            // Seeding can already push every item past `min_uniform_edges`, so the
-            // first pairing pass would be top-heavy and need `selection_weights` —
-            // normally produced by the first refit's interim scoring, which runs
-            // only after the first `generate_pairs`. Compute them now. And if
-            // `stop_confidence` is set and the seed already meets it, stop before
-            // collecting anything: the loaded data is already conclusive, so the
-            // run scores it and prints the ranking with no new comparisons (this is
-            // the deliberate zero-new case, not a failure).
-            let primed = run_scoring(
-                &item_ids,
-                &engine.completed_edges,
-                &interim_scoring_options,
-                &judge_info,
-            );
-            engine.set_current_posterior(&primed.item_means, &primed.item_stds);
-            if let Some(c) = resolved.stop_confidence {
-                let log_conf = primed.partition_log_confidence
-                    .expect("top-heavy interim scoring always computes selection ratios");
-                if log_conf >= c.ln() {
-                    eprintln!(
-                        "Early stop before collecting: loaded judgements already meet stop_confidence \
-                         (P(every item on its side of the anchor) = {:.1}% >= {:.1}%). \
-                         Collecting no new comparisons.",
-                        log_conf.exp() * 100.0, c * 100.0,
-                    );
-                    early_stop = true;
-                }
-            }
-            engine.selection_weights = primed.selection_weights;
-        } else {
-            // Uniform mode uses `current_ratings` for info-gain matchmaking but
-            // needs no `selection_weights`. A cheap MLE fit over the seed is enough
-            // to make the first pass exploit the loaded data.
-            engine.update_current_ratings();
-        }
-    }
 
     while !early_stop && judgements_done < budget {
         if cancelled.load(Ordering::Relaxed) {
@@ -677,7 +1017,7 @@ pub async fn run(args: RankArgs) {
             let titles = titles.clone();
             let criterion = criteria[criterion_assignments[pair_idx]].clone();
             let deliberation_length = deliberation_length.clone();
-            let template = prompt_template.clone();
+            let template = template.clone();
             let id_a = *id_a;
             let id_b = *id_b;
             let min_logprob_coverage = judge_min_logprob_coverages[judge_idx];
@@ -919,163 +1259,20 @@ pub async fn run(args: RankArgs) {
 
         engine.record_edges(&refit_results);
 
-        let need_interim = matches!(judgement_distribution, JudgementDistribution::TopHeavy)
-            || resolved.live_top.is_some()
-            || resolved.emit_interim_rankings;
-        if need_interim && !engine.completed_edges.is_empty() {
-            let interim = run_scoring(
-                &item_ids,
-                &engine.completed_edges,
-                &interim_scoring_options,
-                &judge_info,
-            );
-            if resolved.emit_interim_rankings {
-                let ranked_names: Vec<String> = interim
-                    .rankings
-                    .iter()
-                    .map(|r| titles[r.item as usize].clone())
-                    .collect();
-                interim_rankings.push((total_judgements, ranked_names));
-            }
-            if matches!(judgement_distribution, JudgementDistribution::TopHeavy) {
-                engine.set_current_posterior(&interim.item_means, &interim.item_stds);
-                if let Some(c) = resolved.stop_confidence {
-                    let log_conf = interim.partition_log_confidence
-                        .expect("top-heavy interim scoring always computes selection ratios");
-                    if log_conf >= c.ln() {
-                        eprintln!(
-                            "Early stop: P(every item on its side of the anchor) = {:.1}% >= {:.1}% after {} judgements.",
-                            log_conf.exp() * 100.0, c * 100.0, total_judgements
-                        );
-                        early_stop = true;
-                    }
-                }
-                engine.selection_weights = interim.selection_weights;
-            } else {
-                engine.update_current_ratings();
-            }
-            if let Some(limit) = resolved.live_top {
-                output::print_live_table(
-                    &interim.rankings,
-                    &titles,
-                    refits_run,
-                    total_judgements,
-                    limit,
-                );
-            }
-        } else {
-            engine.update_current_ratings();
-        }
+        early_stop = refit_interim_scoring(
+            &mut engine, &item_ids, &interim_scoring_options, &judge_info, &resolved,
+            &titles, &mut interim_rankings, refits_run, total_judgements,
+        );
         if early_stop {
             break;
         }
     }
 
-    if cancelled.load(Ordering::Relaxed) {
-        eprintln!("\nCancelled. {} judgements completed before interrupt.", total_judgements);
-    }
-
-    // Zero new judgements is a failure only when we did not deliberately stop
-    // (early stop or Ctrl-C). A deliberate stop scores whatever edges exist,
-    // including ones seeded from --load-judgements.
-    if total_judgements == 0 && !early_stop && !cancelled.load(Ordering::Relaxed) {
-        bail("All judgements failed.");
-    }
-    if engine.completed_edges.is_empty() {
-        bail("Cancelled before any judgements completed. No results to score.");
-    }
-
-    if resolved.verbose {
-        eprintln!("Running final scoring ({total_judgements} judgements)...");
-    }
-
-    // Final scoring over all completed judgements.
-    let scoring_result = run_scoring(
-        &item_ids,
-        &engine.completed_edges,
-        &ScoringOptions {
-            confidence_level: resolved.confidence_level,
-            selection_sharpness: None,
-            anchor_index: resolved.anchor_index,
-            selection_cutoff: resolved.selection_cutoff,
-            selection_coverage: resolved.selection_coverage,
-            target_prior_edges: resolved.target_prior_edges,
-            regularization_strength: resolved.regularization_strength,
-            prior_tau2: resolved.prior_tau2,
-            bias_prior_tau2: resolved.bias_prior_tau2,
-            bias_prior_logit: resolved.bias_prior_logit,
-        },
-        &judge_info,
+    finish_run(
+        &resolved, "judgements", &judges, &judge_info, &item_ids, &titles, &text_hashes, &engine,
+        RunTotals { total_judgements, judgements_done, total_retries, failed_http, failed_parse, judge_stats },
+        early_stop, cancelled.load(Ordering::Relaxed), &interim_rankings,
     );
-
-    // Failure summary: always printed, not verbose-gated. A degraded run
-    // must be distinguishable from a clean one without extra flags.
-    if judgements_done > 0 {
-        eprintln!(
-            "{} of {} judgements succeeded",
-            total_judgements, judgements_done
-        );
-    }
-    if total_retries > 0 {
-        eprintln!("HTTP retries: {total_retries}");
-    }
-    if failed_http > 0 {
-        eprintln!("HTTP failures: {failed_http}");
-    }
-    if failed_parse > 0 {
-        eprintln!("Unparseable responses: {failed_parse}");
-    }
-
-    print_max_tokens_warnings(&judges, &judge_stats);
-
-    // Build judge_id → display_name and token count maps for output
-    let judge_names: HashMap<u64, String> = judges.iter()
-        .map(|j| (j.judge_id, j.display_name.clone()))
-        .collect();
-    let judge_tokens: HashMap<u64, (u64, u64)> = judges.iter().enumerate()
-        .map(|(i, j)| (j.judge_id, (judge_stats[i].input_tokens, judge_stats[i].output_tokens)))
-        .collect();
-    let judge_avg_wall_time: HashMap<u64, f64> = judges.iter().enumerate()
-        .map(|(i, j)| {
-            let avg = if judge_stats[i].collection_count > 0 {
-                judge_stats[i].wall_time_sum / judge_stats[i].collection_count as f64
-            } else {
-                0.0
-            };
-            (j.judge_id, avg)
-        })
-        .collect();
-
-    match resolved.output_format {
-        OutputFormat::Json => output::print_json(
-            &scoring_result.rankings,
-            &titles,
-            &text_hashes,
-            &engine.edge_counts,
-            total_judgements,
-            &scoring_result.judge_analytics,
-            scoring_result.panel_positional_bias,
-            scoring_result.panel_positional_bias_ci,
-            if resolved.emit_interim_rankings {
-                Some(interim_rankings.as_slice())
-            } else {
-                None
-            },
-        ),
-        OutputFormat::Table => output::print_table(
-            &scoring_result.rankings,
-            &titles,
-            &engine.edge_counts,
-            total_judgements,
-            resolved.confidence_level,
-            &scoring_result.judge_analytics,
-            &judge_names,
-            &judge_tokens,
-            &judge_avg_wall_time,
-            scoring_result.panel_positional_bias,
-            scoring_result.panel_positional_bias_ci,
-        ),
-    }
 }
 
 /// Lineup acquisition loop. Selects lineups, asks each judge to rank
@@ -1088,220 +1285,45 @@ async fn run_lineup_judgements(
     args: &RankArgs,
     config_path: &Path,
     cfg: &config::NanojudgeConfig,
-    resolved: &crate::resolve::ResolvedConfig,
+    resolved: &ResolvedConfig,
     judgements_per_item: usize,
 ) {
-    let judges = resolve_judges(&args.cfg, cfg, config_path, resolved.deliberation_enabled, resolved.lineup_size);
-    let logprobs_mode = judges[0].logprobs;
-
-    if !logprobs_mode {
-        eprintln!("Warning: Running without logprobs. Requires more judgements to reach equivalent accuracy as when using logprobs.");
-    }
-
-    let (titles, texts) = load_items(args);
-    let (titles, texts, text_hashes) = sort_and_dedup_items(titles, texts);
-
-    let item_ids: Vec<i64> = (0..texts.len() as i64).collect();
-
-    if texts.len() < resolved.lineup_size {
-        bail(format!(
-            "lineup-size={} needs at least {} items; got {}.",
-            resolved.lineup_size, resolved.lineup_size, texts.len()
-        ));
-    }
-
-    if matches!(resolved.judgement_distribution, JudgementDistribution::TopHeavy)
-        && resolved.anchor_index > (texts.len().saturating_sub(1)) as f64
-    {
-        bail(format!(
-            "anchor-index={} exceeds the last rank ({}) for {} items",
-            resolved.anchor_index,
-            texts.len().saturating_sub(1),
-            texts.len(),
-        ));
-    }
+    let RunSetup {
+        judges,
+        logprobs_mode,
+        titles,
+        texts,
+        text_hashes,
+        item_ids,
+        budget,
+        judgements_per_refit,
+        judge_ids,
+        judge_info,
+        judge_llm_configs,
+        judge_semaphores,
+        normalized_weights,
+        judge_min_logprob_coverages,
+        judge_verdict_temperatures,
+        criteria,
+        template,
+        client,
+        save_file,
+        failures_file,
+        mut engine,
+        interim_scoring_options,
+        judge_display_names,
+        judge_models,
+        judge_endpoints,
+        judge_reasoning_efforts,
+        cancelled,
+    } = setup_run(args, config_path, cfg, resolved, judgements_per_item, "lineup judgements").await;
 
     let lineup_size = resolved.lineup_size;
-    let budget = calculate_budget(texts.len(), judgements_per_item, lineup_size);
-    let default_judgements_per_refit =
-        judgements_needed_for_every_item_to_appear_once(texts.len(), lineup_size);
-    let judgements_per_refit = resolved
-        .judgements_per_refit
-        .unwrap_or(default_judgements_per_refit);
-
-    let judge_ids: Vec<u64> = judges.iter().map(|j| j.judge_id).collect();
-    let judge_info = JudgeInfo {
-        judge_ids: judge_ids.clone(),
-        logprobs_mode,
-    };
-
-    let judge_llm_configs: Vec<Arc<LlmConfig>> = judges.iter().map(|j| {
-        Arc::new(LlmConfig {
-            endpoint: j.endpoint.clone(),
-            model: j.model.clone(),
-            api_key: j.api_key.clone(),
-            temperature: j.temperature,
-            temperature_jitter: j.temperature_jitter,
-            presence_penalty: j.presence_penalty,
-            top_p: j.top_p,
-            logprobs: j.logprobs,
-            max_tokens: j.max_tokens,
-            reasoning_effort: j.reasoning_effort.clone(),
-            chat_template_kwargs: j.chat_template_kwargs.clone(),
-            provider: j.provider.clone(),
-        })
-    }).collect();
-
-    let judge_semaphores: Vec<Arc<tokio::sync::Semaphore>> = judges.iter()
-        .map(|j| Arc::new(tokio::sync::Semaphore::new(j.concurrency)))
-        .collect();
-
-    let total_weight: f64 = judges.iter().map(|j| j.weight).sum();
-    let normalized_weights: Vec<f64> = judges.iter().map(|j| j.weight / total_weight).collect();
-    let judge_min_logprob_coverages: Vec<f64> = judges.iter().map(|j| j.min_logprob_coverage).collect();
-    let judge_verdict_temperatures: Vec<f64> = judges.iter().map(|j| j.verdict_temperature).collect();
-
-    let criteria: Vec<String> = if let Some(ref path) = args.criterion_file {
-        let content = std::fs::read_to_string(path)
-            .unwrap_or_else(|e| bail(format!("Failed to read criterion file {}: {e}", path.display())));
-        let parts = parse_criteria(&content);
-        if parts.is_empty() {
-            bail(format!("No criteria found in {}", path.display()));
-        }
-        parts
-    } else {
-        vec![args.criterion.clone().unwrap()]
-    };
-
-    let template = Arc::new(resolved.prompt_template.clone());
-
-    // Weight-0 judges only contribute prior data; they send no requests.
-    if !args.skip_probe {
-        crate::probe::check_judges(judges.iter().filter(|j| j.weight > 0.0)).await;
-    }
-
-    let client = Client::new();
-    let titles = Arc::new(titles);
-    let texts = Arc::new(texts);
-
-    if resolved.verbose {
-        eprintln!(
-            "Ranking {} items ({} lineup judgements planned, {} per item)",
-            texts.len(), budget, judgements_per_item,
-        );
-        if criteria.len() == 1 {
-            eprintln!("Criterion: \"{}\"", criteria[0]);
-        } else {
-            eprintln!("Criteria ({} variants):", criteria.len());
-            for (i, c) in criteria.iter().enumerate() {
-                eprintln!("  {}: \"{}\"", i + 1, c);
-            }
-        }
-
-        if judges.len() == 1 {
-            eprintln!(
-                "Endpoint: {} | Model: {} | Verdict temperature: {}",
-                judges[0].endpoint, judges[0].model, judges[0].verdict_temperature,
-            );
-        } else {
-            eprintln!("Judge panel ({} judges):", judges.len());
-            for j in &judges {
-                eprintln!(
-                    "  {} — {} (concurrency: {}, weight: {:.0}%, verdict temp: {})",
-                    j.display_name,
-                    j.endpoint,
-                    j.concurrency,
-                    j.weight / total_weight * 100.0,
-                    j.verdict_temperature,
-                );
-            }
-        }
-    }
-
-    let save_file = if let Some(ref save_path) = resolved.save_successful_judgements {
-        let path = resolve_save_path(save_path, "judgements");
-        let file = std::fs::OpenOptions::new().create(true).append(true).open(&path)
-            .unwrap_or_else(|e| bail(format!("Failed to open {}: {e}", path.display())));
-        if resolved.verbose {
-            eprintln!("Saving successful judgements to {}", path.display());
-        }
-        Some(std::sync::Mutex::new(file))
-    } else {
-        None
-    };
     let save_prompt_text = resolved.save_prompt_text;
     let save_response_text = resolved.save_response_text;
     let save_reasoning_text = resolved.save_reasoning_text;
-
-    let failures_file = if let Some(ref save_path) = resolved.save_failed_judgements {
-        let path = resolve_save_path(save_path, "failures");
-        let file = std::fs::OpenOptions::new().create(true).append(true).open(&path)
-            .unwrap_or_else(|e| bail(format!("Failed to open {}: {e}", path.display())));
-        if resolved.verbose {
-            eprintln!("Saving failed judgements to {}", path.display());
-        }
-        Some(std::sync::Mutex::new(file))
-    } else {
-        None
-    };
-
-    let judgement_distribution = resolved.judgement_distribution;
-    let selection_sharpness = match judgement_distribution {
-        JudgementDistribution::TopHeavy => Some(resolved.selection_sharpness),
-        JudgementDistribution::Uniform => None,
-    };
-
-    let engine_config = EngineConfig {
-        judgement_distribution,
-        matchmaking_sharpness: resolved.matchmaking_sharpness,
-        min_uniform_edges: resolved.min_uniform_edges,
-        regularization_strength: resolved.regularization_strength,
-        seed: resolved.seed,
-    };
-    let mut engine = RankingEngine::new(&item_ids, engine_config);
-
-    // Seed prior judgements (if any) before the collection loop; same contract
-    // as the pairwise path. The lineup-size guard in load_edges rejects any file
-    // whose judgements are not this run's lineup size.
-    if let Some(ref load_path) = args.load_judgements {
-        let per_judge_verdict_temps: HashMap<String, f64> = judges
-            .iter()
-            .map(|j| (format!("{}@{}", j.model, j.endpoint), j.verdict_temperature))
-            .collect();
-        seed_prior_edges(
-            &mut engine,
-            load_path,
-            &text_hashes,
-            resolved.lineup_size,
-            &judge_ids,
-            logprobs_mode,
-            &per_judge_verdict_temps,
-            resolved.verbose,
-        );
-    }
-
-    // Scoring options are constant across refits, so build them once and share
-    // them between the pre-loop priming pass and the per-refit interim scoring.
-    let interim_scoring_options = ScoringOptions {
-        confidence_level: resolved.confidence_level,
-        selection_sharpness,
-        anchor_index: resolved.anchor_index,
-        selection_cutoff: resolved.selection_cutoff,
-        selection_coverage: resolved.selection_coverage,
-        target_prior_edges: resolved.target_prior_edges,
-        regularization_strength: resolved.regularization_strength,
-        prior_tau2: resolved.prior_tau2,
-        bias_prior_tau2: resolved.bias_prior_tau2,
-        bias_prior_logit: resolved.bias_prior_logit,
-    };
-
     let deliberation_length = resolved.deliberation_length.clone();
     let max_retries = resolved.retries;
-
-    let judge_display_names: Arc<Vec<String>> = Arc::new(judges.iter().map(|j| j.display_name.clone()).collect());
-    let judge_models: Arc<Vec<String>> = Arc::new(judges.iter().map(|j| j.model.clone()).collect());
-    let judge_endpoints: Arc<Vec<String>> = Arc::new(judges.iter().map(|j| j.endpoint.clone()).collect());
-    let judge_reasoning_efforts: Arc<Vec<Option<String>>> = Arc::new(judges.iter().map(|j| j.reasoning_effort.clone()).collect());
 
     // total_judgements counts LLM calls (successfully-parsed lineups).
     let mut total_judgements: usize = 0;
@@ -1309,18 +1331,6 @@ async fn run_lineup_judgements(
     let mut failed_http: usize = 0;
     let mut failed_parse: usize = 0;
     let mut judge_stats: Vec<JudgeStats> = (0..judges.len()).map(|_| JudgeStats::default()).collect();
-
-    let cancelled = Arc::new(AtomicBool::new(false));
-    {
-        let cancelled = cancelled.clone();
-        tokio::spawn(async move {
-            let _ = tokio::signal::ctrl_c().await;
-            eprintln!("\nCancelling... (press Ctrl-C again to force quit)");
-            cancelled.store(true, Ordering::Relaxed);
-            let _ = tokio::signal::ctrl_c().await;
-            std::process::exit(130);
-        });
-    }
 
     let mut cumulative_judge_pairs: Vec<usize> = vec![0; judges.len()];
     let mut cumulative_criterion_pairs: Vec<usize> = vec![0; criteria.len()];
@@ -1333,51 +1343,11 @@ async fn run_lineup_judgements(
     let mut slot_rng = seed::make_rng(resolved.seed, seed::SUBSYSTEM_EDGE_ORIENTATION);
 
     let mut interim_rankings: Vec<(usize, Vec<String>)> = Vec::new();
-    let mut early_stop = false;
+    let mut early_stop = prime_from_seed(
+        &mut engine, &item_ids, &interim_scoring_options, &judge_info, resolved,
+    );
     let mut refits_run = 0usize;
     let mut judgements_done = 0usize;
-
-    // Prime the rating state from any seeded edges before the loop. Seeding
-    // can already push every item past `min_uniform_edges`, so the first lineup
-    // pass would be top-heavy and need `selection_weights` — normally produced by
-    // the first refit's interim scoring, which runs only after the first
-    // `generate_lineups`. Without priming, that first pass also runs matchmaking
-    // on flat initial ratings, ignoring the loaded data entirely on refit 1.
-    if !engine.completed_edges.is_empty() {
-        if matches!(judgement_distribution, JudgementDistribution::TopHeavy) {
-            // Compute `selection_weights` now. And if `stop_confidence` is set and
-            // the seed already meets it, stop before collecting anything: the
-            // loaded data is already conclusive, so the run scores it and prints
-            // the ranking with no new comparisons (the deliberate zero-new case,
-            // not a failure).
-            let primed = run_scoring(
-                &item_ids,
-                &engine.completed_edges,
-                &interim_scoring_options,
-                &judge_info,
-            );
-            engine.set_current_posterior(&primed.item_means, &primed.item_stds);
-            if let Some(c) = resolved.stop_confidence {
-                let log_conf = primed.partition_log_confidence
-                    .expect("top-heavy interim scoring always computes selection ratios");
-                if log_conf >= c.ln() {
-                    eprintln!(
-                        "Early stop before collecting: loaded judgements already meet stop_confidence \
-                         (P(every item on its side of the anchor) = {:.1}% >= {:.1}%). \
-                         Collecting no new comparisons.",
-                        log_conf.exp() * 100.0, c * 100.0,
-                    );
-                    early_stop = true;
-                }
-            }
-            engine.selection_weights = primed.selection_weights;
-        } else {
-            // Uniform mode uses `current_ratings` for info-gain matchmaking but
-            // needs no `selection_weights`. A cheap MLE fit over the seed is enough
-            // to make the first pass exploit the loaded data.
-            engine.update_current_ratings();
-        }
-    }
 
     while !early_stop && judgements_done < budget {
         if cancelled.load(Ordering::Relaxed) {
@@ -1602,10 +1572,18 @@ async fn run_lineup_judgements(
                                 .iter()
                                 .map(|&id| titles[id as usize].as_str())
                                 .collect();
-                            eprintln!(
-                                "  Warning: unparseable lineup ranking for {}, skipping",
-                                lineup_titles.join(" / "),
-                            );
+                            if judges.len() > 1 {
+                                eprintln!(
+                                    "  Warning: unparseable lineup ranking for {} [{}], skipping",
+                                    lineup_titles.join(" / "),
+                                    judge_display_names[judge_idx],
+                                );
+                            } else {
+                                eprintln!(
+                                    "  Warning: unparseable lineup ranking for {}, skipping",
+                                    lineup_titles.join(" / "),
+                                );
+                            }
                         }
                     }
                 }
@@ -1669,144 +1647,29 @@ async fn run_lineup_judgements(
 
         if calls_before_refit == 0 && !lineups.is_empty() {
             eprintln!(
-                "Warning: all {} lineup judgements before refit {} failed.",
+                "Warning: all {} lineup judgements before refit {} failed. \
+                 If your endpoint requires an API key, ensure it is set via \
+                 --api-key or api_key_env in your config.",
                 lineups.len(), refits_run,
             );
         }
 
         engine.record_edges(&refit_results);
 
-        let need_interim = matches!(judgement_distribution, JudgementDistribution::TopHeavy)
-            || resolved.live_top.is_some()
-            || resolved.emit_interim_rankings;
-        if need_interim && !engine.completed_edges.is_empty() {
-            let interim = run_scoring(
-                &item_ids,
-                &engine.completed_edges,
-                &interim_scoring_options,
-                &judge_info,
-            );
-            if resolved.emit_interim_rankings {
-                let ranked_names: Vec<String> = interim.rankings.iter()
-                    .map(|r| titles[r.item as usize].clone())
-                    .collect();
-                interim_rankings.push((total_judgements, ranked_names));
-            }
-            if matches!(judgement_distribution, JudgementDistribution::TopHeavy) {
-                engine.set_current_posterior(&interim.item_means, &interim.item_stds);
-                if let Some(c) = resolved.stop_confidence {
-                    let log_conf = interim.partition_log_confidence
-                        .expect("top-heavy interim scoring always computes selection ratios");
-                    if log_conf >= c.ln() {
-                        eprintln!(
-                            "Early stop: P(every item on its side of the anchor) = {:.1}% >= {:.1}% after {} judgements.",
-                            log_conf.exp() * 100.0, c * 100.0, total_judgements
-                        );
-                        early_stop = true;
-                    }
-                }
-                engine.selection_weights = interim.selection_weights;
-            } else {
-                engine.update_current_ratings();
-            }
-            if let Some(limit) = resolved.live_top {
-                output::print_live_table(&interim.rankings, &titles, refits_run, total_judgements, limit);
-            }
-        } else {
-            engine.update_current_ratings();
-        }
+        early_stop = refit_interim_scoring(
+            &mut engine, &item_ids, &interim_scoring_options, &judge_info, resolved,
+            &titles, &mut interim_rankings, refits_run, total_judgements,
+        );
         if early_stop {
             break;
         }
     }
 
-    if cancelled.load(Ordering::Relaxed) {
-        eprintln!("\nCancelled. {} lineup judgements completed before interrupt.", total_judgements);
-    }
-
-    // Zero new judgements is a failure only when we did not deliberately stop
-    // (early stop or Ctrl-C). A deliberate stop scores whatever edges exist,
-    // including ones seeded from --load-judgements.
-    if total_judgements == 0 && !early_stop && !cancelled.load(Ordering::Relaxed) {
-        bail("All lineup judgements failed.");
-    }
-    if engine.completed_edges.is_empty() {
-        bail("Cancelled before any lineup judgements completed. No results to score.");
-    }
-
-    if resolved.verbose {
-        eprintln!("Running final scoring ({} lineup judgements)...", total_judgements);
-    }
-
-    let scoring_result = run_scoring(
-        &item_ids,
-        &engine.completed_edges,
-        &ScoringOptions {
-            confidence_level: resolved.confidence_level,
-            selection_sharpness: None,
-            anchor_index: resolved.anchor_index,
-            selection_cutoff: resolved.selection_cutoff,
-            selection_coverage: resolved.selection_coverage,
-            target_prior_edges: resolved.target_prior_edges,
-            regularization_strength: resolved.regularization_strength,
-            prior_tau2: resolved.prior_tau2,
-            bias_prior_tau2: resolved.bias_prior_tau2,
-            bias_prior_logit: resolved.bias_prior_logit,
-        },
-        &judge_info,
+    finish_run(
+        resolved, "lineup judgements", &judges, &judge_info, &item_ids, &titles, &text_hashes, &engine,
+        RunTotals { total_judgements, judgements_done, total_retries, failed_http, failed_parse, judge_stats },
+        early_stop, cancelled.load(Ordering::Relaxed), &interim_rankings,
     );
-
-    // Failure summary: always printed, not verbose-gated. A degraded run
-    // must be distinguishable from a clean one without extra flags.
-    if judgements_done > 0 {
-        eprintln!(
-            "{} of {} judgements succeeded",
-            total_judgements, judgements_done
-        );
-    }
-    if total_retries > 0 {
-        eprintln!("HTTP retries: {total_retries}");
-    }
-    if failed_http > 0 {
-        eprintln!("HTTP failures: {failed_http}");
-    }
-    if failed_parse > 0 {
-        eprintln!("Unparseable rankings: {failed_parse}");
-    }
-
-    print_max_tokens_warnings(&judges, &judge_stats);
-
-    let judge_names: HashMap<u64, String> = judges.iter()
-        .map(|j| (j.judge_id, j.display_name.clone()))
-        .collect();
-    let judge_tokens: HashMap<u64, (u64, u64)> = judges.iter().enumerate()
-        .map(|(i, j)| (j.judge_id, (judge_stats[i].input_tokens, judge_stats[i].output_tokens)))
-        .collect();
-    let judge_avg_wall_time: HashMap<u64, f64> = judges.iter().enumerate()
-        .map(|(i, j)| {
-            let avg = if judge_stats[i].collection_count > 0 {
-                judge_stats[i].wall_time_sum / judge_stats[i].collection_count as f64
-            } else {
-                0.0
-            };
-            (j.judge_id, avg)
-        })
-        .collect();
-
-    match resolved.output_format {
-        OutputFormat::Json => output::print_json(
-            &scoring_result.rankings, &titles, &text_hashes, &engine.edge_counts, total_judgements,
-            &scoring_result.judge_analytics,
-            scoring_result.panel_positional_bias, scoring_result.panel_positional_bias_ci,
-            if resolved.emit_interim_rankings { Some(interim_rankings.as_slice()) } else { None },
-        ),
-        OutputFormat::Table => output::print_table(
-            &scoring_result.rankings, &titles, &engine.edge_counts, total_judgements,
-            resolved.confidence_level, &scoring_result.judge_analytics,
-            &judge_names, &judge_tokens, &judge_avg_wall_time,
-            scoring_result.panel_positional_bias, scoring_result.panel_positional_bias_ci,
-        ),
-    }
 }
 
 #[cfg(test)]
