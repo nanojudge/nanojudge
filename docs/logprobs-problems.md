@@ -34,20 +34,10 @@ We want models that don't do this. It is hard to get models to recognize when th
 
 Endpoints can differ in which logprobs they return. There are two possibilities:
 
-1. **Raw logprobs:** the model's own distribution, before any sampling
-settings are applied. Temperature, penalties (such as `presence_penalty`)
-and top_k/top_p have no effect on the returned values. This is vLLM's
-default (`logprobs_mode = raw_logprobs`).
+1. **Raw logprobs:** the model's own distribution, before any sampling settings are applied. Temperature, penalties (such as `presence_penalty`) and top_k/top_p have no effect on the returned values. This is vLLM's default (`logprobs_mode = raw_logprobs`).
 
-2. **Processed logprobs:** the distribution after the sampling settings are
-applied. Temperature, penalties and top_k/top_p change the returned values.
-vLLM returns these when set to `logprobs_mode = processed_logprobs`.
+2. **Processed logprobs:** the distribution after the sampling settings are applied. Temperature, penalties and top_k/top_p change the returned values. vLLM returns these when set to `logprobs_mode = processed_logprobs`.
 
-With processed logprobs, the sampling settings affect the verdict
-distribution. Temperatures other than 1 sharpen or flatten it, in addition
-to `verdict_temperature`. Penalties shift it. `top_p`/`top_k` can remove
-part of the verdict mass, which may affect `min_logprob_coverage`.
-Temperature 0 is a special case that endpoints handle differently; vLLM
-applies no temperature scaling at 0.
+With processed logprobs, the sampling settings affect the verdict distribution. Temperatures other than 1 sharpen or flatten it, in addition to `verdict_temperature`. Penalties shift it. `top_p`/`top_k` can remove part of the verdict mass, which may affect `min_logprob_coverage`. Temperature 0 is a special case that endpoints handle differently; vLLM applies no temperature scaling at 0.
 
 Hosted APIs generally don't document which of the two they return.
