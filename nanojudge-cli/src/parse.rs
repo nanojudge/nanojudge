@@ -231,23 +231,24 @@ fn lineup_letter_to_index(c: char, lineup_size: usize) -> Option<usize> {
 
 /// A single rank slot's extracted distribution over the option letters
 /// (`[P(A), P(B), ...]`, length `lineup_size`), plus which letter the judge
-/// actually emitted there.
+/// actually emitted there and the share of its top_logprobs mass that was on
+/// option letters (`dist` is normalised by it).
 struct RankSlot {
     dist: Vec<f64>,
     letter: usize,
+    coverage: f64,
 }
 
 /// Read the distribution over the option letters from a ranking-line letter
 /// token's top_logprobs. `search_start` is the token index just past an "Option"
 /// marker; scans forward a few tokens for the single option letter and reads its
-/// top_logprobs. Returns None if no letter token with usable top_logprobs is
-/// found, or the mass on the option letters is below `min_logprob_coverage`.
+/// top_logprobs. Returns None if no letter token is found. The coverage
+/// threshold is applied by the caller, since the last place doesn't need it.
 fn extract_rank_slot(
     logprobs: &[LogprobContent],
     tokens: &[&str],
     search_start: usize,
     lineup_size: usize,
-    min_logprob_coverage: f64,
 ) -> Option<RankSlot> {
     let search_end = (search_start + 6).min(tokens.len());
     for i in search_start..search_end {
@@ -267,13 +268,8 @@ fn extract_rank_slot(
             continue;
         }
 
-        let top_logprobs = match &logprobs[i].top_logprobs {
-            Some(tlps) if !tlps.is_empty() => tlps,
-            _ => return None,
-        };
-
         let mut dist = vec![0.0_f64; lineup_size];
-        for tlp in top_logprobs {
+        for tlp in logprobs[i].top_logprobs.iter().flatten() {
             let clean = tlp.token.trim().trim_end_matches([':', '.']);
             if clean.len() == 1
                 && let Some(tidx) =
@@ -283,13 +279,12 @@ fn extract_rank_slot(
             }
         }
         let mass: f64 = dist.iter().sum();
-        if mass < min_logprob_coverage {
-            return None;
+        if mass > 0.0 {
+            for p in &mut dist {
+                *p /= mass;
+            }
         }
-        for p in &mut dist {
-            *p /= mass;
-        }
-        return Some(RankSlot { dist, letter: idx });
+        return Some(RankSlot { dist, letter: idx, coverage: mass });
     }
     None
 }
@@ -304,6 +299,13 @@ fn extract_rank_slot(
 /// letters). If we can't get a clean result for every rank, or they aren't all
 /// distinct (e.g. the model repeated an option), the whole judgement is thrown
 /// out rather than filled in.
+///
+/// Every place but the last must put at least `min_logprob_coverage` of its
+/// top_logprobs mass on option letters. The last place is exempt: one option
+/// is left by then, so its letter is fixed by the others and its distribution
+/// is never read. Under constrained decoding its mass often sits on an
+/// alternative spelling of that same letter (a bare " " token, then the
+/// letter), which would otherwise throw out a valid ranking.
 ///
 /// Returns the whole block, one slot per rank, best first.
 fn extract_lineup_slots(
@@ -321,9 +323,7 @@ fn extract_lineup_slots(
     // letter reads into the block.
     let mut slots: Vec<RankSlot> = Vec::new();
     for start in marker_scan_starts(&tokens, "option", true) {
-        if let Some(slot) =
-            extract_rank_slot(logprobs, &tokens, start, lineup_size, min_logprob_coverage)
-        {
+        if let Some(slot) = extract_rank_slot(logprobs, &tokens, start, lineup_size) {
             slots.push(slot);
         }
     }
@@ -334,6 +334,12 @@ fn extract_lineup_slots(
         return None;
     }
     let block_start = slots.len() - lineup_size;
+    if slots[block_start..slots.len() - 1]
+        .iter()
+        .any(|s| s.coverage < min_logprob_coverage)
+    {
+        return None;
+    }
     let mut seen = vec![false; lineup_size];
     for s in &slots[block_start..] {
         seen[s.letter] = true;
@@ -358,8 +364,8 @@ fn extract_lineup_slots(
 /// place has a single option left, so it carries no free parameter (its line
 /// must still be present — a ranking is only valid if it places every option).
 ///
-/// Returns None if any rank slot fails to parse or clear the coverage threshold,
-/// or if a slot puts no mass at all on the options still unplaced (no share to
+/// Returns None if any rank slot fails to parse, any but the last fails to clear
+/// the coverage threshold, or if a slot puts no mass at all on the options still unplaced (no share to
 /// read — treated as an unparseable judgement rather than a guess).
 pub fn parse_lineup(
     logprobs: &[LogprobContent],
@@ -1040,6 +1046,37 @@ mod tests {
             plain("2nd"), plain(":"), plain(" Option"),
             letter_tok(" B", 0.0, 0.8, 0.2),
         ];
+        assert!(parse_lineup(&lp, 3, 0.95).is_none());
+    }
+
+    #[test]
+    fn test_parse_lineup_last_place_needs_no_coverage() {
+        // Constrained decoding with one letter left: most of the last line's mass
+        // is on a bare " " token (an alternative spelling of " C"). The ranking
+        // is still complete and the last place's distribution is never read.
+        let mut lp = lineup_logprobs();
+        lp.pop();
+        lp.push(LogprobContent {
+            token: " C".to_string(),
+            top_logprobs: Some(vec![
+                TopLogprob { token: " ".to_string(), logprob: (0.89_f64).ln() },
+                TopLogprob { token: " C".to_string(), logprob: (0.11_f64).ln() },
+            ]),
+        });
+        let v = parse_lineup(&lp, 3, 0.95).expect("last place is exempt from coverage");
+        assert_verdict(&v, &[0, 1, 2], &[0.9, 0.8]);
+    }
+
+    #[test]
+    fn test_parse_lineup_low_coverage_second_place_fails() {
+        let mut lp = lineup_logprobs();
+        lp[8] = LogprobContent {
+            token: " B".to_string(),
+            top_logprobs: Some(vec![
+                TopLogprob { token: " ".to_string(), logprob: (0.5_f64).ln() },
+                TopLogprob { token: " B".to_string(), logprob: (0.5_f64).ln() },
+            ]),
+        };
         assert!(parse_lineup(&lp, 3, 0.95).is_none());
     }
 
