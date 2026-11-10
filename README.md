@@ -172,7 +172,7 @@ NanoJudge is **LLM-Sort**. It takes the chaotic, inherently subjective opinions 
 
 NanoJudge is a fundamental building block for AI. When a large LLM needs to choose between 100+ options, stuffing them into a massive context window is expensive, slow, and prone to "lost in the middle" failures.
 
-Instead, the main LLM can act as the orchestrator: it fetches the candidates, passes the list and the subjective criteria to NanoJudge, uses a much smaller efficient LLM to judge the lineups, and gets back a mathematically grounded ranking.
+Instead, the main LLM can act as the orchestrator: it fetches the candidates, passes the list and the subjective criteria to NanoJudge, uses a much smaller efficient LLM to judge the matchups, and gets back a mathematically grounded ranking.
 
 Every time an AI agent makes a decision, a travel app recommends an itinerary, or a feed ranks content, it is solving a subjective ranking problem. NanoJudge makes that universal process mathematically explicit and can scale to hundreds of thousands of options without running into context length limits.
 
@@ -182,7 +182,7 @@ NanoJudge is model-agnostic. It uses whatever LLM you point it at as a raw compu
 
 ## Benchmark
 
-We pitted NanoJudge against the strongest competitor we could find: **REALM** ([Wang et al. 2025](https://arxiv.org/abs/2508.18379)), a recent LLM re-ranker that sorts candidates with a quicksort-style recursion and TrueSkill ratings. The task is **RELIC** from the [BIRCO](https://github.com/BIRCO-benchmark/BIRCO_dataset) benchmark: find the passage that fills a masked quotation in a piece of literary analysis. Each query comes with a pool of about 51 passages, and exactly one of them is correct. Both methods use the same judge model (Qwen3-4B-Instruct-2507) on the same 100 queries. REALM has no deliberation step, so NanoJudge was also run with deliberation off.
+We pitted NanoJudge against the strongest competitor we could find: **REALM** ([Wang et al. 2025](https://arxiv.org/abs/2508.18379)), a recent LLM re-ranker that sorts candidates with a quicksort-style recursion and TrueSkill ratings. The task is **RELIC** from the [BIRCO](https://github.com/BIRCO-benchmark/BIRCO_dataset) benchmark: find the passage that fills a masked quotation in a piece of literary analysis. Each query comes with a pool of about 51 passages, and exactly one of them is correct. Both methods use the same judge model (Qwen3-4B-Instruct-2507) on the same 100 queries. REALM's judge gives its verdict without writing out its thinking first, so NanoJudge was run the same way.
 
 REALM has no budget setting of its own, so for REALM (4x) we run REALM four times per query from different starting orders and rank each passage by its average position. That brings it to approximately the same number of LLM calls as NanoJudge (4x).
 
@@ -223,11 +223,11 @@ Per-judge settings (in `[[judge]]` blocks):
 | `temperature` | Yes | Sampling temperature |
 | `weight` | No | Relative weight for pair assignment (default: 1) |
 | `concurrency` | No | Max concurrent requests (default: 16) |
-| `max_tokens` | Unless `reasoning_effort = "none"` | Max tokens in response. Reasoning length varies too much between models for a default, so it's only optional with reasoning off (default: 2048, or just enough for the verdict without deliberation) |
+| `max_tokens` | Unless `reasoning_effort = "none"` | Max tokens in response. Reasoning length varies too much between models for a default, so it's only optional with reasoning off (default: 2048, or just enough for a verdict-only answer) |
 | `api_key_env` | No | Environment variable containing the API key |
 | `reasoning_effort` | No | Controls the model's reasoning (e.g. `"none"` to turn it off) |
 | `min_logprob_coverage` | No | Min fraction of verdict-token logprob mass required to trust a verdict, > 0.0 and ≤ 1.0 (default: 0.95) |
-| `verdict_temperature` | No | Softens (> 1) or sharpens (< 1) this judge's verdicts before scoring. Also settable top-level (default: 3.0 with deliberation, 1.0 without) |
+| `verdict_temperature` | No | Softens (> 1) or sharpens (< 1) this judge's verdicts before scoring. Also settable top-level (default: 3.0 if the judge explains before its verdict, 1.0 if not) |
 | `chat_template_kwargs` | No | Extra options passed to the model's chat template, e.g. `{ enable_thinking = false }` |
 | `provider` | For OpenRouter | Pins the OpenRouter provider that serves the judge, e.g. `{ only = ["xiaomi"], allow_fallbacks = false }` |
 | `request_timeout_secs` | No | Seconds before a request is abandoned and retried, > 0 (e.g. `300` or `2.5`). No default, because a reasonable limit depends heavily on the prompt, the model and the hardware it runs on. Unset waits indefinitely |
