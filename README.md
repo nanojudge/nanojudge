@@ -1,6 +1,6 @@
 # nanojudge
 
-NanoJudge quantifies the relative strengths of arbitrary items under a criterion you define, using LLMs as judges. Provide the criterion (e.g., "Which is healthier?") and your item list of any length (e.g., "Eggs", "Butter", "Spinach", ...), and get a ranking with confidence intervals.
+NanoJudge quantifies the relative strengths of arbitrary items under a criterion you define, using LLMs as judges. Provide the criterion (e.g., "Which is healthier?") and your item list of any length (e.g., "eggs", "butter", "spinach", ...), and get a ranking with confidence intervals.
 
 Instead of overwhelming an LLM with one massive prompt, NanoJudge breaks the task down into a large number of small prompts. Operating like an intelligent matchmaking league, it adaptively pits similarly strong items against each other as results come in, efficiently producing an accurate leaderboard. The resulting comparisons are combined using Bradley-Terry statistics into a transparent ranking.
 
@@ -8,8 +8,7 @@ Works with any OpenAI-compatible API endpoint.
 
 [nanojudge.ai](https://nanojudge.ai) is a hosted version built on this engine, wrapped in a web UI with managed GPU infrastructure.
 
-See the [NanoJudge glossary](docs/glossary.md) for precise definitions of
-judgements, edges, refits, coverage, and the adaptive-selection terms used below.
+See the [NanoJudge glossary](docs/glossary.md) for precise definitions of judgements, edges, refits, coverage, and the adaptive-selection terms used below.
 
 ## How it works
 
