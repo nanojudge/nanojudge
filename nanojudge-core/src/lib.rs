@@ -37,10 +37,11 @@
 //! let result = run_scoring(&item_ids, &edges, &ScoringOptions {
 //!     confidence_level: 0.95,
 //!     selection_sharpness: None,
-//!     anchor_index: 0.0,
+//!     selection_top_k: 1,
 //!     selection_cutoff: 0.0005,
 //!     selection_coverage: 1.0,
-//!     target_prior_edges: 10.0,
+//!     selection_draws: 1000,
+//!     selection_seed: 0,
 //!     regularization_strength: 0.01,
 //!     prior_tau2: 10.0,
 //!     bias_prior_tau2: 2.0,

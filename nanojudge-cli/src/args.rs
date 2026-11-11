@@ -90,23 +90,29 @@ pub struct ConfigArgs {
     #[arg(long)]
     pub lineup_size: Option<usize>,
 
-    /// Top-heavy selection sharpness: each item's uncertainty ratio around the
-    /// anchor — min/max of the probability of sitting above vs below the
-    /// anchor, integrated over both posteriors' uncertainty; 1 = straddles the
-    /// anchor, near 0 = confidently on one side — is raised
+    /// Top-heavy selection sharpness: each item's uncertainty ratio — min/max
+    /// of its chance of being in vs out of the top k (see --selection-top-k);
+    /// 1 = a coin flip, near 0 = confidently in or out — is raised
     /// to this power before being used as its pairing weight. Lower = flatter =
     /// more exploration; 1.0 = raw ratios. Must be finite and > 0.
     /// Default: 0.7. Only used with top-heavy.
     #[arg(long)]
     pub selection_sharpness: Option<f64>,
 
-    /// Top-heavy anchor rank, 0-based into the ranking sorted best-first: 0.0
-    /// anchors selection on the current leader, 9.0 on the 10th-best (right for
-    /// "find the top ten, order within them doesn't matter"). Fractional values
-    /// interpolate between adjacent ranks. Must be finite, >= 0, and <= number
-    /// of items - 1. Default: 0. Only used with top-heavy.
+    /// How many top places top-heavy selection aims to settle: judgements go
+    /// to the items whose place in or out of the top k is still uncertain. 1
+    /// aims at first place; 10 is right for "find the top ten, order within
+    /// them doesn't matter". Must be >= 1 and <= number of items. Default: 1.
+    /// Only used with top-heavy.
     #[arg(long)]
-    pub anchor_index: Option<f64>,
+    pub selection_top_k: Option<usize>,
+
+    /// Number of random draws used to estimate each item's chance of being in
+    /// the top k at every refit. More draws give a steadier estimate and cost
+    /// proportionally more computation. Must be >= 1. Default: 1000. Only used
+    /// with top-heavy.
+    #[arg(long)]
+    pub selection_draws: Option<usize>,
 
     /// Top-heavy selection cutoff: an item needs at least this uncertainty
     /// ratio to stay a candidate; items below are dropped (the two highest are
@@ -123,18 +129,10 @@ pub struct ConfigArgs {
     #[arg(long)]
     pub coverage: Option<f64>,
 
-    /// Top-heavy selection target blend: the prior-predicted anchor strength
-    /// counts as this many pseudo-edges against the observed anchor's edge
-    /// count, so the prediction dominates early and fades as the anchor gains
-    /// edges. Higher = trust the prediction longer. 0 disables the blend (pure
-    /// observed anchor). Must be finite and >= 0. Default: 5. Only used with
-    /// top-heavy.
-    #[arg(long)]
-    pub target_prior_edges: Option<f64>,
-
     /// Early stop for top-heavy runs: after each interim fit, end the run once
-    /// the probability that every item sits on its side of the anchor — the
-    /// product of the per-item side probabilities — reaches this value; final
+    /// the probability that every item is on its likelier side of the top-k
+    /// boundary (in or out) — the product of the per-item side probabilities —
+    /// reaches this value; final
     /// scoring then runs on the judgements collected so far. In (0.5, 1.0),
     /// e.g. 0.95. No default: when absent, the run always uses its full
     /// budget. Rejected with the uniform distribution.

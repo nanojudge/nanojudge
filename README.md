@@ -210,9 +210,10 @@ Key settings:
 | `lineup_size` | Items in each judgement. `2` is the default pairwise mode, and up to `9` is supported. |
 | `logprobs` | `true` to read verdict confidence from logprobs, `false` to parse the verdict from text. Not all endpoints support logprobs. Use it when you can, as it gives NanoJudge more information to estimate strengths with. |
 | `judgement_distribution` | `"uniform"` or `"top-heavy"`. Top-heavy concentrates judgements on the contenders for the top spots. |
-| `selection_sharpness` / `cutoff` | Top-heavy tuning. `selection_sharpness` controls how sharply pairing weight concentrates on items near the anchor (lower = more exploration; default `0.7`). `cutoff` drops items below a minimum uncertainty ratio, keeping at least two (`[0,1)`, default `0` = off). |
-| `anchor_index` | Which rank anchors top-heavy selection, 0-based best-first (default `0` = leader). `9` = 10th-best, for "find the top ten." Fractional values interpolate between adjacent ranks. |
-| `stop_confidence` | Early stop for top-heavy runs: end once the probability that every item is on its correct side of the anchor reaches this value. In `(0.5, 1.0)`, e.g. `0.95`. Off by default. |
+| `selection_sharpness` / `cutoff` | Top-heavy tuning. `selection_sharpness` controls how sharply pairing weight concentrates on items whose place in or out of the top k is uncertain (lower = more exploration; default `0.7`). `cutoff` drops items below a minimum uncertainty ratio, keeping at least two (`[0,1)`, default `0` = off). |
+| `selection_top_k` | How many top places top-heavy selection aims to settle (default `1` = first place). `10` is for "find the top ten," where order within the ten doesn't matter. |
+| `selection_draws` | Random draws used at each refit to estimate every item's chance of being in the top k (default `1000`). More draws give a steadier estimate at more computation. |
+| `stop_confidence` | Early stop for top-heavy runs: end once the probability that every item is on its likelier side of the top-k boundary (in or out) reaches this value. In `(0.5, 1.0)`, e.g. `0.95`. Off by default. |
 
 Per-judge settings (in `[[judge]]` blocks):
 

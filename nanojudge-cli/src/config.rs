@@ -52,10 +52,10 @@ pub struct NanojudgeConfig {
     /// Number of items in each judged lineup: 2 to 9.
     pub lineup_size: Option<usize>,
     pub selection_sharpness: Option<f64>,
-    pub anchor_index: Option<f64>,
+    pub selection_top_k: Option<usize>,
+    pub selection_draws: Option<usize>,
     pub cutoff: Option<f64>,
     pub coverage: Option<f64>,
-    pub target_prior_edges: Option<f64>,
     pub stop_confidence: Option<f64>,
     pub retries: Option<usize>,
     pub confidence_level: Option<f64>,
@@ -129,20 +129,19 @@ const DEFAULT_CONFIG_TEMPLATE: &str = "\
 # lineup_size = 2
 
 # Tuning for the top-heavy distribution. Each item's pairing weight is its
-# uncertainty ratio around the anchor: min/max of the probability of sitting
-# above vs below the anchor, integrated over both the item's and the anchor's
-# posterior uncertainty — 1 when the item straddles the anchor, near 0 once
-# it is confidently above or below — raised to `selection_sharpness`. The
+# uncertainty ratio: min/max of its chance of being in vs out of the top k
+# (`selection_top_k`) — 1 when the item is a coin flip for the top k, near 0
+# once it is confidently in or out — raised to `selection_sharpness`. The
 # first item of each judgement is drawn from these weights; its opponent is
 # picked by info-gain matchmaking from a rating window around it, so the
 # contested boundary gets the judgements.
 #   selection_sharpness: lower = flatter = more exploration; 1.0 = raw ratios (> 0).
-#   anchor_index: which rank is the anchor, 0-based into the ranking sorted
-#             best-first. 0.0 = the current leader; 9.0 = the 10th-best (right
-#             for \"find the top ten, order within them doesn't matter\").
-#             Fractional values interpolate between adjacent ranks: 0.5 targets
-#             the midpoint of the 1st and 2nd items. Must be finite, >= 0, and
-#             <= number of items - 1.
+#   selection_top_k: how many top places to settle. 1 = first place; 10 is
+#             right for \"find the top ten, order within them doesn't
+#             matter\". Must be >= 1 and <= number of items.
+#   selection_draws: random draws used at every refit to estimate each item's
+#             chance of being in the top k. More = steadier estimate, more
+#             computation. Must be >= 1.
 #   cutoff:   minimum uncertainty ratio to stay a candidate; items below are
 #             dropped, except the two highest, which are always kept.
 #             [0,1); 0 disables the cutoff.
@@ -151,13 +150,15 @@ const DEFAULT_CONFIG_TEMPLATE: &str = "\
 #             ratio-implied share. 0 = off, 1 = proportional-fair, > 1 over-corrects.
 # Only used with judgement_distribution = \"top-heavy\".
 # selection_sharpness = 0.7
-# anchor_index = 0.0
+# selection_top_k = 1
+# selection_draws = 1000
 # cutoff = 0.0
 # coverage = 1.0
 
 # Early stop for top-heavy runs. After each interim fit, the run ends early
-# once the probability that every item sits on its side of the anchor — the
-# product of the per-item side probabilities — reaches this value; final
+# once the probability that every item is on its likelier side of the top-k
+# boundary (in or out) — the product of the per-item side probabilities —
+# reaches this value; final
 # scoring then runs on the judgements collected so far. In (0.5, 1.0), e.g.
 # 0.95. No default: when unset, the run always uses its full budget.
 # Rejected with judgement_distribution = \"uniform\".

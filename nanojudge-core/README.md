@@ -27,10 +27,11 @@ let judge_info = JudgeInfo { judge_ids: vec![judge_id], logprobs_mode: false };
 let result = run_scoring(&item_ids, &edges, &ScoringOptions {
     confidence_level: 0.95,
     selection_sharpness: None,
-    anchor_index: 0.0,
+    selection_top_k: 1,
     selection_cutoff: 0.0005,
     selection_coverage: 1.0,
-    target_prior_edges: 5.0,
+    selection_draws: 1000,
+    selection_seed: 0,
     regularization_strength: 0.01,
     prior_tau2: 10.0,
     bias_prior_tau2: 2.0,
@@ -73,13 +74,15 @@ let mut done = 0;
 while done < budget {
     // 1. Score existing edges to get posterior summaries for pairing
     if !engine.completed_edges.is_empty() {
+        let selection_seed = engine.next_selection_seed(); // fresh top-k draws each refit
         let scoring = run_scoring(&item_ids, &engine.completed_edges, &ScoringOptions {
             confidence_level: 0.95,
             selection_sharpness: Some(0.5),
-            anchor_index: 0.0,
+            selection_top_k: 1,
             selection_cutoff: 0.0005,
             selection_coverage: 1.0,
-            target_prior_edges: 5.0,
+            selection_draws: 1000,
+            selection_seed,
             regularization_strength: 0.01,
             prior_tau2: 10.0,
             bias_prior_tau2: 2.0,
@@ -127,7 +130,7 @@ while done < budget {
 
 **Uniform**: Every item gets equal judgement time. Good when you care about the full ranking.
 
-**Top-heavy**: Focuses judgements on items whose standing around the anchor rank is still uncertain. Confidently placed items get the uniform-stage minimum while contested boundary items get many more judgements.
+**Top-heavy**: Focuses judgements on items whose place in or out of the top k (`selection_top_k`) is still uncertain. Confidently placed items get the uniform-stage minimum while contested boundary items get many more judgements.
 
 The engine handles two stages automatically:
 1. **Uniform stage** (first few refits): uniform pairing until every item has the minimum edge count

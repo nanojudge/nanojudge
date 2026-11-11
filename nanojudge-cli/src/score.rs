@@ -121,10 +121,11 @@ pub fn run(args: ScoreArgs) {
         &ScoringOptions {
             confidence_level,
             selection_sharpness: None,
-            anchor_index: 0.0,
+            selection_top_k: 1,
             selection_cutoff: 0.0,
             selection_coverage: 0.0,
-            target_prior_edges: 0.0,
+            selection_draws: 1,
+            selection_seed: 0,
             regularization_strength,
             prior_tau2,
             bias_prior_tau2,

@@ -28,7 +28,7 @@ pub const NO_DELIBERATION_MAX_TOKENS: u32 = 16;
 /// disabled. A line reads "First place is Option A" — about 7 tokens; 16
 /// leaves room for tokenizer variation across models.
 const TOKENS_PER_RANKING_LINE: u32 = 16;
-const DEFAULT_TARGET_PRIOR_EDGES: f64 = 5.0;
+const DEFAULT_SELECTION_DRAWS: usize = 1000;
 // A verdict token written after deliberation is near-deterministic, so
 // its logprobs read overconfident and get decompressed by default. Without
 // deliberation, the verdict token is the model's first expression of preference
@@ -62,23 +62,24 @@ pub struct ResolvedConfig {
     /// Number of items in each judged lineup: 2 (default) up to 9.
     pub lineup_size: usize,
     /// Top-heavy selection sharpness (power applied to each item's uncertainty
-    /// ratio around the anchor). Finite and > 0.
+    /// ratio around the top-k boundary). Finite and > 0.
     pub selection_sharpness: f64,
-    /// Top-heavy anchor rank (0-based, fractional interpolates between adjacent
-    /// ranks; 0 = the current leader). Finite and >= 0; the upper bound
-    /// (num_items - 1) is enforced at rank time once the item count is known.
-    pub anchor_index: f64,
+    /// How many top places top-heavy selection aims to settle (1 = first
+    /// place). >= 1; the upper bound (the item count) is enforced at rank time
+    /// once the item count is known.
+    pub selection_top_k: usize,
+    /// Random draws per refit for estimating each item's chance of being in
+    /// the top k. >= 1.
+    pub selection_draws: usize,
     /// Top-heavy selection cutoff (minimum uncertainty ratio to stay a
     /// candidate). In [0, 1); 0 disables the cutoff.
     pub selection_cutoff: f64,
     /// Top-heavy proportional-fair coverage pull. Finite and >= 0; 0 disables it.
     pub selection_coverage: f64,
-    /// Top-heavy target blend: prior-predicted anchor counts as this many pseudo-edges.
-    /// Finite and >= 0; 0 disables the blend.
-    pub target_prior_edges: f64,
     /// Early-stop confidence for top-heavy runs: end the run once the
-    /// probability that every item sits on its side of the anchor (the
-    /// product of the per-item side probabilities) reaches this value. In
+    /// probability that every item is on its likelier side of the top-k
+    /// boundary (the product of the per-item side probabilities) reaches this
+    /// value. In
     /// (0.5, 1.0) when set. `None` = no early stop (the run always uses its
     /// full budget) — there is deliberately no default.
     pub stop_confidence: Option<f64>,
@@ -419,10 +420,15 @@ pub fn resolve_config(shared: &ConfigArgs, cfg: &config::NanojudgeConfig) -> Res
     if !selection_sharpness.is_finite() || selection_sharpness <= 0.0 {
         bail(format!("selection-sharpness={selection_sharpness}, must be finite and > 0"));
     }
-    let anchor_index = merge_opt(shared.anchor_index, cfg.anchor_index, "anchor-index")
-        .unwrap_or(0.0);
-    if !anchor_index.is_finite() || anchor_index < 0.0 {
-        bail(format!("anchor-index={anchor_index}, must be finite and >= 0 (0 anchors on the leader)"));
+    let selection_top_k = merge_opt(shared.selection_top_k, cfg.selection_top_k, "selection-top-k")
+        .unwrap_or(1);
+    if selection_top_k < 1 {
+        bail(format!("selection-top-k={selection_top_k}, must be >= 1 (1 aims at first place)"));
+    }
+    let selection_draws = merge_opt(shared.selection_draws, cfg.selection_draws, "selection-draws")
+        .unwrap_or(DEFAULT_SELECTION_DRAWS);
+    if selection_draws < 1 {
+        bail(format!("selection-draws={selection_draws}, must be >= 1"));
     }
     let selection_cutoff = merge_opt(shared.cutoff, cfg.cutoff, "cutoff")
         .unwrap_or(0.0);
@@ -434,11 +440,6 @@ pub fn resolve_config(shared: &ConfigArgs, cfg: &config::NanojudgeConfig) -> Res
     if !selection_coverage.is_finite() || selection_coverage < 0.0 {
         bail(format!("coverage={selection_coverage}, must be finite and >= 0 (0 disables it)"));
     }
-    let target_prior_edges = merge_opt(shared.target_prior_edges, cfg.target_prior_edges, "target-prior-edges")
-        .unwrap_or(DEFAULT_TARGET_PRIOR_EDGES);
-    if !target_prior_edges.is_finite() || target_prior_edges < 0.0 {
-        bail(format!("target-prior-edges={target_prior_edges}, must be finite and >= 0 (0 disables the blend)"));
-    }
     // Early stop has deliberately no default: absent means the run always uses
     // its full budget.
     let stop_confidence = merge_opt(shared.stop_confidence, cfg.stop_confidence, "stop-confidence");
@@ -447,7 +448,7 @@ pub fn resolve_config(shared: &ConfigArgs, cfg: &config::NanojudgeConfig) -> Res
             bail(format!("stop-confidence={c}, must be in (0.5, 1.0), e.g. 0.95"));
         }
         if matches!(judgement_distribution, JudgementDistribution::Uniform) {
-            bail("stop-confidence requires judgement-distribution = \"top-heavy\" (uniform runs have no anchor to measure against)");
+            bail("stop-confidence requires judgement-distribution = \"top-heavy\" (uniform runs have no top-k boundary to measure against)");
         }
     }
     let retries = merge_opt(shared.retries, cfg.retries, "retries")
@@ -587,10 +588,10 @@ pub fn resolve_config(shared: &ConfigArgs, cfg: &config::NanojudgeConfig) -> Res
         judgement_distribution,
         lineup_size,
         selection_sharpness,
-        anchor_index,
+        selection_top_k,
+        selection_draws,
         selection_cutoff,
         selection_coverage,
-        target_prior_edges,
         stop_confidence,
         retries,
         deliberation_length,
@@ -633,10 +634,10 @@ mod tests {
             judgement_distribution: None,
             lineup_size: None,
             selection_sharpness: None,
-            anchor_index: None,
+            selection_top_k: None,
+            selection_draws: None,
             cutoff: None,
             coverage: None,
-            target_prior_edges: None,
             stop_confidence: None,
             retries: None,
             deliberation_length: None,

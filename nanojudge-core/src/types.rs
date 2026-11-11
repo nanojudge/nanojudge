@@ -110,27 +110,24 @@ pub struct ScoringOptions {
     /// Top-heavy item-selection weighting. `None` skips it entirely (uniform
     /// pairing needs no selection weights, and the result's `selection_weights`
     /// is then `None`). `Some(sharpness)` computes, per item, the uncertainty
-    /// ratio around the anchor (see `anchor_index`): with
-    /// `A = P(item beats the anchor)` under independent Gaussian summaries of
-    /// both posteriors — `Φ((mean − anchor_mean) / sqrt(std² + anchor_std²))`,
-    /// so a still-uncertain anchor widens every split — the ratio is
-    /// `min(A, 1−A) / max(A, 1−A)` — 1 when the item's
-    /// posterior straddles the anchor, decaying toward 0 as the item resolves
-    /// confidently above or below it — then raises that ratio to `sharpness`.
+    /// ratio around the top-k boundary (see `selection_top_k`): with
+    /// `A = P(item is in the top k)`, the ratio is
+    /// `min(A, 1−A) / max(A, 1−A)` — 1 when the item is as likely in the top k
+    /// as out of it, decaying toward 0 as the item resolves confidently onto
+    /// either side — then raises that ratio to `sharpness`.
     /// Lower sharpness flattens the distribution (more exploration); `1.0`
     /// leaves the ratios as-is. Must be finite and > 0.
     pub selection_sharpness: Option<f64>,
-    /// Which rank anchors the selection target, as a 0-based (possibly
-    /// fractional) index into the items sorted by posterior mean descending.
-    /// `0.0` anchors on the top item (classic top-heavy); `9.0` anchors on the
-    /// 10th-best — right for "find the top ten, order within them doesn't
-    /// matter", since edges then concentrate on the boundary around rank
-    /// 10 while items confidently inside or outside the top ten shed weight.
-    /// Fractional values interpolate linearly (in log-strength space) between
-    /// the two adjacent ranks: `0.5` targets the midpoint of the 1st and 2nd
-    /// items' means. Must be finite, >= 0, and <= num_items − 1. Ignored when
-    /// `selection_sharpness` is `None`.
-    pub anchor_index: f64,
+    /// How many top places the selection aims to settle. Each item's selection
+    /// weight comes from its chance of being among the `selection_top_k`
+    /// strongest items when every item's strength is drawn from its posterior
+    /// and the whole field is ranked. `1` aims at first place (classic
+    /// top-heavy); `10` is right for "find the top ten, order within them
+    /// doesn't matter", since edges then concentrate on the items that might
+    /// or might not be in the top ten while items confidently in or out shed
+    /// weight. Must be in `[1, num_items]`. Ignored when `selection_sharpness`
+    /// is `None`.
+    pub selection_top_k: usize,
     /// Minimum uncertainty ratio an item needs to stay a selection candidate.
     /// Items below are dropped to weight 0, except the two highest-ratio items,
     /// which are always kept so a pair can always be formed. In [0, 1); 0
@@ -142,18 +139,15 @@ pub struct ScoringOptions {
     /// standard proportional-fair; > 1 over-corrects toward equal coverage. Must
     /// be finite and >= 0. Ignored when `selection_sharpness` is `None`.
     pub selection_coverage: f64,
-    /// Info-driven blend for the selection "target" (the reference strength each
-    /// item's area is measured against). Early on the observed anchor strength is
-    /// a poor estimate — the anchor item has few edges — so the target is
-    /// blended with a prior-predicted anchor: the expected `anchor_index`-th
-    /// order statistic of `num_items` draws from the strength prior. The prior
-    /// counts as `target_prior_edges` pseudo-edges against the anchor's actual
-    /// edge count `g` (interpolated for fractional `anchor_index`):
-    ///   `target = (g·observed_anchor + K·predicted_anchor) / (g + K)`.
-    /// So the prediction dominates while the anchor has few edges and fades as
-    /// it accumulates more. `target_prior_edges = 0` disables the blend (pure observed
-    /// anchor). Must be finite and >= 0. Ignored when `selection_sharpness` is `None`.
-    pub target_prior_edges: f64,
+    /// How many random draws of the whole field estimate each item's chance of
+    /// being in the top `selection_top_k`. More draws give a steadier estimate
+    /// at proportionally more computation per scoring call. Must be >= 1.
+    /// Ignored when `selection_sharpness` is `None`.
+    pub selection_draws: usize,
+    /// Seed for those random draws. Pass a different value on every scoring
+    /// call so each refit sees fresh draws; the same value reproduces the same
+    /// selection weights. Ignored when `selection_sharpness` is `None`.
+    pub selection_seed: u64,
     /// Ghost player regularization strength (e.g. 0.01).
     pub regularization_strength: f64,
     /// Prior variance on log-strengths. Default: 10.0.
@@ -171,26 +165,19 @@ pub struct ScoringResult {
     /// Ranked items, sorted by score descending.
     pub rankings: Vec<RankedItem>,
     /// Top-heavy item-selection weights per item, in the same order as input
-    /// `item_ids`: each item's sharpened uncertainty ratio around the anchor
-    /// (integrated over the anchor's own posterior uncertainty), with
-    /// sub-cutoff items zeroed. Drives top-heavy pairing: the first
-    /// item of each pair is drawn from these weights. `None` when
+    /// `item_ids`: each item's sharpened uncertainty ratio around the top-k
+    /// boundary, with sub-cutoff items zeroed. Drives top-heavy pairing: the
+    /// first item of each pair is drawn from these weights. `None` when
     /// `selection_sharpness` was `None`.
     pub selection_weights: Option<Vec<f64>>,
-    /// ln P(every checked item sits on its posterior-favored side of the
-    /// anchor): the sum over non-exempt items of `ln(max(A, 1−A))`, treating
-    /// the per-item side probabilities as independent Gaussian marginals. In
-    /// (−∞, 0]; confidence-based early stopping fires when this reaches
-    /// `ln(stop_confidence)`. Items far from the anchor contribute ~0, so the
-    /// sum is dominated by the boundary stragglers. An integer `anchor_index`
-    /// exempts the anchor item itself — its side probability is ~0.5 by
-    /// construction; a fractional anchor exempts nobody, since the boundary
-    /// sits between two items that both must resolve against it. Measured
-    /// against the observed anchor, not the `target_prior_edges`-blended
-    /// target that steers early exploration (items resolved against that
-    /// inflated early target are not resolved against the actual anchor).
-    /// 0.0 only for a single item. `None` when `selection_sharpness` was
-    /// `None`.
+    /// ln P(every item sits on its posterior-favored side of the top-k
+    /// boundary): the sum over all items of `ln(max(A, 1−A))`, where `A` is
+    /// the item's chance of being in the top `selection_top_k`, treating the
+    /// per-item side probabilities as independent. In (−∞, 0];
+    /// confidence-based early stopping fires when this reaches
+    /// `ln(stop_confidence)`. Items far from the boundary contribute ~0, so
+    /// the sum is dominated by the few contesting it. `None` when
+    /// `selection_sharpness` was `None`.
     pub partition_log_confidence: Option<f64>,
     /// Per-item posterior mean log-strength, in the same order as the input
     /// `item_ids` (`rankings` is the score-sorted view of the same values).

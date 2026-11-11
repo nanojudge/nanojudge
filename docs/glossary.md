@@ -44,7 +44,7 @@
 
 - **Uniform stage**: A period in which NanoJudge uses uniform item allocation. In a uniform run this lasts for the entire run. In a top-heavy run it is the initial stage, lasting until every item has at least `min_uniform_edges` incident edges. The transition in a top-heavy run is driven by edge counts, not by how many judgements have been scheduled or how often every item has appeared. `min_uniform_edges` is therefore an edge threshold.
 
-- **Top-heavy**: Allocates more judgements to items whose positions around the chosen anchor are unresolved. It first selects a focal item from the selection weights, then selects informative opponents for it.
+- **Top-heavy**: Allocates more judgements to items whose place in or out of the top k is unresolved. It first selects a focal item from the selection weights, then selects informative opponents for it.
 
 - **Focal item**: The first item chosen for a top-heavy judgement. Its selection weight controls how likely it is to be chosen.
 
@@ -56,19 +56,19 @@
 
 - **Matchmaking sharpness** (`matchmaking_sharpness`): Controls how strongly opponent selection favours high-information matchups. It affects opponent choice, not which item becomes the focal item.
 
-- **Selection weight**: A top-heavy item's relative chance of becoming the focal item. It is based on uncertainty around the anchor, then adjusted by selection sharpness, cutoff, and top-heavy coverage.
+- **Selection weight**: A top-heavy item's relative chance of becoming the focal item. It is based on the item's top-k uncertainty ratio, then adjusted by selection sharpness, cutoff, and top-heavy coverage.
 
-- **Anchor-uncertainty ratio**: The smaller of an item's probabilities of being above or below the anchor, divided by the larger. It is 1 when the item is maximally unresolved around the anchor and approaches 0 when the item's side is clear. This is the base of its top-heavy selection weight.
+- **Top-k chance**: An item's probability of being among the `selection_top_k` strongest items, given what the judgements so far say about every item. It is estimated at each refit by repeatedly drawing a possible strength for every item from its current estimate and uncertainty, and seeing where the item lands.
 
-- **Selection sharpness** (`selection_sharpness`): Raises the anchor-uncertainty ratio to a power. Lower values flatten focal-item probabilities and explore more; higher values concentrate them more strongly.
+- **Top-k uncertainty ratio**: The smaller of an item's chances of being in or out of the top k, divided by the larger. It is 1 when the item is as likely in as out and approaches 0 when its side is clear. This is the base of its top-heavy selection weight.
 
-- **Selection cutoff** (`cutoff`): Removes items whose anchor-uncertainty ratio is below the threshold. The two highest-ratio candidates are always retained so a valid judgement can still be formed.
+- **Selection sharpness** (`selection_sharpness`): Raises the top-k uncertainty ratio to a power. Lower values flatten focal-item probabilities and explore more; higher values concentrate them more strongly.
 
-- **Anchor**: The rank boundary that top-heavy selection tries to resolve. `anchor_index = 0` targets the current best item; `anchor_index = 9` targets the boundary around tenth place. Fractional indices target the space between adjacent ranks.
+- **Selection cutoff** (`cutoff`): Removes items whose top-k uncertainty ratio is below the threshold. The two highest-ratio candidates are always retained so a valid judgement can still be formed.
 
-- **Selection target**: The strength value against which anchor uncertainty is measured. Early in a run it can blend the observed anchor strength with a prior prediction; as the anchor gains edges, it converges to the observed anchor.
+- **Selection top k** (`selection_top_k`): How many top places top-heavy selection tries to settle. `selection_top_k = 1` works out which item is first; `selection_top_k = 10` works out which items make the top ten, without caring about their order within it.
 
-- **Target prior edges** (`target_prior_edges`): The pseudo-edge strength of the prior-predicted selection target. Zero disables the blend; larger values make the prior prediction fade more slowly.
+- **Selection draws** (`selection_draws`): The number of random draws used at each refit to estimate every item's top-k chance. More draws give a steadier estimate and take more computation.
 
 ## Coverage settings
 
@@ -120,7 +120,7 @@
 
 - **Bias prior tau-squared** (`bias_prior_tau2`): The prior variance of judge position bias in logit space.
 
-- **Stop confidence** (`stop_confidence`): A top-heavy early-stopping threshold for the product of the checked items' probabilities of being on their posterior-favoured side of the observed anchor. It is separate from the confidence level used for reported score intervals.
+- **Stop confidence** (`stop_confidence`): A top-heavy early-stopping threshold for the product, over all items, of each item's probability of being on its likelier side of the top-k boundary (in or out). It is separate from the confidence level used for reported score intervals.
 
 ## Synthetic benchmark terms
 

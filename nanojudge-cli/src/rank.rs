@@ -580,15 +580,14 @@ async fn setup_run(
         ));
     }
 
-    // The anchor rank must exist: fail here, before any LLM spend, rather than
-    // at the first scoring pass. Only top-heavy uses the anchor.
+    // The top k cannot be larger than the list: fail here, before any LLM
+    // spend, rather than at the first scoring pass. Only top-heavy uses it.
     if matches!(resolved.judgement_distribution, JudgementDistribution::TopHeavy)
-        && resolved.anchor_index > (texts.len().saturating_sub(1)) as f64
+        && resolved.selection_top_k > texts.len()
     {
         bail(format!(
-            "anchor-index={} exceeds the last rank ({}) for {} items",
-            resolved.anchor_index,
-            texts.len().saturating_sub(1),
+            "selection-top-k={} exceeds the number of items ({})",
+            resolved.selection_top_k,
             texts.len(),
         ));
     }
@@ -751,7 +750,7 @@ async fn setup_run(
 
     // Top-heavy selection: when active, each interim scoring pass turns the
     // posterior into per-item selection weights (sharpened uncertainty ratio
-    // around the anchor).
+    // around the top-k boundary).
     // `None` for uniform, which needs no selection weights.
     let selection_sharpness = match judgement_distribution {
         JudgementDistribution::TopHeavy => Some(resolved.selection_sharpness),
@@ -792,15 +791,19 @@ async fn setup_run(
         (None, Vec::new())
     };
 
-    // Scoring options are constant across refits, so build them once and share
-    // them between the pre-loop priming pass and the per-refit interim scoring.
+    // Scoring options are constant across refits apart from `selection_seed`,
+    // so build them once and share them between the pre-loop priming pass and
+    // the per-refit interim scoring. Each top-heavy scoring pass replaces
+    // `selection_seed` with a fresh one from the engine (see
+    // `with_fresh_selection_seed`).
     let interim_scoring_options = ScoringOptions {
         confidence_level: resolved.confidence_level,
         selection_sharpness,
-        anchor_index: resolved.anchor_index,
+        selection_top_k: resolved.selection_top_k,
         selection_cutoff: resolved.selection_cutoff,
         selection_coverage: resolved.selection_coverage,
-        target_prior_edges: resolved.target_prior_edges,
+        selection_draws: resolved.selection_draws,
+        selection_seed: 0,
         regularization_strength: resolved.regularization_strength,
         prior_tau2: resolved.prior_tau2,
         bias_prior_tau2: resolved.bias_prior_tau2,
@@ -858,6 +861,16 @@ async fn setup_run(
     }
 }
 
+/// The shared interim scoring options with a fresh seed for this pass's top-k
+/// draws, taken from the engine's random generator: different at every refit,
+/// reproducible under `--seed`.
+fn with_fresh_selection_seed(engine: &mut RankingEngine, scoring_options: &ScoringOptions) -> ScoringOptions {
+    ScoringOptions {
+        selection_seed: engine.next_selection_seed(),
+        ..scoring_options.clone()
+    }
+}
+
 /// Prime the rating state from any seeded edges before the loop. Without this,
 /// the first selection pass runs matchmaking on flat initial ratings, ignoring
 /// the loaded data entirely on refit 1. Returns true when the loaded
@@ -882,10 +895,11 @@ fn prime_from_seed(
         // stop before collecting anything: the loaded data is already
         // conclusive, so the run scores it and prints the ranking with no new
         // comparisons (this is the deliberate zero-new case, not a failure).
+        let scoring_options = with_fresh_selection_seed(engine, scoring_options);
         let primed = run_scoring(
             item_ids,
             &engine.completed_edges,
-            scoring_options,
+            &scoring_options,
             judge_info,
         );
         engine.set_current_posterior(&primed.item_means, &primed.item_stds);
@@ -895,9 +909,9 @@ fn prime_from_seed(
             if log_conf >= c.ln() {
                 eprintln!(
                     "Early stop before collecting: loaded judgements already meet stop_confidence \
-                     (P(every item on its side of the anchor) = {:.1}% >= {:.1}%). \
+                     (P(every item on its likelier side of the top-{} boundary) = {:.1}% >= {:.1}%). \
                      Collecting no new comparisons.",
-                    log_conf.exp() * 100.0, c * 100.0,
+                    resolved.selection_top_k, log_conf.exp() * 100.0, c * 100.0,
                 );
                 early_stop = true;
             }
@@ -941,10 +955,18 @@ fn refit_interim_scoring(
 
     let shown_judgements = total_judgements + loaded_judgements.unwrap_or(0);
     let mut early_stop = false;
+    // Only top-heavy scoring uses the seed. A uniform run scores here just for
+    // display (`--live-top`, `--emit-interim-rankings`), which must not advance
+    // the engine's random generator and so change the pairing.
+    let scoring_options = if top_heavy {
+        with_fresh_selection_seed(engine, scoring_options)
+    } else {
+        scoring_options.clone()
+    };
     let interim = run_scoring(
         item_ids,
         &engine.completed_edges,
-        scoring_options,
+        &scoring_options,
         judge_info,
     );
     if resolved.emit_interim_rankings {
@@ -962,8 +984,8 @@ fn refit_interim_scoring(
                 .expect("top-heavy interim scoring always computes selection ratios");
             if log_conf >= c.ln() {
                 eprintln!(
-                    "Early stop: P(every item on its side of the anchor) = {:.1}% >= {:.1}% after {}.",
-                    log_conf.exp() * 100.0, c * 100.0,
+                    "Early stop: P(every item on its likelier side of the top-{} boundary) = {:.1}% >= {:.1}% after {}.",
+                    resolved.selection_top_k, log_conf.exp() * 100.0, c * 100.0,
                     output::judgement_count(shown_judgements, loaded_judgements, "judgements"),
                 );
                 early_stop = true;
@@ -1060,10 +1082,11 @@ fn finish_run(
         &ScoringOptions {
             confidence_level: resolved.confidence_level,
             selection_sharpness: None,
-            anchor_index: resolved.anchor_index,
+            selection_top_k: resolved.selection_top_k,
             selection_cutoff: resolved.selection_cutoff,
             selection_coverage: resolved.selection_coverage,
-            target_prior_edges: resolved.target_prior_edges,
+            selection_draws: resolved.selection_draws,
+            selection_seed: 0,
             regularization_strength: resolved.regularization_strength,
             prior_tau2: resolved.prior_tau2,
             bias_prior_tau2: resolved.bias_prior_tau2,

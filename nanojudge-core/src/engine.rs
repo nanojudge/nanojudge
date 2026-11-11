@@ -113,6 +113,15 @@ impl RankingEngine {
         )
     }
 
+    /// A fresh seed for the next scoring call's top-k draws
+    /// (`ScoringOptions::selection_seed`), taken from the engine's random
+    /// generator: different at every refit, reproducible under
+    /// `EngineConfig::seed`.
+    pub fn next_selection_seed(&mut self) -> u64 {
+        use rand::Rng;
+        self.rng.random()
+    }
+
     /// Generate exactly `pairs_count` pairs using the current effective
     /// distribution. Uniform generation balances cumulative incident edge
     /// counts even when the request is too small to include every item or large

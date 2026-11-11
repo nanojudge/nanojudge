@@ -29,38 +29,29 @@ fn normal_cdf(x: f64) -> f64 {
 }
 
 /// Output of `compute_selection_weights`: the pairing weights plus the raw
-/// side-of-anchor statistic that early stopping reads.
+/// top-k statistic that early stopping reads.
 struct SelectionWeightsOutput {
     /// Sharpened, cutoff-filtered, coverage-pulled pairing weights.
     weights: Vec<f64>,
-    /// ln P(every checked item sits on its posterior-favored side of the
-    /// observed anchor): the sum of per-item ln(max(A, 1−A)), treating the
-    /// side probabilities as independent (see the comment at the
-    /// computation). In (−∞, 0]; the early-stop criterion is
-    /// `partition_log_confidence >= ln(c)`. An integer anchor exempts the
-    /// anchor item itself (its side probability is ~0.5 by construction); a
-    /// fractional anchor exempts nobody, since the boundary sits between two
-    /// items that both must resolve. 0.0 only for a single item.
+    /// ln P(every item sits on its posterior-favored side of the top-k
+    /// boundary): the sum over all items of ln(max(A, 1−A)), where `A` is the
+    /// item's chance of being in the top `selection_top_k`, treating the side
+    /// probabilities as independent (see the comment at the computation). In
+    /// (−∞, 0]; the early-stop criterion is
+    /// `partition_log_confidence >= ln(c)`.
     partition_log_confidence: f64,
 }
 
 /// Build top-heavy item-selection weights from each item's posterior summary.
 ///
-/// For each item, estimate which side of the anchor it lands on: with
-/// `A = P(strength_i ≥ strength_anchor)` — treating both as independent
-/// Gaussian summaries, so `A = Φ((mean_i − target) / sqrt(std_i² + std_anchor²))`
-/// with the anchor's own uncertainty widening the split — the base weight is
-/// the uncertainty ratio `min(A, 1−A) / max(A, 1−A)`:
-/// 1 when the posterior sits astride the anchor (maximally unsure which side
-/// the item belongs on), decaying toward 0 as the item resolves confidently
-/// above or below it — raised to `selection_sharpness` (lower = flatter =
-/// more exploration). The anchor is the item at rank `anchor_index` (0-based,
-/// posterior means sorted descending; fractional values interpolate between
-/// the two adjacent ranks); the anchor itself sits at ratio 1 once the target
-/// blend has converged to the observed anchor (early on, while
-/// `target_prior_edges` still pulls the target toward the prior prediction,
-/// even the anchor can sit below 1). Items whose
-/// ratio is below `selection_cutoff` are dropped to 0, except the two
+/// For each item, `A` is its chance of being in the top `selection_top_k`
+/// when every item's strength is drawn independently from its posterior
+/// `N(mean, std²)` and the whole field is ranked (see
+/// `top_k_probabilities`). The base weight is the uncertainty ratio
+/// `min(A, 1−A) / max(A, 1−A)`: 1 when the item is as likely in the top k as
+/// out of it, decaying toward 0 as it resolves confidently onto either side —
+/// raised to `selection_sharpness` (lower = flatter = more exploration). Items
+/// whose ratio is below `selection_cutoff` are dropped to 0, except the two
 /// highest-ratio items, which are always kept so the pairing layer can always
 /// draw two distinct contenders.
 ///
@@ -79,78 +70,32 @@ fn compute_selection_weights(
     stds: &[f64],
     edge_counts: &[usize],
     selection_sharpness: f64,
-    anchor_index: f64,
+    selection_top_k: usize,
     selection_cutoff: f64,
     selection_coverage: f64,
-    prior_tau2: f64,
-    target_prior_edges: f64,
+    selection_draws: usize,
+    selection_seed: u64,
 ) -> SelectionWeightsOutput {
     let n = means.len();
     if n == 0 {
         return SelectionWeightsOutput { weights: Vec::new(), partition_log_confidence: 0.0 };
     }
     assert!(
-        anchor_index.is_finite() && anchor_index >= 0.0 && anchor_index <= (n - 1) as f64,
-        "anchor_index={anchor_index}, must be finite and in [0, num_items - 1 = {}]",
-        n - 1
+        selection_top_k >= 1 && selection_top_k <= n,
+        "selection_top_k={selection_top_k}, must be in [1, num_items = {n}]"
     );
+    assert!(selection_draws >= 1, "selection_draws={selection_draws}, must be >= 1");
 
-    // The anchor: the item at rank `anchor_index` when posterior means are
-    // sorted descending. Fractional indices interpolate linearly between the
-    // two adjacent ranks — for the anchor's mean, variance, and edge count.
-    let mut by_mean: Vec<usize> = (0..n).collect();
-    by_mean.sort_by(|&a, &b| means[b].partial_cmp(&means[a]).unwrap_or(std::cmp::Ordering::Equal));
-    let lo_rank = anchor_index.floor() as usize;
-    let hi_rank = anchor_index.ceil() as usize;
-    let frac = anchor_index - lo_rank as f64;
-    let (lo_idx, hi_idx) = (by_mean[lo_rank], by_mean[hi_rank]);
-    let observed_anchor = means[lo_idx] + frac * (means[hi_idx] - means[lo_idx]);
-    let anchor_var = {
-        let var_lo = stds[lo_idx] * stds[lo_idx];
-        let var_hi = stds[hi_idx] * stds[hi_idx];
-        var_lo + frac * (var_hi - var_lo)
-    };
+    // A = each item's chance of being in the top k.
+    let top_k_chances = top_k_probabilities(means, stds, selection_top_k, selection_draws, selection_seed);
 
-    // The selection target: the reference strength each item's uncertainty
-    // ratio is measured against. The observed anchor is unreliable early — it has few edges and,
-    // in binary mode, wins never pin its magnitude — so blend it with a
-    // prior-predicted anchor via a pseudo-count. The prediction is worth
-    // `target_prior_edges` edges against the anchor's actual edge count `g`:
-    //   `target = (g·observed_anchor + K·predicted_anchor) / (g + K)`.
-    // `target_prior_edges = 0` falls straight back to the observed anchor.
-    let target = if target_prior_edges > 0.0 {
-        let predicted_anchor = predicted_rank_strength(means, prior_tau2, anchor_index);
-        let g_lo = edge_counts[lo_idx] as f64;
-        let g_hi = edge_counts[hi_idx] as f64;
-        let g = g_lo + frac * (g_hi - g_lo);
-        (g * observed_anchor + target_prior_edges * predicted_anchor) / (g + target_prior_edges)
-    } else {
-        observed_anchor
-    };
-
-    // Uncertainty ratio per item: A = P(item above the anchor) under the
-    // difference of the two independent Gaussian summaries — the anchor's own
-    // variance widens the split, so a still-uncertain anchor keeps nearby items
-    // in play; the correction fades as the anchor accumulates edges. The ratio
-    // min/max is 1 when the item straddles the anchor and decays toward 0 once
-    // it is confidently on either side. max(A, 1−A) >= 0.5, so the division is
-    // always safe.
-    let ratios: Vec<f64> = (0..n)
-        .map(|i| {
-            let spread = (stds[i] * stds[i] + anchor_var).sqrt();
-            let above = if spread <= 1e-12 {
-                // Degenerate point masses: strictly-above the target counts fully,
-                // exactly-at counts half, below counts nothing.
-                if means[i] > target {
-                    1.0
-                } else if means[i] >= target {
-                    0.5
-                } else {
-                    0.0
-                }
-            } else {
-                normal_cdf((means[i] - target) / spread)
-            };
+    // Uncertainty ratio per item: min/max of the chance of being in vs out of
+    // the top k. 1 when the item is a coin flip for the top k, decaying toward
+    // 0 once it is confidently in or out. max(A, 1−A) >= 0.5, so the division
+    // is always safe.
+    let ratios: Vec<f64> = top_k_chances
+        .iter()
+        .map(|&above| {
             let below = 1.0 - above;
             above.min(below) / above.max(below)
         })
@@ -181,8 +126,10 @@ fn compute_selection_weights(
         })
         .collect();
 
-    // In an extreme finite-precision state every uncertainty ratio can round
-    // to exactly zero, leaving no distribution for top-heavy selection to
+    // Every uncertainty ratio can be exactly zero: in an extreme
+    // finite-precision state where each chance rounds to 0 or 1, or when
+    // `selection_top_k` equals the item count (every item is in the top k with
+    // certainty). That leaves no distribution for top-heavy selection to
     // sample. Keep the run moving by making item selection uniform. This only
     // handles the all-zero case; NaNs and negative weights are not converted by
     // this recovery and remain invalid.
@@ -190,54 +137,90 @@ fn compute_selection_weights(
         weights.fill(1.0);
     }
 
-    // Stopping statistic: ln P(every checked item sits on its
-    // posterior-favored side of the anchor), taking the per-item side
-    // probabilities max(A, 1−A) as independent and summing their logs (the
-    // log domain keeps thousands of near-1 factors from underflowing). Items
-    // far from the anchor contribute ~ln(1) = 0, so the sum is dominated by
-    // the few straddling the boundary. Independence is optimistic in form but
-    // conservative in effect: the side events are positively correlated
-    // through the shared anchor, so the product underestimates the joint
-    // probability and a stop based on it fires late, not early.
-    //
-    // Measured against the OBSERVED anchor, not the blended target: the blend
-    // deliberately inflates the early target toward the prior-predicted anchor
-    // for exploration, and items "confidently below" that inflated boundary
-    // are not resolved against the actual anchor — measuring against the blend
-    // fires spurious stops after the first few refits.
-    //
-    // An integer anchor exempts the anchor item itself (some item must hold
-    // the boundary; its own side probability is ~0.5 by construction and
-    // would floor the product). A fractional anchor exempts NOBODY: the
-    // boundary sits between two items, and both neighbours must resolve
-    // confidently onto their sides of the virtual target — exempting them
-    // would leave the boundary pair unchecked, and with two items would make
-    // the stop fire vacuously on the first fit. The only remaining empty sum
-    // (a single item) gives ln(1) = 0: vacuously certain.
-    let partition_log_confidence = (0..n)
-        .filter(|&i| frac > 0.0 || i != lo_idx)
-        .map(|i| {
-            let spread = (stds[i] * stds[i] + anchor_var).sqrt();
-            let above = if spread <= 1e-12 {
-                // Degenerate point masses: strictly-above counts fully,
-                // exactly-at counts half, below counts nothing.
-                if means[i] > observed_anchor {
+    // Stopping statistic: ln P(every item sits on its posterior-favored side
+    // of the top-k boundary), taking the per-item side probabilities
+    // max(A, 1−A) as independent and summing their logs (the log domain keeps
+    // thousands of near-1 factors from underflowing). Items far from the
+    // boundary contribute ~ln(1) = 0, so the sum is dominated by the few
+    // contesting it. No item is exempt: the k-th item's chance rises toward 1
+    // as it resolves, like any other member of the top k. Order within the top
+    // k does not matter, only membership.
+    let partition_log_confidence = top_k_chances
+        .iter()
+        // Side probability: the favored side's mass, in [0.5, 1] — the log is
+        // finite.
+        .map(|&above| above.max(1.0 - above).ln())
+        .sum::<f64>();
+
+    SelectionWeightsOutput { weights, partition_log_confidence }
+}
+
+/// One standard normal sample, by the Box-Muller transform (avoids a
+/// dependency on `rand_distr`).
+fn standard_normal(rng: &mut rand::rngs::StdRng) -> f64 {
+    use rand::Rng;
+    let u1: f64 = rng.random::<f64>().max(f64::MIN_POSITIVE);
+    let u2: f64 = rng.random();
+    (-2.0 * u1.ln()).sqrt() * (2.0 * std::f64::consts::PI * u2).cos()
+}
+
+/// Per-item chance of being among the `top_k` strongest when every item's
+/// strength is drawn independently from its posterior `N(mean, std²)` and the
+/// whole field is ranked. Estimated from `draws` random draws of the field,
+/// seeded by `seed`.
+///
+/// Each draw credits item `i` with its exact probability of beating the bar it
+/// has to clear — the `top_k`-th strongest of the OTHER items' drawn values —
+/// rather than a 0/1 indicator of whether its own drawn value made the cut. The
+/// estimate is therefore smooth: a small chance is never rounded to zero just
+/// because the item never made the top k in any draw.
+///
+/// With `top_k` equal to the item count every item is in the top k with
+/// certainty.
+fn top_k_probabilities(means: &[f64], stds: &[f64], top_k: usize, draws: usize, seed: u64) -> Vec<f64> {
+    use rand::SeedableRng;
+    let n = means.len();
+    if top_k >= n {
+        return vec![1.0; n];
+    }
+    let mut rng = rand::rngs::StdRng::seed_from_u64(seed);
+    let mut totals = vec![0.0f64; n];
+    let mut values = vec![0.0f64; n];
+    // The `top_k + 1` largest drawn values, descending. `top_k < n`, so there
+    // are always that many.
+    let mut strongest: Vec<f64> = Vec::with_capacity(n);
+    for _ in 0..draws {
+        for i in 0..n {
+            values[i] = means[i] + stds[i] * standard_normal(&mut rng);
+        }
+        strongest.clear();
+        strongest.extend_from_slice(&values);
+        if top_k + 1 < n {
+            strongest.select_nth_unstable_by(top_k, |a, b| b.total_cmp(a));
+            strongest.truncate(top_k + 1);
+        }
+        strongest.sort_by(|a, b| b.total_cmp(a));
+        for i in 0..n {
+            // The `top_k`-th strongest of the others: if item i's own drawn
+            // value is among the top k of the full draw, the others' k-th
+            // strongest is one place further down.
+            let bar = if values[i] >= strongest[top_k - 1] { strongest[top_k] } else { strongest[top_k - 1] };
+            totals[i] += if stds[i] <= 1e-12 {
+                // Degenerate point mass: strictly above the bar counts fully,
+                // exactly at it counts half, below counts nothing.
+                if means[i] > bar {
                     1.0
-                } else if means[i] >= observed_anchor {
+                } else if means[i] >= bar {
                     0.5
                 } else {
                     0.0
                 }
             } else {
-                normal_cdf((means[i] - observed_anchor) / spread)
+                normal_cdf((means[i] - bar) / stds[i])
             };
-            // Side probability: the favored side's mass, in [0.5, 1] — the
-            // log is finite.
-            above.max(1.0 - above).ln()
-        })
-        .sum::<f64>();
-
-    SelectionWeightsOutput { weights, partition_log_confidence }
+        }
+    }
+    totals.iter().map(|total| (total / draws as f64).clamp(0.0, 1.0)).collect()
 }
 
 /// Run Laplace Bradley-Terry scoring on edge data.
@@ -256,8 +239,8 @@ fn compute_selection_weights(
 /// - `item_ids` contains a duplicate ID
 /// - an edge references an item ID not present in `item_ids`
 /// - an edge's `judge_id` is not present in `judge_info.judge_ids`
-/// - `options.selection_sharpness` is set and `options.anchor_index` is not
-///   finite or lies outside `[0, item_ids.len() - 1]`
+/// - `options.selection_sharpness` is set and `options.selection_top_k` lies
+///   outside `[1, item_ids.len()]`, or `options.selection_draws` is 0
 pub fn run_scoring(
     item_ids: &[i64],
     edges: &[Edge],
@@ -305,41 +288,6 @@ fn z_for_confidence(confidence_level: f64) -> f64 {
         }
     }
     0.5 * (lo + hi)
-}
-
-/// Inverse standard-normal CDF (probit) for an arbitrary probability `p` in
-/// (0, 1), via bisection on `normal_cdf`. Returns `z` such that
-/// `normal_cdf(z) = p`. Used to place the prior-predicted anchor strength.
-fn inverse_normal_cdf(p: f64) -> f64 {
-    let (mut lo, mut hi) = (-10.0_f64, 10.0_f64);
-    for _ in 0..100 {
-        let mid = 0.5 * (lo + hi);
-        if normal_cdf(mid) < p {
-            lo = mid;
-        } else {
-            hi = mid;
-        }
-    }
-    0.5 * (lo + hi)
-}
-
-/// Prior-predicted strength of the item at rank `anchor_index` (0-based from
-/// the top, fractional allowed): the expected `(anchor_index + 1)`-th largest
-/// of `n` draws from the strength prior `N(center, prior_tau2)`, where `center`
-/// is the observed mean of the posterior means (which is well-determined even
-/// when individual magnitudes are not). The expected order statistic is
-/// approximated by Blom's plotting position for the r-th largest,
-/// `Φ⁻¹((n − r + 0.625)/(n + 0.25))` with `r = anchor_index + 1`, scaled by the
-/// prior std and shifted to the observed center. Continuous in `anchor_index`,
-/// so fractional anchors need no separate interpolation; `anchor_index = 0`
-/// reproduces the classic `E[max]` position `Φ⁻¹((n − 0.375)/(n + 0.25))`.
-fn predicted_rank_strength(means: &[f64], prior_tau2: f64, anchor_index: f64) -> f64 {
-    let n = means.len();
-    let center = means.iter().sum::<f64>() / n as f64;
-    let sigma0 = prior_tau2.max(0.0).sqrt();
-    let nf = n as f64;
-    let p = (nf - anchor_index - 0.375) / (nf + 0.25);
-    center + sigma0 * inverse_normal_cdf(p)
 }
 
 /// Numerically stable sigmoid.
@@ -400,18 +348,18 @@ fn build_scoring_result(
         edges_per_judge[k] += 1;
     }
 
-    // Selection weights reuse the shared Gaussian-area helper on (mean, std).
+    // Selection weights from each item's posterior summary (mean, std).
     let selection = options.selection_sharpness.map(|sharpness| {
         compute_selection_weights(
             &fit.means,
             &fit.stds,
             &edges_per_item,
             sharpness,
-            options.anchor_index,
+            options.selection_top_k,
             options.selection_cutoff,
             options.selection_coverage,
-            options.prior_tau2,
-            options.target_prior_edges,
+            options.selection_draws,
+            options.selection_seed,
         )
     });
     let (selection_weights, partition_log_confidence) = match selection {
@@ -506,10 +454,11 @@ mod tests {
         ScoringOptions {
             confidence_level: 0.95,
             selection_sharpness: None,
-            anchor_index: 0.0,
+            selection_top_k: 1,
             selection_cutoff: 0.05,
             selection_coverage: 0.0,
-            target_prior_edges: 10.0,
+            selection_draws: 1000,
+            selection_seed: 7,
             regularization_strength: 0.01,
             prior_tau2: 10.0,
             bias_prior_tau2: 2.0,
@@ -804,313 +753,219 @@ mod tests {
     }
 
     #[test]
-    fn test_compute_selection_weights_leader_and_ordering() {
-        // means descending; with anchor_index 0 the leader straddles its own
-        // mean (A = 0.5) so its ratio is exactly 1, and weights must decrease
-        // with distance below the leader.
-        let means = vec![2.0, 1.5, 1.0, 0.0];
-        let stds = vec![0.5, 0.5, 0.5, 0.5];
-        let edges = vec![10, 10, 10, 10];
-        // sharpness 1, no cutoff, no coverage pull → pure ratio.
-        let w = compute_selection_weights(&means, &stds, &edges, 1.0, 0.0, 0.0, 0.0, 10.0, 0.0).weights;
-        assert!((w[0] - 1.0).abs() < 1e-6, "leader ratio should be 1, got {}", w[0]);
-        assert!(w[0] > w[1] && w[1] > w[2] && w[2] > w[3]);
+    fn test_top_k_probabilities_two_items_match_closed_form() {
+        // With two items and k = 1 the chance is P(x0 > x1) =
+        // Φ((m0 − m1) / sqrt(s0² + s1²)).
+        let means = vec![1.0, 0.0];
+        let stds = vec![0.6, 0.8];
+        let chances = top_k_probabilities(&means, &stds, 1, 20_000, 11);
+        let expected = normal_cdf(1.0 / (0.36f64 + 0.64).sqrt());
+        assert!((chances[0] - expected).abs() < 0.01, "got {}, expected {expected}", chances[0]);
+        assert!((chances[1] - (1.0 - expected)).abs() < 0.01, "got {}", chances[1]);
+    }
+
+    #[test]
+    fn test_top_k_probabilities_sum_to_k_and_follow_the_means() {
+        let means = vec![2.0, 1.5, 1.0, 0.5, 0.0, -0.5];
+        let stds = vec![0.7; 6];
+        let chances = top_k_probabilities(&means, &stds, 2, 4000, 3);
+        assert!(chances.iter().all(|&c| (0.0..=1.0).contains(&c)));
+        // Exactly two items are in the top 2 of every draw, so the chances sum
+        // to 2 (up to sampling noise).
+        let sum: f64 = chances.iter().sum();
+        assert!((sum - 2.0).abs() < 0.1, "chances should sum to k = 2, got {sum}");
+        for pair in chances.windows(2) {
+            assert!(pair[0] > pair[1], "chances should fall with the mean: {chances:?}");
+        }
+    }
+
+    #[test]
+    fn test_top_k_probabilities_small_chance_is_never_zero() {
+        // Item 1 is four standard deviations behind: its true chance of being
+        // first is about 0.002. Ten draws would almost never see it win, but
+        // the smooth estimate still credits it a small positive chance.
+        let means = vec![4.0, 0.0];
+        let stds = vec![1.0, 1.0];
+        let chances = top_k_probabilities(&means, &stds, 1, 10, 5);
+        assert!(chances[1] > 0.0 && chances[1] < 0.05, "got {}", chances[1]);
+    }
+
+    #[test]
+    fn test_top_k_probabilities_seed_reproducible_and_fresh() {
+        let means = vec![1.0, 0.5, 0.0, -0.5];
+        let stds = vec![0.8; 4];
+        let first = top_k_probabilities(&means, &stds, 2, 200, 42);
+        let same = top_k_probabilities(&means, &stds, 2, 200, 42);
+        let other = top_k_probabilities(&means, &stds, 2, 200, 43);
+        assert_eq!(first, same, "same seed must reproduce the same chances");
+        assert_ne!(first, other, "a different seed must give different draws");
+    }
+
+    #[test]
+    fn test_top_k_equal_to_item_count_is_certain_for_everyone() {
+        // Every item is in the top n of n: all chances are 1, every ratio is 0,
+        // so selection falls back to uniform and the partition is fully
+        // resolved.
+        let means = vec![1.0, 0.0, -1.0];
+        let stds = vec![1.0, 1.0, 1.0];
+        let edges = vec![5, 5, 5];
+        assert_eq!(top_k_probabilities(&means, &stds, 3, 100, 1), vec![1.0, 1.0, 1.0]);
+        let out = compute_selection_weights(&means, &stds, &edges, 1.0, 3, 0.0, 0.0, 100, 1);
+        assert_eq!(out.weights, vec![1.0, 1.0, 1.0]);
+        assert_eq!(out.partition_log_confidence, 0.0);
     }
 
     #[test]
     fn test_all_zero_selection_weights_become_uniform() {
-        // A fractional anchor halfway across a huge gap puts every finite-width
-        // posterior so far into a normal tail that the ordinary CDF calculation
-        // rounds all uncertainty ratios to zero. Selection must remain defined.
-        let means = vec![100.0, 0.0, -100.0];
-        let stds = vec![0.01, 0.01, 0.01];
+        // Point-mass posteriors in a strict order: each item is in the top 1
+        // with chance exactly 1 or 0, so every uncertainty ratio is zero.
+        // Selection must remain defined.
+        let means = vec![3.0, 2.0, 1.0];
+        let stds = vec![0.0, 0.0, 0.0];
         let edges = vec![10, 10, 10];
 
-        let out = compute_selection_weights(
-            &means, &stds, &edges, 1.0, 0.5, 0.0, 0.0, 10.0, 0.0,
-        );
+        let out = compute_selection_weights(&means, &stds, &edges, 1.0, 1, 0.0, 0.0, 50, 9);
 
         assert_eq!(out.weights, vec![1.0, 1.0, 1.0]);
+        assert_eq!(out.partition_log_confidence, 0.0);
     }
 
     #[test]
-    fn test_target_blend_pulls_toward_prediction_early_then_observed() {
-        // 50 items whose observed top (0.5) is modest, but the strength prior
-        // (tau2 = 10 → σ₀ ≈ 3.16) predicts a much higher top over 50 draws. When
-        // the leader has few edges the prediction dominates the target, so even
-        // the leader sits confidently below it (ratio ≪ 1). As the leader's edge
-        // count grows the observed top takes over, the leader straddles the
-        // target again, and its ratio returns toward 1.
-        let n = 50;
-        let mut means = vec![0.0; n];
-        means[0] = 0.5; // modest observed top
-        let stds = vec![1.0; n];
-        let prior_tau2 = 10.0;
-
-        // Few edges on the leader → prediction-dominated target → ratio ≪ 1.
-        let mut edges_few = vec![10usize; n];
-        edges_few[0] = 2;
-        let w_early = compute_selection_weights(&means, &stds, &edges_few, 1.0, 0.0, 0.0, 0.0, prior_tau2, 10.0).weights;
-        assert!(w_early[0] < 0.45, "early: leader ratio should be pulled well below 1, got {}", w_early[0]);
-
-        // Many edges on the leader → observed-dominated target → ratio near 1.
-        let mut edges_many = vec![10usize; n];
-        edges_many[0] = 1000;
-        let w_late = compute_selection_weights(&means, &stds, &edges_many, 1.0, 0.0, 0.0, 0.0, prior_tau2, 10.0).weights;
-        assert!(w_late[0] > 0.8, "late: leader ratio should approach 1, got {}", w_late[0]);
-        assert!(w_late[0] > w_early[0]);
-
-        // Blend disabled (prior edges = 0) → leader exactly at ratio 1 regardless of edges.
-        let w_off = compute_selection_weights(&means, &stds, &edges_few, 1.0, 0.0, 0.0, 0.0, prior_tau2, 0.0).weights;
-        assert!((w_off[0] - 1.0).abs() < 1e-8, "blend off: leader ratio should be 1, got {}", w_off[0]);
+    fn test_selection_top_k_moves_the_focus_down_the_ranking() {
+        // Ten evenly spaced items. Aiming at first place, the weight sits on
+        // the two items contesting it; aiming at the top 5, it sits on the 5th
+        // and 6th items, which contest that boundary.
+        let means: Vec<f64> = (0..10).map(|i| (9 - i) as f64).collect();
+        let stds = vec![0.5; 10];
+        let edges = vec![10; 10];
+        let heaviest_two = |top_k: usize| {
+            let weights = compute_selection_weights(&means, &stds, &edges, 1.0, top_k, 0.0, 0.0, 2000, 17).weights;
+            let mut order: Vec<usize> = (0..10).collect();
+            order.sort_by(|&a, &b| weights[b].total_cmp(&weights[a]));
+            let mut top = vec![order[0], order[1]];
+            top.sort();
+            top
+        };
+        assert_eq!(heaviest_two(1), vec![0, 1]);
+        assert_eq!(heaviest_two(5), vec![4, 5]);
     }
 
     #[test]
-    fn test_anchor_index_moves_anchor_down_the_ranking() {
-        // With anchor_index 1.0 the 2nd-best item becomes the anchor: it sits
-        // at ratio 1 (maximum focus), while items equidistant on either side
-        // of it get equal, lower weight — the leader is no longer special once
-        // it is confidently above the boundary. Blend disabled so the target
-        // is the pure observed anchor.
-        let means = vec![2.0, 1.5, 1.0, 0.0];
+    fn test_selection_weights_fall_away_from_the_boundary() {
+        // Aiming at first place: the two front-runners are close to a coin
+        // flip for it, and weight falls with distance behind them.
+        let means = vec![2.0, 1.9, 1.0, 0.0];
         let stds = vec![0.5, 0.5, 0.5, 0.5];
         let edges = vec![10, 10, 10, 10];
-        let w = compute_selection_weights(&means, &stds, &edges, 1.0, 1.0, 0.0, 0.0, 10.0, 0.0).weights;
-        assert!((w[1] - 1.0).abs() < 1e-6, "anchor (rank 1) ratio should be 1, got {}", w[1]);
-        assert!(w[1] > w[0], "anchor should outweigh the confident leader");
-        assert!(
-            (w[0] - w[2]).abs() < 1e-9,
-            "items equidistant above/below the anchor should weigh the same: {} vs {}",
-            w[0], w[2]
-        );
-        assert!(w[2] > w[3], "farther below the anchor should weigh less");
+        let w = compute_selection_weights(&means, &stds, &edges, 1.0, 1, 0.0, 0.0, 4000, 23).weights;
+        assert!(w[0] > w[2] && w[1] > w[2] && w[2] > w[3], "got {w:?}");
+        assert!(w[3] > 0.0, "a distant item keeps a small positive weight");
     }
 
     #[test]
-    fn test_anchor_index_fractional_interpolates() {
-        // anchor_index 0.5 targets the midpoint of the rank-0 and rank-1 means
-        // (2.0 and 1.5 → 1.75). The two items sit at ±0.25 from that target,
-        // with combined spread √(σ² + σ_anchor²) = √0.5, so both get the
-        // identical ratio Φ(−0.25/√0.5)/Φ(0.25/√0.5). Also continuous:
-        // every weight lies strictly between its anchor-0 and anchor-1 weights.
-        let means = vec![2.0, 1.0, 1.5, 0.0];
+    fn test_selection_cutoff_drops_all_but_the_two_highest_ratios() {
+        let means = vec![2.0, 1.9, 1.0, 0.0];
         let stds = vec![0.5, 0.5, 0.5, 0.5];
         let edges = vec![10, 10, 10, 10];
-        let w_mid = compute_selection_weights(&means, &stds, &edges, 1.0, 0.5, 0.0, 0.0, 10.0, 0.0).weights;
-        let z = 0.25 / 0.5_f64.sqrt();
-        let expected = normal_cdf(-z) / normal_cdf(z);
-        assert!((w_mid[0] - expected).abs() < 1e-6, "leader ratio should be Φ(−z)/Φ(z), got {}", w_mid[0]);
-        assert!((w_mid[2] - expected).abs() < 1e-6, "rank-1 ratio should be Φ(−z)/Φ(z), got {}", w_mid[2]);
-
-        let w0 = compute_selection_weights(&means, &stds, &edges, 1.0, 0.0, 0.0, 0.0, 10.0, 0.0).weights;
-        let w1 = compute_selection_weights(&means, &stds, &edges, 1.0, 1.0, 0.0, 0.0, 10.0, 0.0).weights;
-        for i in 0..means.len() {
-            assert!(
-                w_mid[i] > w0[i].min(w1[i]) && w_mid[i] < w0[i].max(w1[i]),
-                "fractional anchor weight should sit strictly between integer-anchor weights for item {i}"
-            );
-        }
+        let w = compute_selection_weights(&means, &stds, &edges, 1.0, 1, 0.99, 0.0, 4000, 23).weights;
+        assert!(w[0] > 0.0 && w[1] > 0.0, "the two highest ratios are always kept: {w:?}");
+        assert_eq!(w[2], 0.0);
+        assert_eq!(w[3], 0.0);
     }
 
     #[test]
-    fn test_anchor_std_zero_reduces_to_point_target() {
-        // With the anchor's std at 0 the combined spread collapses to the
-        // item's own std, so every ratio must equal the plain point-target
-        // split Φ((mean − target)/std) — the pre-integration formula.
-        let means = vec![2.0, 1.0, 0.0];
-        let stds = vec![0.0, 0.8, 0.4]; // anchor (rank 0) is a point mass
-        let edges = vec![10, 10, 10];
-        let w = compute_selection_weights(&means, &stds, &edges, 1.0, 0.0, 0.0, 0.0, 10.0, 0.0).weights;
-        assert!((w[0] - 1.0).abs() < 1e-12, "anchor ratio should be 1, got {}", w[0]);
-        for i in 1..3 {
-            let a = normal_cdf((means[i] - means[0]) / stds[i]);
-            let expected = a.min(1.0 - a) / a.max(1.0 - a);
-            assert!(
-                (w[i] - expected).abs() < 1e-12,
-                "item {i}: expected point-target ratio {expected}, got {}",
-                w[i]
-            );
-        }
+    fn test_partition_log_confidence_sums_every_items_side_probability() {
+        let means = vec![2.0, 1.2, 1.0, 0.0, -1.0];
+        let stds = vec![0.4, 0.5, 0.6, 0.5, 0.4];
+        let edges = vec![10; 5];
+        let (top_k, draws, seed) = (2, 500, 31);
+        let out = compute_selection_weights(&means, &stds, &edges, 1.0, top_k, 0.0, 0.0, draws, seed);
+        let expected: f64 = top_k_probabilities(&means, &stds, top_k, draws, seed)
+            .iter()
+            .map(|&above| above.max(1.0 - above).ln())
+            .sum();
+        assert!((out.partition_log_confidence - expected).abs() < 1e-12);
+        assert!(out.partition_log_confidence < 0.0);
     }
 
     #[test]
-    fn test_anchor_uncertainty_keeps_boundary_items_in_play() {
-        // Same means and item stds, but an uncertain anchor: an item
-        // confidently below a *tight* anchor may still straddle an *uncertain*
-        // one, so its ratio must rise with the anchor's std — and anneal back
-        // as the anchor tightens. The anchor itself stays at ratio 1.
-        let means = vec![2.0, 0.5, 0.0];
-        let edges = vec![10, 10, 10];
-        let tight = compute_selection_weights(
-            &means, &[0.1, 0.5, 0.5], &edges, 1.0, 0.0, 0.0, 0.0, 10.0, 0.0,
-        ).weights;
-        let loose = compute_selection_weights(
-            &means, &[1.5, 0.5, 0.5], &edges, 1.0, 0.0, 0.0, 0.0, 10.0, 0.0,
-        ).weights;
-        assert!((tight[0] - 1.0).abs() < 1e-6, "tight anchor ratio should be 1, got {}", tight[0]);
-        assert!((loose[0] - 1.0).abs() < 1e-6, "loose anchor ratio should be 1, got {}", loose[0]);
-        assert!(
-            loose[1] > tight[1] && loose[2] > tight[2],
-            "uncertain anchor should raise below-boundary ratios: {} vs {}, {} vs {}",
-            loose[1], tight[1], loose[2], tight[2]
-        );
+    fn test_partition_log_confidence_tied_pair_is_two_coin_flips() {
+        // Two identical point masses contesting first place: each is in the
+        // top 1 with chance exactly 0.5, and both count — nobody is exempt.
+        let means = vec![1.0, 1.0];
+        let stds = vec![0.0, 0.0];
+        let edges = vec![10, 10];
+        let out = compute_selection_weights(&means, &stds, &edges, 1.0, 1, 0.0, 0.0, 20, 1);
+        assert!((out.partition_log_confidence - 2.0 * 0.5f64.ln()).abs() < 1e-12);
     }
 
     #[test]
-    fn test_partition_log_confidence_sums_non_anchor_side_probs() {
-        // Anchor rank 0 (item 0) is exempt — its ~0.5 side probability would
-        // floor the product. The statistic is the sum of ln(side prob) over
-        // the other items. Blend disabled so the target is the anchor mean.
+    fn test_partition_log_confidence_rises_as_the_boundary_resolves() {
+        // Same means; tighter posteriors leave less doubt about who is in the
+        // top 2.
+        let means = vec![3.0, 2.0, 1.0, 0.0];
+        let edges = vec![10; 4];
+        let loose = compute_selection_weights(&means, &[1.0; 4], &edges, 1.0, 2, 0.0, 0.0, 2000, 13);
+        let tight = compute_selection_weights(&means, &[0.1; 4], &edges, 1.0, 2, 0.0, 0.0, 2000, 13);
+        assert!(tight.partition_log_confidence > loose.partition_log_confidence);
+        assert!(tight.partition_log_confidence > 0.999f64.ln());
+    }
+
+    #[test]
+    #[should_panic(expected = "selection_top_k")]
+    fn test_selection_top_k_beyond_item_count_panics() {
         let means = vec![2.0, 1.0, 0.0];
         let stds = vec![0.5, 0.5, 0.5];
         let edges = vec![10, 10, 10];
-        let out = compute_selection_weights(&means, &stds, &edges, 1.0, 0.0, 0.0, 0.0, 10.0, 0.0);
-        let spread = (0.25_f64 + 0.25).sqrt();
-        let p1 = normal_cdf((2.0 - 1.0) / spread); // item 1's favored-side mass
-        let p2 = normal_cdf((2.0 - 0.0) / spread); // item 2's favored-side mass
-        let expected = p1.ln() + p2.ln();
-        assert!(
-            (out.partition_log_confidence - expected).abs() < 1e-12,
-            "expected ln(p1)+ln(p2) = {expected}, got {}",
-            out.partition_log_confidence
-        );
-        assert!(out.partition_log_confidence < 0.0, "less than certain");
-        assert!(
-            out.partition_log_confidence > 0.5_f64.ln(),
-            "anchor's ~0.5 side probability must be excluded from the product"
-        );
+        compute_selection_weights(&means, &stds, &edges, 1.0, 4, 0.0, 0.0, 100, 1);
     }
 
     #[test]
-    fn test_partition_log_confidence_fractional_anchor_checks_neighbours() {
-        // A fractional anchor sits BETWEEN two items, so neither neighbour is
-        // exempt: the boundary pair itself must resolve against the virtual
-        // target. Here the neighbours (2.0 and 1.5) straddle the 1.75 midpoint
-        // far more than the distant third item, so they dominate the
-        // statistic and keep the stop from firing.
-        let means = vec![2.0, 1.5, -3.0];
+    #[should_panic(expected = "selection_top_k")]
+    fn test_selection_top_k_zero_panics() {
+        let means = vec![2.0, 1.0, 0.0];
         let stds = vec![0.5, 0.5, 0.5];
         let edges = vec![10, 10, 10];
-        let out = compute_selection_weights(&means, &stds, &edges, 1.0, 0.5, 0.0, 0.0, 10.0, 0.0);
-        let target = 1.75; // midpoint of the two anchor-rank means
-        let spread = (0.25_f64 + 0.25).sqrt();
-        let p_neighbour = normal_cdf(0.25 / spread); // each neighbour, ±0.25 from the midpoint
-        let p_third = normal_cdf((target - -3.0) / spread);
-        let expected = 2.0 * p_neighbour.ln() + p_third.ln();
-        assert!(
-            (out.partition_log_confidence - expected).abs() < 1e-12,
-            "expected 2·ln(p_neighbour)+ln(p_third) = {expected}, got {}",
-            out.partition_log_confidence
-        );
-        assert!(
-            out.partition_log_confidence < 0.95_f64.ln(),
-            "unresolved boundary must block a 95% stop"
-        );
+        compute_selection_weights(&means, &stds, &edges, 1.0, 0, 0.0, 0.0, 100, 1);
     }
 
     #[test]
-    fn test_partition_log_confidence_two_items_fractional_anchor_not_vacuous() {
-        // Regression: two items with anchor_index 0.5 used to exempt both,
-        // making the statistic an empty sum of 0.0 = ln(1) — an unconditional
-        // stop on the first fit. Both items must now resolve against the
-        // midpoint boundary.
-        let means = vec![1.0, 0.0];
-        let stds = vec![0.5, 0.5];
-        let edges = vec![10, 10];
-        let out = compute_selection_weights(&means, &stds, &edges, 1.0, 0.5, 0.0, 0.0, 10.0, 0.0);
-        let spread = (0.25_f64 + 0.25).sqrt();
-        let p = normal_cdf(0.5 / spread); // each item, ±0.5 from the midpoint
-        let expected = 2.0 * p.ln();
-        assert!(
-            (out.partition_log_confidence - expected).abs() < 1e-12,
-            "expected 2·ln(p) = {expected}, got {}",
-            out.partition_log_confidence
-        );
-        assert!(
-            out.partition_log_confidence < 0.95_f64.ln(),
-            "must not read as vacuously resolved"
-        );
-    }
-
-    #[test]
-    fn test_partition_log_confidence_ignores_target_blend() {
-        // Regression: early in a run the target blend inflates the selection
-        // target toward the prior-predicted anchor, so every item sits
-        // "confidently below" a boundary that is not the anchor and the
-        // selection ratios collapse. The stopping statistic must measure
-        // against the observed anchor instead and stay high — otherwise a
-        // confidence-based early stop fires after the first uniform refit.
-        let n = 50;
-        let mut means = vec![0.0; n];
-        means[0] = 0.5; // modest observed leader, far below the predicted max
-        let stds = vec![1.0; n];
-        let mut edges = vec![10usize; n];
-        edges[0] = 2; // few anchor edges → blend dominated by the prediction
-        let out = compute_selection_weights(&means, &stds, &edges, 1.0, 0.0, 0.0, 0.0, 10.0, 10.0);
-        // Selection sees everyone (leader included) below the blended target.
-        assert!(out.weights[0] < 0.45, "sanity: blend should crush the leader's weight, got {}", out.weights[0]);
-        // The stopper sees items 1..n straddling the observed anchor (gap 0.5,
-        // spread sqrt(2)): 49 items at side probability ~0.64 multiply to a
-        // partition confidence near zero — nowhere near any stop threshold.
-        assert!(
-            out.partition_log_confidence < -1.0,
-            "partition confidence must stay far below any stop threshold under a blend-dominated target, got {}",
-            out.partition_log_confidence
-        );
-    }
-
-    #[test]
-    fn test_predicted_rank_strength_decreases_with_anchor_index() {
-        // The predicted order statistic must decrease monotonically as the
-        // anchor moves down the ranking, and anchor 0 must reproduce the
-        // classic E[max] plotting position.
-        let means = vec![0.0; 20];
-        let prior_tau2 = 10.0;
-        let p0 = predicted_rank_strength(&means, prior_tau2, 0.0);
-        let p_half = predicted_rank_strength(&means, prior_tau2, 0.5);
-        let p1 = predicted_rank_strength(&means, prior_tau2, 1.0);
-        let p9 = predicted_rank_strength(&means, prior_tau2, 9.0);
-        assert!(p0 > p_half && p_half > p1 && p1 > p9);
-        let nf = 20.0_f64;
-        let expected_max = prior_tau2.sqrt() * inverse_normal_cdf((nf - 0.375) / (nf + 0.25));
-        assert!((p0 - expected_max).abs() < 1e-9);
-    }
-
-    #[test]
-    #[should_panic(expected = "anchor_index")]
-    fn test_anchor_index_beyond_last_item_panics() {
-        let means = vec![1.0, 0.0];
-        let stds = vec![0.5, 0.5];
-        let edges = vec![10, 10];
-        compute_selection_weights(&means, &stds, &edges, 1.0, 1.5, 0.0, 0.0, 10.0, 0.0);
+    #[should_panic(expected = "selection_draws")]
+    fn test_selection_draws_zero_panics() {
+        let means = vec![2.0, 1.0, 0.0];
+        let stds = vec![0.5, 0.5, 0.5];
+        let edges = vec![10, 10, 10];
+        compute_selection_weights(&means, &stds, &edges, 1.0, 1, 0.0, 0.0, 0, 1);
     }
 
     #[test]
     fn test_compute_selection_weights_sharpness_flattens() {
-        // Lower sharpness compresses the leader-to-tail ratio.
-        let means = vec![2.0, 1.0];
-        let stds = vec![1.0, 1.0];
-        let edges = vec![10, 10];
-        let sharp = compute_selection_weights(&means, &stds, &edges, 1.0, 0.0, 0.0, 0.0, 10.0, 0.0).weights;
-        let soft = compute_selection_weights(&means, &stds, &edges, 0.5, 0.0, 0.0, 0.0, 10.0, 0.0).weights;
-        let ratio_sharp = sharp[0] / sharp[1];
-        let ratio_soft = soft[0] / soft[1];
+        // Lower sharpness compresses the contender-to-tail ratio.
+        let means = vec![1.0, 0.8, -1.0];
+        let stds = vec![1.0, 1.0, 1.0];
+        let edges = vec![10, 10, 10];
+        let sharp = compute_selection_weights(&means, &stds, &edges, 1.0, 1, 0.0, 0.0, 2000, 3).weights;
+        let soft = compute_selection_weights(&means, &stds, &edges, 0.5, 1, 0.0, 0.0, 2000, 3).weights;
+        let ratio_sharp = sharp[0] / sharp[2];
+        let ratio_soft = soft[0] / soft[2];
+        assert!(ratio_sharp > 1.0);
         assert!(ratio_soft < ratio_sharp, "lower sharpness should flatten the ratio");
     }
 
     #[test]
     fn test_compute_selection_weights_coverage_pull() {
-        // Two items with identical posteriors (so identical area), but one has
-        // been accumulated far more. With coverage = 0 their weights match; with
-        // coverage > 0 the under-accumulated item is boosted above the over-accumulated one.
+        // Two identical point masses (each exactly a coin flip for first
+        // place, so identical ratios), but one has been accumulated far more.
+        // With coverage = 0 their weights match; with coverage > 0 the
+        // under-accumulated item is boosted above the over-accumulated one.
         let means = vec![1.0, 1.0];
-        let stds = vec![1.0, 1.0];
+        let stds = vec![0.0, 0.0];
         let edges = vec![2, 50]; // item 0 under-served, item 1 over-served
 
-        let no_pull = compute_selection_weights(&means, &stds, &edges, 1.0, 0.0, 0.0, 0.0, 10.0, 0.0).weights;
+        let no_pull = compute_selection_weights(&means, &stds, &edges, 1.0, 1, 0.0, 0.0, 20, 1).weights;
         assert!((no_pull[0] - no_pull[1]).abs() < 1e-12, "coverage 0 should ignore edges");
 
-        let pull = compute_selection_weights(&means, &stds, &edges, 1.0, 0.0, 0.0, 1.0, 10.0, 0.0).weights;
+        let pull = compute_selection_weights(&means, &stds, &edges, 1.0, 1, 0.0, 1.0, 20, 1).weights;
         assert!(
             pull[0] > pull[1],
             "under-served item should outweigh over-served one under coverage pull: {} vs {}",

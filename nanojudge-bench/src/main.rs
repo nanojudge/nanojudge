@@ -59,10 +59,15 @@ struct Args {
     #[arg(long)]
     selection_sharpness: Option<f64>,
 
-    /// Top-heavy anchor rank forwarded to the CLI (0-based, fractional
-    /// interpolates). Omit to use the CLI's default (0 = anchor on the leader).
+    /// How many top places top-heavy selection aims to settle, forwarded to
+    /// the CLI. Omit to use the CLI's default (1 = first place).
     #[arg(long)]
-    anchor_index: Option<f64>,
+    selection_top_k: Option<usize>,
+
+    /// Random draws per refit for the top-k chance estimate, forwarded to the
+    /// CLI. Omit to use the CLI's default (1000).
+    #[arg(long)]
+    selection_draws: Option<usize>,
 
     /// Top-heavy selection cutoff forwarded to the CLI. Omit to use the CLI's
     /// default (0 = no cutoff).
@@ -74,14 +79,10 @@ struct Args {
     #[arg(long)]
     coverage: Option<f64>,
 
-    /// Target-blend prior pseudo-edges forwarded to the CLI. Omit to use the
-    /// CLI's default (5; 0 disables the blend).
-    #[arg(long)]
-    target_prior_edges: Option<f64>,
-
     /// Early-stop confidence forwarded to the CLI: end a top-heavy run once
-    /// the probability that every item sits on its side of the anchor (the
-    /// product of per-item side probabilities) reaches this value. In
+    /// the probability that every item is on its likelier side of the top-k
+    /// boundary (the product of per-item side probabilities) reaches this
+    /// value. In
     /// (0.5, 1.0). Omit for no early stop (the CLI has no default — the run
     /// then always uses its full budget).
     #[arg(long)]
@@ -198,10 +199,10 @@ struct SharedTrialConfig {
     samples_per_judgement: usize,
     judgement_distribution: String,
     selection_sharpness: Option<f64>,
-    anchor_index: Option<f64>,
+    selection_top_k: Option<usize>,
+    selection_draws: Option<usize>,
     cutoff: Option<f64>,
     coverage: Option<f64>,
-    target_prior_edges: Option<f64>,
     stop_confidence: Option<f64>,
     min_uniform_edges: Option<usize>,
     judgements_per_refit: Option<usize>,
@@ -319,10 +320,10 @@ async fn main() {
         samples_per_judgement: args.samples_per_judgement,
         judgement_distribution: args.judgement_distribution.clone(),
         selection_sharpness: args.selection_sharpness,
-        anchor_index: args.anchor_index,
+        selection_top_k: args.selection_top_k,
+        selection_draws: args.selection_draws,
         cutoff: args.cutoff,
         coverage: args.coverage,
-        target_prior_edges: args.target_prior_edges,
         stop_confidence: args.stop_confidence,
         min_uniform_edges: args.min_uniform_edges,
         judgements_per_refit: args.judgements_per_refit,
@@ -356,10 +357,10 @@ async fn main() {
                 samples_per_judgement: shared.samples_per_judgement,
                 judgement_distribution: &shared.judgement_distribution,
                 selection_sharpness: shared.selection_sharpness,
-                anchor_index: shared.anchor_index,
+                selection_top_k: shared.selection_top_k,
+                selection_draws: shared.selection_draws,
                 cutoff: shared.cutoff,
                 coverage: shared.coverage,
-                target_prior_edges: shared.target_prior_edges,
                 stop_confidence: shared.stop_confidence,
                 min_uniform_edges: shared.min_uniform_edges,
                 judgements_per_refit: shared.judgements_per_refit,

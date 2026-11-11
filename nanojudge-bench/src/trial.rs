@@ -19,10 +19,10 @@ pub struct TrialConfig<'a> {
     pub samples_per_judgement: usize,
     pub judgement_distribution: &'a str,
     pub selection_sharpness: Option<f64>,
-    pub anchor_index: Option<f64>,
+    pub selection_top_k: Option<usize>,
+    pub selection_draws: Option<usize>,
     pub cutoff: Option<f64>,
     pub coverage: Option<f64>,
-    pub target_prior_edges: Option<f64>,
     pub stop_confidence: Option<f64>,
     pub min_uniform_edges: Option<usize>,
     pub judgements_per_refit: Option<usize>,
@@ -154,17 +154,17 @@ pub async fn run(
     if let Some(selection_sharpness) = config.selection_sharpness {
         cmd.arg("--selection-sharpness").arg(selection_sharpness.to_string());
     }
-    if let Some(anchor_index) = config.anchor_index {
-        cmd.arg("--anchor-index").arg(anchor_index.to_string());
+    if let Some(selection_top_k) = config.selection_top_k {
+        cmd.arg("--selection-top-k").arg(selection_top_k.to_string());
+    }
+    if let Some(selection_draws) = config.selection_draws {
+        cmd.arg("--selection-draws").arg(selection_draws.to_string());
     }
     if let Some(cutoff) = config.cutoff {
         cmd.arg("--cutoff").arg(cutoff.to_string());
     }
     if let Some(coverage) = config.coverage {
         cmd.arg("--coverage").arg(coverage.to_string());
-    }
-    if let Some(target_prior_edges) = config.target_prior_edges {
-        cmd.arg("--target-prior-edges").arg(target_prior_edges.to_string());
     }
     if let Some(stop_confidence) = config.stop_confidence {
         cmd.arg("--stop-confidence").arg(stop_confidence.to_string());
