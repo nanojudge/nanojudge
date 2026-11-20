@@ -168,6 +168,12 @@ What we've been missing is an engine for subjective criteria - a way to programm
 
 NanoJudge is **LLM-Sort**. It takes the chaotic, inherently subjective opinions of small, cheap LLMs, runs optimized two-item judgements, and uses Bayesian inference. It is a general-purpose algorithm that turns fuzzy "vibes" into quantified rankings.
 
+### Beyond similarity search
+
+NanoJudge works naturally as a second stage in a search engine, after keyword or embedding search — not as a more accurate version of the same step, but to do a different job.
+
+Consider the query *"which research paper might make my approach obsolete?"* An embedder only measures similarity, so it can't reason about whether one method invalidates another. The embedder's job isn't to find the papers that make your approach obsolete — it's to dismiss the millions that almost certainly don't, because they're about a totally separate topic. NanoJudge then takes the remaining pool and ranks it using an LLM judge that can reason about that query.
+
 ### A coprocessor for agentic systems
 
 NanoJudge is a fundamental building block for AI. When a large LLM needs to choose between 100+ options, stuffing them into a massive context window is expensive, slow, and prone to "lost in the middle" failures.
