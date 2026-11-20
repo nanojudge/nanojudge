@@ -381,10 +381,22 @@ pub async fn send_pair_judgement_request(
     Ok((parse_result, reply))
 }
 
+/// Backoff delay before retrying after a retryable HTTP/network failure:
+/// 1s, 4s, 16s, then capped at 32s.
+fn retry_backoff(attempt: usize) -> Duration {
+    let secs = match attempt {
+        0 => 1,
+        1 => 4,
+        2 => 16,
+        _ => 32,
+    };
+    Duration::from_secs(secs)
+}
+
 /// Send a built pair prompt to the LLM, with retries on HTTP errors.
 /// `item1_name` and `item2_name` only label retry messages.
 ///
-/// Retries up to `max_retries` times with exponential backoff (1s, 4s, 16s).
+/// Retries up to `max_retries` times with exponential backoff (1s, 4s, 16s, capped at 32s).
 /// Only HTTP/network errors trigger retries — unparseable verdicts do not.
 #[allow(clippy::too_many_arguments)]
 pub async fn judge_pair(
@@ -426,8 +438,7 @@ pub async fn judge_pair(
                             judge_name, last_err
                         );
                     }
-                    let backoff = std::time::Duration::from_secs(4u64.pow(attempt as u32).min(16));
-                    tokio::time::sleep(backoff).await;
+                    tokio::time::sleep(retry_backoff(attempt)).await;
                 }
             }
         }
@@ -510,8 +521,7 @@ pub async fn judge_lineup(
                             attempt + 1, max_retries, judge_name, last_err
                         );
                     }
-                    let backoff = std::time::Duration::from_secs(4u64.pow(attempt as u32).min(16));
-                    tokio::time::sleep(backoff).await;
+                    tokio::time::sleep(retry_backoff(attempt)).await;
                 }
             }
         }
@@ -523,6 +533,16 @@ pub async fn judge_lineup(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_retry_backoff_schedule_and_cap() {
+        assert_eq!(retry_backoff(0), Duration::from_secs(1));
+        assert_eq!(retry_backoff(1), Duration::from_secs(4));
+        assert_eq!(retry_backoff(2), Duration::from_secs(16));
+        assert_eq!(retry_backoff(3), Duration::from_secs(32));
+        assert_eq!(retry_backoff(32), Duration::from_secs(32));
+        assert_eq!(retry_backoff(usize::MAX), Duration::from_secs(32));
+    }
 
     #[test]
     fn test_jittered_temperature_no_jitter() {
