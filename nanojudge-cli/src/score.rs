@@ -418,10 +418,15 @@ pub(crate) fn load_edges(
             ];
 
             let sum = probs[0] + probs[1];
-            if !sum.is_finite() || sum <= 0.0 || probs[0] < 0.0 || probs[1] < 0.0 {
+            if !sum.is_finite()
+                || probs[0] < 0.0
+                || probs[1] < 0.0
+                || (sum - 1.0).abs() > 1e-6
+            {
                 eprintln!("Warning: {}:{}: invalid category_probs {:?}, skipping", path.display(), line_num, probs);
                 continue;
             }
+            let probs = [probs[0] / sum, probs[1] / sum];
 
             let key1 = match record.get("item1_text_hash") {
                 Some(v) => match v.as_str() {
@@ -668,7 +673,9 @@ mod tests {
     #[test]
     fn test_invalid_category_probs_skipped() {
         let f = write_jsonl(&[
-            r#"{"refit":0,"item1":"A","item2":"B","category_probs":[0.0,0.0],"judge_model":"m","judge_endpoint":"http://e","logprobs":true}"#,
+            r#"{"refit":0,"item1":"A","item2":"B","item1_text_hash":"34482beefb0cc992","item2_text_hash":"b0e6004ac03e61d2","category_probs":[0.0,0.0],"judge_model":"m","judge_endpoint":"http://e","logprobs":true}"#,
+            r#"{"refit":0,"item1":"A","item2":"B","item1_text_hash":"34482beefb0cc992","item2_text_hash":"b0e6004ac03e61d2","category_probs":[1.5,0.5],"judge_model":"m","judge_endpoint":"http://e","logprobs":true}"#,
+            r#"{"refit":0,"item1":"A","item2":"B","item1_text_hash":"34482beefb0cc992","item2_text_hash":"b0e6004ac03e61d2","category_probs":[0.2,0.2],"judge_model":"m","judge_endpoint":"http://e","logprobs":true}"#,
             r#"{"refit":0,"item1":"C","item2":"D","item1_text_hash":"9188835ed6d49e09","item2_text_hash":"3cec0b494074c4b1","category_probs":[0.6,0.4],"judge_model":"m","judge_endpoint":"http://e","logprobs":true}"#,
         ]);
         let (edges, _, names, _, _, _, total, _, _, _, _) = load_edges(f.path(), Some(1.0), &HashMap::new(), None);

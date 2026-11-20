@@ -296,14 +296,23 @@ fn resolve_save_path(path: &Path, prefix: &str) -> PathBuf {
 /// edge's log-odds by `temperature`. Values > 1 pull overconfident verdicts
 /// toward uniform; 1.0 is the identity. One-hot (text-mode) verdicts are fixed
 /// points, so only logprob-derived verdicts are affected.
+///
+/// Computed in log space relative to the largest entry so small sharpening
+/// temperatures cannot underflow every entry to 0 and produce NaN.
 pub(crate) fn temper_verdict<const N: usize>(mut dist: [f64; N], temperature: f64) -> [f64; N] {
     if temperature == 1.0 {
         return dist;
     }
-    let inv = 1.0 / temperature;
+    let max_q = dist.iter().copied().fold(0.0_f64, f64::max);
+    assert!(max_q > 0.0, "verdict distribution must have positive mass, got {dist:?}");
+    let max_ln = max_q.ln();
     let mut sum = 0.0;
     for q in dist.iter_mut() {
-        *q = q.powf(inv);
+        *q = if *q > 0.0 {
+            ((q.ln() - max_ln) / temperature).exp()
+        } else {
+            0.0
+        };
         sum += *q;
     }
     for q in dist.iter_mut() {
@@ -2082,6 +2091,23 @@ mod tests {
         let expected_log_odds = (0.7f64 / 0.3).ln() / 0.5;
         assert!(((t[0] / t[1]).ln() - expected_log_odds).abs() < 1e-9);
         assert!(t[0] > 0.7);
+    }
+
+    #[test]
+    fn test_temper_verdict_extreme_temperatures_stay_finite() {
+        // Very small sharpening temperatures used to underflow q^(1/T) to 0/0 = NaN.
+        let tied = temper_verdict([0.5, 0.5], 0.0001);
+        assert!((tied[0] - 0.5).abs() < 1e-12 && (tied[1] - 0.5).abs() < 1e-12);
+
+        let subnormal_temp = temper_verdict([0.5, 0.5], 1e-320);
+        assert!((subnormal_temp[0] - 0.5).abs() < 1e-12 && (subnormal_temp[1] - 0.5).abs() < 1e-12);
+
+        let sharp = temper_verdict([0.6, 0.4], 0.0001);
+        assert!(sharp[0].is_finite() && sharp[1].is_finite());
+        assert!((sharp[0] - 1.0).abs() < 1e-12 && sharp[1] == 0.0);
+
+        let huge = temper_verdict([0.9, 0.1], 1e300);
+        assert!((huge[0] - 0.5).abs() < 1e-12 && (huge[1] - 0.5).abs() < 1e-12);
     }
 
     #[test]
