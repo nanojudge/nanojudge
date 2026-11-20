@@ -60,10 +60,12 @@ struct Judged<R> {
 
 /// Judgement results keyed by (judge index, prompt hash). A judge with
 /// deliberation off and `reasoning_effort = "none"` answers an identical prompt
-/// identically when its verdict isn't sampled: in logprobs mode, or in text
-/// mode at temperature 0. A repeat then reuses the stored result instead of
-/// being sent again. It still counts as a judgement of its own, like any other.
-/// Loaded judgements fill the cache too (see `loaded_reuse_entries`).
+/// identically when its verdict isn't sampled: in pairwise logprobs mode, or at
+/// temperature 0 (lineup judgements of 3+ items sample earlier ranks before
+/// conditioning later ones, so they are only deterministic at temperature 0). A
+/// repeat then reuses the stored result instead of being sent again. It still
+/// counts as a judgement of its own, like any other. Loaded judgements fill the
+/// cache too (see `loaded_reuse_entries`).
 type ReuseCache<R> = HashMap<(usize, u64), ReuseCell<R>>;
 
 /// One prompt's entry in a `ReuseCache`: empty until a judgement with a verdict
@@ -112,10 +114,10 @@ where
 }
 
 /// Whether a judge's repeated prompts reuse earlier results (see `ReuseCache`).
-fn reuses_results(judge: &ResolvedJudge, deliberation_enabled: bool) -> bool {
+fn reuses_results(judge: &ResolvedJudge, deliberation_enabled: bool, lineup_size: usize) -> bool {
     !deliberation_enabled
         && judge.reasoning_effort.as_deref() == Some("none")
-        && (judge.logprobs || judge.temperature == 0.0)
+        && ((judge.logprobs && lineup_size == 2) || judge.temperature == 0.0)
 }
 
 /// What one judgement asks: its items in presentation order and the prompt.
@@ -146,12 +148,13 @@ struct LoadedReuse {
 /// Pick the loaded judgements this run can reuse. A loaded judgement qualifies
 /// when its judge reuses results in this run and it was made with the same
 /// deliberation, `reasoning_effort`, `provider` and `chat_template_kwargs`,
-/// and, in text mode, at temperature 0. Every judge in `records` must be in
-/// `judges`.
+/// and, in text mode or lineup mode (size >= 3), at temperature 0. Every judge
+/// in `records` must be in `judges`.
 fn loaded_reuse_entries(
     records: Vec<serde_json::Value>,
     judges: &[ResolvedJudge],
     deliberation_enabled: bool,
+    lineup_size: usize,
     path: &Path,
 ) -> Vec<LoadedReuse> {
     let field = |record: &serde_json::Value, name: &str| -> serde_json::Value {
@@ -174,7 +177,7 @@ fn loaded_reuse_entries(
             .position(|j| j.judge_id == judge_id)
             .expect("seed_prior_edges requires every loaded judge to be in the run");
         let judge = &judges[judge_idx];
-        if !reuses_results(judge, deliberation_enabled) {
+        if !reuses_results(judge, deliberation_enabled, lineup_size) {
             continue;
         }
         let same_settings = field(&record, "deliberation") == serde_json::json!(deliberation_enabled)
@@ -189,7 +192,7 @@ fn loaded_reuse_entries(
             _ => malformed("prompt_hash"),
         };
         let temperature = field(&record, "temperature").as_f64().unwrap_or_else(|| malformed("temperature"));
-        if !judge.logprobs && temperature != 0.0 {
+        if (!judge.logprobs || lineup_size > 2) && temperature != 0.0 {
             continue;
         }
         let hit_max_tokens = field(&record, "hit_max_tokens").as_bool().unwrap_or_else(|| malformed("hit_max_tokens"));
@@ -785,7 +788,7 @@ async fn setup_run(
             &per_judge_verdict_temps,
             resolved.verbose,
         );
-        let reuse = loaded_reuse_entries(records, &judges, resolved.deliberation_enabled, load_path);
+        let reuse = loaded_reuse_entries(records, &judges, resolved.deliberation_enabled, lineup_size, load_path);
         (Some(loaded), reuse)
     } else {
         (None, Vec::new())
@@ -1239,7 +1242,7 @@ pub async fn run(args: RankArgs) {
     let mut early_stop = prime_from_seed(
         &mut engine, &item_ids, &interim_scoring_options, &judge_info, &resolved,
     );
-    let reusing: Vec<bool> = judges.iter().map(|j| reuses_results(j, resolved.deliberation_enabled)).collect();
+    let reusing: Vec<bool> = judges.iter().map(|j| reuses_results(j, resolved.deliberation_enabled, resolved.lineup_size)).collect();
     let mut reuse_cache = seed_reuse_cache(loaded_reuse, loaded_pair_result);
     let mut reused_judgements = 0usize;
     let mut refits_run = 0usize;
@@ -1668,7 +1671,7 @@ async fn run_lineup_judgements(
     let mut early_stop = prime_from_seed(
         &mut engine, &item_ids, &interim_scoring_options, &judge_info, resolved,
     );
-    let reusing: Vec<bool> = judges.iter().map(|j| reuses_results(j, resolved.deliberation_enabled)).collect();
+    let reusing: Vec<bool> = judges.iter().map(|j| reuses_results(j, resolved.deliberation_enabled, lineup_size)).collect();
     let mut reuse_cache = seed_reuse_cache(loaded_reuse, loaded_lineup_result);
     let mut reused_judgements = 0usize;
     let mut refits_run = 0usize;
@@ -2389,8 +2392,8 @@ mod tests {
         })
     }
 
-    fn reused_keys(records: Vec<serde_json::Value>, judge: ResolvedJudge) -> Vec<(usize, u64)> {
-        loaded_reuse_entries(records, &[judge], false, Path::new("f.jsonl"))
+    fn reused_keys(records: Vec<serde_json::Value>, judge: ResolvedJudge, lineup_size: usize) -> Vec<(usize, u64)> {
+        loaded_reuse_entries(records, &[judge], false, lineup_size, Path::new("f.jsonl"))
             .iter()
             .map(|l| l.key)
             .collect()
@@ -2398,18 +2401,23 @@ mod tests {
 
     #[test]
     fn test_reuses_results_only_for_unsampled_verdicts() {
-        assert!(reuses_results(&reuse_judge(0.0, false), false));
-        assert!(reuses_results(&reuse_judge(0.7, true), false));
-        assert!(!reuses_results(&reuse_judge(0.7, false), false));
-        assert!(!reuses_results(&reuse_judge(0.0, false), true));
+        assert!(reuses_results(&reuse_judge(0.0, false), false, 2));
+        assert!(reuses_results(&reuse_judge(0.7, true), false, 2));
+        assert!(!reuses_results(&reuse_judge(0.7, false), false, 2));
+        assert!(!reuses_results(&reuse_judge(0.0, false), true, 2));
         let mut reasoning = reuse_judge(0.0, false);
         reasoning.reasoning_effort = None;
-        assert!(!reuses_results(&reasoning, false));
+        assert!(!reuses_results(&reasoning, false, 2));
+
+        // Lineups (size >= 3) sample earlier ranks before conditioning later
+        // ones, so logprobs mode is only deterministic at temperature 0.
+        assert!(!reuses_results(&reuse_judge(0.7, true), false, 3));
+        assert!(reuses_results(&reuse_judge(0.0, true), false, 3));
     }
 
     #[test]
     fn test_loaded_reuse_keeps_matching_judgement() {
-        let entries = loaded_reuse_entries(vec![reuse_record(0.0)], &[reuse_judge(0.0, false)], false, Path::new("f.jsonl"));
+        let entries = loaded_reuse_entries(vec![reuse_record(0.0)], &[reuse_judge(0.0, false)], false, 2, Path::new("f.jsonl"));
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].key, (0, 0xff));
         assert_eq!(entries[0].temperature, 0.0);
@@ -2427,13 +2435,16 @@ mod tests {
         ] {
             let mut record = reuse_record(0.0);
             record[field] = value;
-            assert!(reused_keys(vec![record], reuse_judge(0.0, false)).is_empty(), "{field}");
+            assert!(reused_keys(vec![record], reuse_judge(0.0, false), 2).is_empty(), "{field}");
         }
     }
 
     #[test]
-    fn test_loaded_reuse_text_mode_needs_temperature_zero() {
-        assert!(reused_keys(vec![reuse_record(0.7)], reuse_judge(0.0, false)).is_empty());
-        assert_eq!(reused_keys(vec![reuse_record(0.7)], reuse_judge(0.7, true)), vec![(0, 0xff)]);
+    fn test_loaded_reuse_text_and_lineup_modes_need_temperature_zero() {
+        assert!(reused_keys(vec![reuse_record(0.7)], reuse_judge(0.0, false), 2).is_empty());
+        assert_eq!(reused_keys(vec![reuse_record(0.7)], reuse_judge(0.7, true), 2), vec![(0, 0xff)]);
+        // Lineups (size >= 3) also require temperature 0 even with logprobs.
+        assert!(reused_keys(vec![reuse_record(0.7)], reuse_judge(0.0, true), 3).is_empty());
+        assert_eq!(reused_keys(vec![reuse_record(0.0)], reuse_judge(0.0, true), 3), vec![(0, 0xff)]);
     }
 }

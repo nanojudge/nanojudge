@@ -27,6 +27,7 @@ pub struct TrialConfig<'a> {
     pub min_uniform_edges: Option<usize>,
     pub judgements_per_refit: Option<usize>,
     pub lineup_size: usize,
+    pub deterministic_repeats: bool,
     pub nanojudge_bin: &'a Path,
 }
 
@@ -102,6 +103,7 @@ pub async fn run(
         strengths,
         seed: server_seed,
         samples_per_judgement: config.samples_per_judgement,
+        deterministic_repeats: config.deterministic_repeats,
         encounter_counts: std::sync::Mutex::new(std::collections::HashMap::new()),
     });
     let (port, server_handle) = server::start(state).await;
@@ -113,6 +115,17 @@ pub async fn run(
     // endpoint can pass empirical sample frequencies through as one soft
     // judgement. This is an implementation detail, not a benchmark mode:
     // `samples_per_judgement = 1` naturally produces a hard judgement.
+    //
+    // In deterministic-repeats mode, set `reasoning_effort = "none"` so the
+    // CLI's real `ReuseCache` runs (modelling a non-reasoning, no-deliberation
+    // judge). In the default stochastic-repeats mode, omit `reasoning_effort`
+    // and set `max_tokens` so `ReuseCache` stays off and every repeat hits the
+    // fake server for an independent draw.
+    let repeat_setting = if config.deterministic_repeats {
+        "reasoning_effort = \"none\"\n"
+    } else {
+        "max_tokens = 256\n"
+    };
     let config_toml = format!(
         "deliberation_enabled = false\n\
          logprobs = true\n\
@@ -122,7 +135,7 @@ pub async fn run(
          endpoint = \"http://127.0.0.1:{port}\"\n\
          model = \"synthetic-judge\"\n\
          temperature = 0.0\n\
-         reasoning_effort = \"none\"\n\
+         {repeat_setting}\
          concurrency = 1\n",
     );
     std::fs::write(config_file.path(), &config_toml).map_err(|e| e.to_string())?;

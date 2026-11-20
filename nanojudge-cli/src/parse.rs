@@ -51,409 +51,26 @@ fn digit_to_index(c: char) -> Option<usize> {
     }
 }
 
-/// Find every occurrence of the marker word `needle` (lowercase ASCII) in the
-/// token stream, regardless of how the tokenizer split it, and return the token
-/// index just past the token holding the end of each occurrence — where the
-/// scan for the following letter should start.
-///
-/// Works on the concatenated token text with a byte-offset table mapping match
-/// positions back to token indices, so it is tokenization-agnostic: the marker
-/// can arrive whole ("Verdict"), split in two ("Ver"+"dict"), or in three
-/// ("V"+"erd"+"ict", as DeepSeek emits it). ASCII lowercasing keeps byte
-/// offsets aligned with the original text.
-///
-/// `word_boundary` requires the match to not butt up against ASCII letters on
-/// either side, so e.g. "options"/"optional" don't count as "option".
-fn marker_scan_starts(tokens: &[&str], needle: &str, word_boundary: bool) -> Vec<usize> {
-    // Concatenated token text plus each token's exclusive end offset into it.
+/// Concatenate all token strings and record each token's exclusive end byte
+/// offset, so any byte position in the combined text maps back to the token
+/// that contains it.
+fn tokens_with_ends(logprobs: &[LogprobContent]) -> (String, Vec<usize>) {
     let mut text = String::new();
-    let mut token_ends = Vec::with_capacity(tokens.len());
-    for t in tokens {
-        text.push_str(t);
+    let mut token_ends = Vec::with_capacity(logprobs.len());
+    for lp in logprobs {
+        text.push_str(&lp.token);
         token_ends.push(text.len());
     }
+    (text, token_ends)
+}
+
+/// Find every "Verdict: Option <digit>" match in `text`, returning
+/// `(digit_byte_pos, option_idx)` in order. Shared by both text mode and
+/// logprobs mode so the two parsers accept the exact same grammar.
+fn find_pairwise_verdicts(text: &str) -> Vec<(usize, usize)> {
     let lower = text.to_ascii_lowercase();
     let bytes = lower.as_bytes();
-
-    let mut starts = Vec::new();
-    let mut from = 0;
-    while let Some(rel) = lower[from..].find(needle) {
-        let begin = from + rel;
-        let end = begin + needle.len();
-        from = begin + 1;
-        if word_boundary {
-            let letter_before = begin > 0 && bytes[begin - 1].is_ascii_alphabetic();
-            let letter_after = end < bytes.len() && bytes[end].is_ascii_alphabetic();
-            if letter_before || letter_after {
-                continue;
-            }
-        }
-        // The token holding the match's last byte; the letter scan starts
-        // after it.
-        let tok_idx = token_ends.partition_point(|&e| e < end);
-        starts.push(tok_idx + 1);
-    }
-    starts
-}
-
-/// Extract the judge's verdict distribution `[P(Option 1), P(Option 2)]` from
-/// logprobs. Returns None if no "Verdict: Option <digit>" line is present,
-/// extraction fails, or the digit mass is below the coverage threshold.
-fn extract_pairwise_probabilities(logprobs: &[LogprobContent], min_logprob_coverage: f64) -> Option<[f64; 2]> {
-    if logprobs.is_empty() {
-        return None;
-    }
-
-    let tokens: Vec<&str> = logprobs.iter().map(|lp| lp.token.as_str()).collect();
-
-    // Collect every "Verdict" marker position. The analysis prose can contain
-    // the word "verdict" (e.g. "reach a fair verdict") before or after the
-    // real "Verdict: Option <digit>" line, so we attempt extraction after each
-    // marker and keep the LAST successful one. Mirrors parse_response_text.
-    // No marker at all means the judge ignored the required format — discard
-    // rather than scan the response start for stray digits.
-    // No word-boundary requirement on "verdict": a spurious match inside a
-    // longer word is harmless because a marker only counts if an "Option"
-    // anchor and a clean, high-coverage digit token follow it.
-    let verdict_starts = marker_scan_starts(&tokens, "verdict", false);
-    // The "Option" anchors, word-boundary-required so prose "options"/"optional"
-    // don't count (same rule as the lineup parser).
-    let option_starts = marker_scan_starts(&tokens, "option", true);
-
-    let mut result = None;
-    for &vstart in &verdict_starts {
-        for &ostart in &option_starts {
-            if ostart < vstart {
-                continue;
-            }
-            // The "Option" anchor must sit right after the verdict marker
-            // (": Option" is at most ~8 single-byte tokens under any split).
-            if ostart > vstart + 10 {
-                break;
-            }
-            if let Some(probs) = extract_digit_after(logprobs, &tokens, ostart, min_logprob_coverage) {
-                result = Some(probs);
-            }
-        }
-    }
-    result
-}
-
-/// Scan the few tokens following one "Option" anchor for the option digit and
-/// build the `[P(1), P(2)]` distribution from its top_logprobs. Returns None
-/// if no digit token is found or the digit mass is below the coverage threshold.
-fn extract_digit_after(
-    logprobs: &[LogprobContent],
-    tokens: &[&str],
-    search_start: usize,
-    min_logprob_coverage: f64,
-) -> Option<[f64; 2]> {
-    let search_end = (search_start + 6).min(tokens.len());
-
-    for i in search_start..search_end {
-        let tok = tokens[i].trim();
-        if tok.is_empty() {
-            continue;
-        }
-
-        let first_char = tok.chars().next().unwrap();
-        if digit_to_index(first_char).is_none() {
-            continue;
-        }
-
-        // The digit must stand alone (allow a trailing colon/period), so a
-        // multi-digit number in prose is never read as a verdict.
-        let rest = &tok[first_char.len_utf8()..];
-        if !rest.is_empty() && rest != ":" && rest != "." {
-            continue;
-        }
-
-        let top_logprobs = match &logprobs[i].top_logprobs {
-            Some(tlps) if !tlps.is_empty() => tlps,
-            _ => return None,
-        };
-
-        let mut choice_probs = [0.0_f64; 2];
-
-        for tlp in top_logprobs {
-            let clean = tlp.token.trim().trim_end_matches([':', '.']);
-            if clean.len() == 1
-                && let Some(tidx) = digit_to_index(clean.chars().next().unwrap())
-            {
-                choice_probs[tidx] += tlp.logprob.exp();
-            }
-        }
-
-        let prob_sum: f64 = choice_probs.iter().sum();
-        if prob_sum >= min_logprob_coverage {
-            // Normalize into a proper distribution over the two options.
-            for p in &mut choice_probs {
-                *p /= prob_sum;
-            }
-            return Some(choice_probs);
-        } else {
-            // Logprobs don't cover enough of the digit space — parse fails.
-            return None;
-        }
-    }
-
-    None
-}
-
-/// Parse a judgement response into the judge's verdict distribution.
-///
-/// Logprobs only — no text fallback. Returns None if logprob extraction fails.
-pub fn parse_response(logprobs: &[LogprobContent], min_logprob_coverage: f64) -> ParseResult {
-    ParseResult {
-        category_probs: extract_pairwise_probabilities(logprobs, min_logprob_coverage),
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Lineup parsing
-// ---------------------------------------------------------------------------
-//
-// A lineup judgement asks the judge to rank `k` options (2 ≤ k ≤ 9) labelled
-// A..I, one "Nth place is Option X" line per rank. Reading the logprobs of the
-// first `k - 1` of those lines gives each place's probability for its pick
-// among the options still unplaced — see `parse_lineup`.
-
-/// The option letters of a lineup judgement, in order (A..I).
-const LINEUP_LETTERS: [char; MAX_LINEUP_SIZE] = ['A', 'B', 'C', 'D', 'E', 'F', 'G', 'H', 'I'];
-
-/// The letter index for `c`, if it labels one of a `lineup_size` lineup's options.
-/// Letters past the lineup's size are not options (in a 3-item lineup, "D" is prose).
-fn lineup_letter_to_index(c: char, lineup_size: usize) -> Option<usize> {
-    LINEUP_LETTERS[..lineup_size]
-        .iter()
-        .position(|&l| l == c.to_ascii_uppercase())
-}
-
-/// A single rank slot's extracted distribution over the option letters
-/// (`[P(A), P(B), ...]`, length `lineup_size`), plus which letter the judge
-/// actually emitted there and the share of its top_logprobs mass that was on
-/// option letters (`dist` is normalised by it).
-struct RankSlot {
-    dist: Vec<f64>,
-    letter: usize,
-    coverage: f64,
-}
-
-/// Read the distribution over the option letters from a ranking-line letter
-/// token's top_logprobs. `search_start` is the token index just past an "Option"
-/// marker; scans forward a few tokens for the single option letter and reads its
-/// top_logprobs. Returns None if no letter token is found. The coverage
-/// threshold is applied by the caller, since the last place doesn't need it.
-fn extract_rank_slot(
-    logprobs: &[LogprobContent],
-    tokens: &[&str],
-    search_start: usize,
-    lineup_size: usize,
-) -> Option<RankSlot> {
-    let search_end = (search_start + 6).min(tokens.len());
-    for i in search_start..search_end {
-        let tok = tokens[i].trim();
-        if tok.is_empty() {
-            continue;
-        }
-        let first_char = tok.chars().next().unwrap();
-        let idx = match lineup_letter_to_index(first_char, lineup_size) {
-            Some(idx) => idx,
-            None => continue,
-        };
-        // The letter must stand alone (allow a trailing colon/period), so "Aardvark"
-        // or the word "Also" don't get read as option A.
-        let rest = &tok[first_char.len_utf8()..];
-        if !rest.is_empty() && rest != ":" && rest != "." {
-            continue;
-        }
-
-        let mut dist = vec![0.0_f64; lineup_size];
-        for tlp in logprobs[i].top_logprobs.iter().flatten() {
-            let clean = tlp.token.trim().trim_end_matches([':', '.']);
-            if clean.len() == 1
-                && let Some(tidx) =
-                    lineup_letter_to_index(clean.chars().next().unwrap(), lineup_size)
-            {
-                dist[tidx] += tlp.logprob.exp();
-            }
-        }
-        let mass: f64 = dist.iter().sum();
-        if mass > 0.0 {
-            for p in &mut dist {
-                *p /= mass;
-            }
-        }
-        return Some(RankSlot { dist, letter: idx, coverage: mass });
-    }
-    None
-}
-
-/// Extract the ranking block's rank slots from a lineup response's logprobs.
-///
-/// The ranking block is written as `lineup_size` "Option <letter>" lines at the
-/// end (with or without "Nth:" prefixes). We collect every "Option <letter>"
-/// whose letter reads cleanly and take the LAST `lineup_size` — the trailing
-/// block — so earlier "Option X" mentions in the analysis prose are ignored.
-/// Those emitted letters must be a full ranking (a permutation of the lineup's
-/// letters). If we can't get a clean result for every rank, or they aren't all
-/// distinct (e.g. the model repeated an option), the whole judgement is thrown
-/// out rather than filled in.
-///
-/// Every place but the last must put at least `min_logprob_coverage` of its
-/// top_logprobs mass on option letters. The last place is exempt: one option
-/// is left by then, so its letter is fixed by the others and its distribution
-/// is never read. Under constrained decoding its mass often sits on an
-/// alternative spelling of that same letter (a bare " " token, then the
-/// letter), which would otherwise throw out a valid ranking.
-///
-/// Returns the whole block, one slot per rank, best first.
-fn extract_lineup_slots(
-    logprobs: &[LogprobContent],
-    lineup_size: usize,
-    min_logprob_coverage: f64,
-) -> Option<Vec<RankSlot>> {
-    if logprobs.is_empty() {
-        return None;
-    }
-    let tokens: Vec<&str> = logprobs.iter().map(|lp| lp.token.as_str()).collect();
-
-    // Anchor on "Option" regardless of tokenization. Word boundaries required
-    // so prose "options"/"optional" don't become anchors that inject stray
-    // letter reads into the block.
-    let mut slots: Vec<RankSlot> = Vec::new();
-    for start in marker_scan_starts(&tokens, "option", true) {
-        if let Some(slot) = extract_rank_slot(logprobs, &tokens, start, lineup_size) {
-            slots.push(slot);
-        }
-    }
-
-    // The ranking block is the last `lineup_size` results. Require all of them,
-    // and require them to be a real 1..k ranking — otherwise throw it out.
-    if slots.len() < lineup_size {
-        return None;
-    }
-    let block_start = slots.len() - lineup_size;
-    if slots[block_start..slots.len() - 1]
-        .iter()
-        .any(|s| s.coverage < min_logprob_coverage)
-    {
-        return None;
-    }
-    let mut seen = vec![false; lineup_size];
-    for s in &slots[block_start..] {
-        seen[s.letter] = true;
-    }
-    if !seen.iter().all(|&b| b) {
-        return None;
-    }
-
-    Some(slots.split_off(block_start))
-}
-
-/// Read a lineup response's logprobs into a [`LineupVerdict`]: the emitted
-/// ranking, plus each place's probability for its pick.
-///
-/// Each ranking line's logprobs are the judge's top-1 distribution *conditional
-/// on the items ranked above it already being placed*. So a place's probability
-/// is its emitted letter's share of that line's distribution restricted to the
-/// options not yet placed — under the Luce model, the chosen option's strength
-/// over the strength of everything still unplaced.
-///
-/// Only the first `lineup_size - 1` lines are read for probabilities: the last
-/// place has a single option left, so it carries no free parameter (its line
-/// must still be present — a ranking is only valid if it places every option).
-///
-/// Returns None if any rank slot fails to parse, any but the last fails to clear
-/// the coverage threshold, or if a slot puts no mass at all on the options still unplaced (no share to
-/// read — treated as an unparseable judgement rather than a guess).
-pub fn parse_lineup(
-    logprobs: &[LogprobContent],
-    lineup_size: usize,
-    min_logprob_coverage: f64,
-) -> Option<LineupVerdict> {
-    let slots = extract_lineup_slots(logprobs, lineup_size, min_logprob_coverage)?;
-
-    let mut placed = vec![false; lineup_size];
-    let mut place_probs = Vec::with_capacity(lineup_size - 1);
-
-    for slot in &slots[..lineup_size - 1] {
-        let denom: f64 = (0..lineup_size)
-            .filter(|&i| !placed[i])
-            .map(|i| slot.dist[i])
-            .sum();
-        if denom <= 0.0 {
-            return None;
-        }
-        place_probs.push(slot.dist[slot.letter] / denom);
-        placed[slot.letter] = true;
-    }
-
-    Some(LineupVerdict {
-        ranking: slots.iter().map(|s| s.letter).collect(),
-        place_probs,
-    })
-}
-
-/// Parse a lineup ranking from response text (--no-logprobs mode).
-///
-/// Same rule as the logprob path: take the LAST `lineup_size` "Option <letter>"
-/// mentions (the trailing ranking block) and require them to be a distinct full
-/// ranking. Without logprobs every pick is hard, so each place's probability is
-/// 1.0 — the full ordering is kept, not just the winner. Returns None if a clean
-/// full ranking can't be read (throw it out).
-pub fn parse_lineup_text(text: &str, lineup_size: usize) -> Option<LineupVerdict> {
-    let lower = text.to_ascii_lowercase();
-    let bytes = text.as_bytes();
-
-    // Every uppercase, standalone "Option <letter>" mention, in order.
-    let mut letters: Vec<usize> = Vec::new();
-    let mut search = 0;
-    while let Some(rel) = lower[search..].find("option") {
-        let mut pos = search + rel + "option".len();
-        while pos < text.len() && matches!(bytes[pos], b' ' | b'\t' | b':') {
-            pos += 1;
-        }
-        if let Some(c) = text[pos..].chars().next()
-            && let Some(idx) = lineup_letter_to_index(c, lineup_size)
-            && c.is_ascii_uppercase()
-        {
-            // Must stand alone: next char is not alphanumeric (so "Options" is not O/A).
-            let next = text[pos + c.len_utf8()..].chars().next();
-            if next.is_none_or(|nc| !nc.is_alphanumeric()) {
-                letters.push(idx);
-            }
-        }
-        search += rel + "option".len();
-    }
-
-    if letters.len() < lineup_size {
-        return None;
-    }
-    let block = &letters[letters.len() - lineup_size..];
-    let mut seen = vec![false; lineup_size];
-    for &l in block {
-        seen[l] = true;
-    }
-    if !seen.iter().all(|&b| b) {
-        return None;
-    }
-
-    Some(LineupVerdict {
-        ranking: block.to_vec(),
-        place_probs: vec![1.0; lineup_size - 1],
-    })
-}
-
-/// Parse a verdict from response text (for --no-logprobs mode).
-///
-/// Finds the last "Verdict: Option <digit>" in the text and returns a one-hot
-/// distribution over the two options. Uses the last occurrence to handle cases
-/// where "verdict" appears in the analysis before the final verdict.
-pub fn parse_response_text(text: &str) -> ParseResult {
-    let lower = text.to_ascii_lowercase();
-    let bytes = lower.as_bytes();
-    let mut result = None;
+    let mut matches = Vec::new();
     let mut search_start = 0;
 
     while let Some(offset) = lower[search_start..].find("verdict") {
@@ -480,15 +97,261 @@ pub fn parse_response_text(text: &str) -> ParseResult {
                     .next()
                     .is_some_and(|nc| nc.is_alphanumeric());
                 if !followed_by_word {
-                    result = Some(idx);
+                    matches.push((dpos, idx));
                 }
             }
         }
         search_start = after_verdict;
     }
 
+    matches
+}
+
+/// Extract the judge's verdict distribution `[P(Option 1), P(Option 2)]` from
+/// logprobs. Uses the exact same grammar as `parse_response_text` and reads
+/// only the LAST match; if that final verdict token is not standalone or falls
+/// below `min_logprob_coverage`, the whole judgement fails (no falling back to
+/// an earlier match).
+fn extract_pairwise_probabilities(logprobs: &[LogprobContent], min_logprob_coverage: f64) -> Option<[f64; 2]> {
+    if logprobs.is_empty() {
+        return None;
+    }
+
+    let (text, token_ends) = tokens_with_ends(logprobs);
+    let (digit_byte_pos, expected_idx) = *find_pairwise_verdicts(&text).last()?;
+    let tok_idx = token_ends.partition_point(|&e| e <= digit_byte_pos);
+
+    let tok = logprobs[tok_idx].token.trim();
+    let first_char = tok.chars().next()?;
+    if digit_to_index(first_char) != Some(expected_idx) {
+        return None;
+    }
+    // The digit must stand alone (allow a trailing colon/period), so a fused
+    // token like "Option1" is never misread.
+    let rest = &tok[first_char.len_utf8()..];
+    if !rest.is_empty() && rest != ":" && rest != "." {
+        return None;
+    }
+
+    let top_logprobs = match &logprobs[tok_idx].top_logprobs {
+        Some(tlps) if !tlps.is_empty() => tlps,
+        _ => return None,
+    };
+
+    let mut choice_probs = [0.0_f64; 2];
+    for tlp in top_logprobs {
+        let clean = tlp.token.trim().trim_end_matches([':', '.']);
+        if clean.len() == 1
+            && let Some(tidx) = digit_to_index(clean.chars().next().unwrap())
+        {
+            choice_probs[tidx] += tlp.logprob.exp();
+        }
+    }
+
+    let prob_sum: f64 = choice_probs.iter().sum();
+    if prob_sum >= min_logprob_coverage && prob_sum > 0.0 {
+        for p in &mut choice_probs {
+            *p /= prob_sum;
+        }
+        Some(choice_probs)
+    } else {
+        None
+    }
+}
+
+/// Parse a judgement response into the judge's verdict distribution.
+///
+/// Logprobs only — no text fallback. Returns None if logprob extraction fails.
+pub fn parse_response(logprobs: &[LogprobContent], min_logprob_coverage: f64) -> ParseResult {
     ParseResult {
-        category_probs: result.map(one_hot),
+        category_probs: extract_pairwise_probabilities(logprobs, min_logprob_coverage),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Lineup parsing
+// ---------------------------------------------------------------------------
+//
+// A lineup judgement asks the judge to rank `k` options (2 ≤ k ≤ 9) labelled
+// A..I, one "Nth place is Option X" line per rank. Reading the logprobs of the
+// first `k - 1` of those lines gives each place's probability for its pick
+// among the options still unplaced — see `parse_lineup`.
+
+/// The option letters of a lineup judgement, in order (A..I).
+const LINEUP_LETTERS: [char; MAX_LINEUP_SIZE] = ['A', 'B', 'C', 'D', 'E', 'F', 'G', 'H', 'I'];
+
+/// The letter index for `c`, if it labels one of a `lineup_size` lineup's options.
+/// Letters past the lineup's size are not options (in a 3-item lineup, "D" is prose).
+/// Only uppercase letters label options: lowercase "a" is prose, never Option A.
+fn lineup_letter_to_index(c: char, lineup_size: usize) -> Option<usize> {
+    LINEUP_LETTERS[..lineup_size].iter().position(|&l| l == c)
+}
+
+/// Find every standalone uppercase "\boption\b <seps> <A..I>" mention in `text`,
+/// returning `(letter_byte_pos, option_idx)` in order. Shared by both text mode
+/// and logprobs mode so the two parsers accept the exact same grammar.
+fn find_lineup_options(text: &str, lineup_size: usize) -> Vec<(usize, usize)> {
+    let lower = text.to_ascii_lowercase();
+    let bytes = text.as_bytes();
+    let mut matches = Vec::new();
+    let mut search = 0;
+
+    while let Some(rel) = lower[search..].find("option") {
+        let begin = search + rel;
+        let end = begin + "option".len();
+        search = end;
+
+        // Word boundaries on both sides: reject "description A", "options A",
+        // "optional A", etc.
+        let letter_before = begin > 0 && bytes[begin - 1].is_ascii_alphabetic();
+        let letter_after = end < bytes.len() && bytes[end].is_ascii_alphabetic();
+        if letter_before || letter_after {
+            continue;
+        }
+
+        // Skip inline separators and bold markers (no newlines, so prose like
+        // "the best option\nA second point..." is never read as Option A).
+        let mut pos = end;
+        while pos < bytes.len() && matches!(bytes[pos], b' ' | b'\t' | b':' | b'*') {
+            pos += 1;
+        }
+
+        if let Some(c) = text[pos..].chars().next()
+            && let Some(idx) = lineup_letter_to_index(c, lineup_size)
+        {
+            // Must stand alone: next char is not alphanumeric (so "Option Also" is not A).
+            let next = text[pos + c.len_utf8()..].chars().next();
+            if next.is_none_or(|nc| !nc.is_alphanumeric()) {
+                matches.push((pos, idx));
+            }
+        }
+    }
+
+    matches
+}
+
+/// Read a lineup response's logprobs into a [`LineupVerdict`]: the emitted
+/// ranking, plus each place's probability for its pick.
+///
+/// Uses the exact same grammar as `parse_lineup_text`: take the LAST
+/// `lineup_size` standalone uppercase "Option <letter>" mentions (the trailing
+/// ranking block) and require them to be a full permutation of `0..lineup_size`.
+///
+/// Each ranking line's logprobs are the judge's top-1 distribution *conditional
+/// on the items ranked above it already being placed*. For every place but the
+/// last, the mass on options still unplaced must clear `min_logprob_coverage`
+/// (mass spent on an already-placed duplicate option does not count), and the
+/// place's probability is its emitted letter's share of that unplaced mass.
+///
+/// The last place is exempt from coverage: one option is left by then, so its
+/// letter is fixed by the others and its distribution is never read. Its line
+/// and clean letter token must still be present.
+pub fn parse_lineup(
+    logprobs: &[LogprobContent],
+    lineup_size: usize,
+    min_logprob_coverage: f64,
+) -> Option<LineupVerdict> {
+    if logprobs.is_empty() {
+        return None;
+    }
+
+    let (text, token_ends) = tokens_with_ends(logprobs);
+    let matches = find_lineup_options(&text, lineup_size);
+    if matches.len() < lineup_size {
+        return None;
+    }
+    let block = &matches[matches.len() - lineup_size..];
+
+    let mut seen = vec![false; lineup_size];
+    for &(_, letter) in block {
+        seen[letter] = true;
+    }
+    if !seen.iter().all(|&b| b) {
+        return None;
+    }
+
+    let mut placed = vec![false; lineup_size];
+    let mut place_probs = Vec::with_capacity(lineup_size - 1);
+
+    for (rank, &(byte_pos, letter)) in block.iter().enumerate() {
+        let tok_idx = token_ends.partition_point(|&e| e <= byte_pos);
+        let tok = logprobs[tok_idx].token.trim();
+        let first_char = tok.chars().next()?;
+        if lineup_letter_to_index(first_char, lineup_size) != Some(letter) {
+            return None;
+        }
+        let rest = &tok[first_char.len_utf8()..];
+        if !rest.is_empty() && rest != ":" && rest != "." {
+            return None;
+        }
+
+        if rank == lineup_size - 1 {
+            continue;
+        }
+
+        let mut raw_dist = vec![0.0_f64; lineup_size];
+        for tlp in logprobs[tok_idx].top_logprobs.iter().flatten() {
+            let clean = tlp.token.trim().trim_end_matches([':', '.']);
+            if clean.len() == 1
+                && let Some(tidx) =
+                    lineup_letter_to_index(clean.chars().next().unwrap(), lineup_size)
+            {
+                raw_dist[tidx] += tlp.logprob.exp();
+            }
+        }
+
+        let unplaced_mass: f64 = (0..lineup_size)
+            .filter(|&i| !placed[i])
+            .map(|i| raw_dist[i])
+            .sum();
+        if unplaced_mass < min_logprob_coverage || unplaced_mass <= 0.0 {
+            return None;
+        }
+        place_probs.push(raw_dist[letter] / unplaced_mass);
+        placed[letter] = true;
+    }
+
+    Some(LineupVerdict {
+        ranking: block.iter().map(|&(_, letter)| letter).collect(),
+        place_probs,
+    })
+}
+
+/// Parse a lineup ranking from response text (--no-logprobs mode).
+///
+/// Same rule as the logprob path: take the LAST `lineup_size` "Option <letter>"
+/// mentions (the trailing ranking block) and require them to be a distinct full
+/// ranking. Without logprobs every pick is hard, so each place's probability is
+/// 1.0 — the full ordering is kept, not just the winner. Returns None if a clean
+/// full ranking can't be read (throw it out).
+pub fn parse_lineup_text(text: &str, lineup_size: usize) -> Option<LineupVerdict> {
+    let matches = find_lineup_options(text, lineup_size);
+    if matches.len() < lineup_size {
+        return None;
+    }
+    let block = &matches[matches.len() - lineup_size..];
+    let mut seen = vec![false; lineup_size];
+    for &(_, l) in block {
+        seen[l] = true;
+    }
+    if !seen.iter().all(|&b| b) {
+        return None;
+    }
+
+    Some(LineupVerdict {
+        ranking: block.iter().map(|&(_, l)| l).collect(),
+        place_probs: vec![1.0; lineup_size - 1],
+    })
+}
+
+/// Parse a verdict from response text (for --no-logprobs mode).
+///
+/// Finds the last "Verdict: Option <digit>" in the text and returns a one-hot
+/// distribution over the two options. Uses the last occurrence to handle cases
+/// where "verdict" appears in the analysis before the final verdict.
+pub fn parse_response_text(text: &str) -> ParseResult {
+    ParseResult {
+        category_probs: find_pairwise_verdicts(text).last().map(|&(_, idx)| one_hot(idx)),
     }
 }
 
@@ -1216,6 +1079,179 @@ mod tests {
         assert_eq!(lineup_letter_to_index('D', 4), Some(3));
         assert_eq!(lineup_letter_to_index('I', 8), None);
         assert_eq!(lineup_letter_to_index('I', 9), Some(8));
-        assert_eq!(lineup_letter_to_index('i', 9), Some(8));
+        assert_eq!(lineup_letter_to_index('i', 9), None);
+        assert_eq!(lineup_letter_to_index('a', 3), None);
+    }
+
+    #[test]
+    fn test_parse_lineup_ignores_lowercase_letter_alternatives() {
+        // At 1st place the top_logprobs put 0.02 on lowercase " a" (prose like
+        // "Option a bit..."). It must not count as Option A: coverage is
+        // 0.9 + 0.03 + 0.05 = 0.98 and A's share is 0.9 / 0.98, not 0.92 / 1.0.
+        let mut lp = lineup_logprobs();
+        lp[3] = LogprobContent {
+            token: " A".to_string(),
+            top_logprobs: Some(vec![
+                TopLogprob { token: "A".to_string(), logprob: (0.9_f64).ln() },
+                TopLogprob { token: "B".to_string(), logprob: (0.03_f64).ln() },
+                TopLogprob { token: "C".to_string(), logprob: (0.05_f64).ln() },
+                TopLogprob { token: " a".to_string(), logprob: (0.02_f64).ln() },
+            ]),
+        };
+        let v = parse_lineup(&lp, 3, 0.95).expect("uppercase mass clears coverage");
+        assert_verdict(&v, &[0, 1, 2], &[0.9 / 0.98, 0.8]);
+
+        // With most of the mass on lowercase " a", uppercase coverage is only
+        // 0.53 and the judgement must fail rather than read " a" as A.
+        lp[3] = LogprobContent {
+            token: " A".to_string(),
+            top_logprobs: Some(vec![
+                TopLogprob { token: "A".to_string(), logprob: (0.5_f64).ln() },
+                TopLogprob { token: " a".to_string(), logprob: (0.47_f64).ln() },
+                TopLogprob { token: "B".to_string(), logprob: (0.01_f64).ln() },
+                TopLogprob { token: "C".to_string(), logprob: (0.02_f64).ln() },
+            ]),
+        };
+        assert!(parse_lineup(&lp, 3, 0.95).is_none());
+    }
+
+    #[test]
+    fn test_logprob_parse_does_not_flip_on_second_option_after_verdict() {
+        // "Verdict: Option 1, not Option 2": the second "Option 2" is inside
+        // the old 10-token window and would overwrite Option 1 with Option 2
+        // at ~99.9% confidence. Must read only Option 1.
+        let lp = vec![
+            plain("Verdict"), plain(":"), plain(" Option"),
+            LogprobContent {
+                token: " 1".to_string(),
+                top_logprobs: Some(vec![
+                    TopLogprob { token: "1".to_string(), logprob: (0.9_f64).ln() },
+                    TopLogprob { token: "2".to_string(), logprob: (0.1_f64).ln() },
+                ]),
+            },
+            plain(","), plain(" not"), plain(" Option"),
+            LogprobContent {
+                token: " 2".to_string(),
+                top_logprobs: Some(vec![
+                    TopLogprob { token: "2".to_string(), logprob: (0.999_f64).ln() },
+                    TopLogprob { token: "1".to_string(), logprob: (0.001_f64).ln() },
+                ]),
+            },
+        ];
+        let probs = parse_response(&lp, DEFAULT_MIN_LOGPROB_COVERAGE)
+            .category_probs
+            .expect("should parse Option 1");
+        assert!((probs[0] - 0.9).abs() < 1e-6, "expected P(Option 1) ~0.9, got {:?}", probs);
+    }
+
+    #[test]
+    fn test_logprob_parse_low_coverage_final_verdict_fails_without_fallback() {
+        // An earlier valid Verdict: Option 1 followed by a final Verdict: Option 2
+        // that fails coverage must fail the whole judgement rather than falling
+        // back to the earlier verdict.
+        let lp = vec![
+            plain("Verdict"), plain(":"), plain(" Option"),
+            LogprobContent {
+                token: " 1".to_string(),
+                top_logprobs: Some(vec![
+                    TopLogprob { token: "1".to_string(), logprob: (0.98_f64).ln() },
+                    TopLogprob { token: "2".to_string(), logprob: (0.02_f64).ln() },
+                ]),
+            },
+            plain("\n"), plain("Verdict"), plain(":"), plain(" Option"),
+            LogprobContent {
+                token: " 2".to_string(),
+                top_logprobs: Some(vec![
+                    TopLogprob { token: "2".to_string(), logprob: (0.40_f64).ln() },
+                    TopLogprob { token: " the".to_string(), logprob: (0.60_f64).ln() },
+                ]),
+            },
+        ];
+        assert!(parse_response(&lp, DEFAULT_MIN_LOGPROB_COVERAGE).category_probs.is_none());
+    }
+
+    #[test]
+    fn test_logprob_parse_rejects_prose_between_verdict_and_option() {
+        let lp = vec![
+            plain("My"), plain(" verdict"), plain(" is"), plain(" that"), plain(" Option"),
+            LogprobContent {
+                token: " 1".to_string(),
+                top_logprobs: Some(vec![
+                    TopLogprob { token: "1".to_string(), logprob: (0.95_f64).ln() },
+                    TopLogprob { token: "2".to_string(), logprob: (0.05_f64).ln() },
+                ]),
+            },
+        ];
+        assert!(parse_response(&lp, DEFAULT_MIN_LOGPROB_COVERAGE).category_probs.is_none());
+    }
+
+    #[test]
+    fn test_parse_lineup_ignores_trailing_prose_with_lowercase_a() {
+        // Prose like "this option has a clear edge" or "this option a winner"
+        // must not inject a bogus Option A slot after the real ranking block.
+        let mut lp = lineup_logprobs();
+        lp.extend([
+            plain("\n"), plain("This"), plain(" option"), plain(" has"),
+            letter_tok(" a", 0.99, 0.005, 0.005),
+            plain(" clear"), plain(" edge"), plain("."),
+            plain(" That"), plain(" option"),
+            letter_tok(" a", 0.99, 0.005, 0.005),
+            plain(" winner"), plain("."),
+        ]);
+        let v = parse_lineup(&lp, 3, 0.95).expect("trailing prose must not shift the ranking block");
+        assert_verdict(&v, &[0, 1, 2], &[0.9, 0.8]);
+    }
+
+    #[test]
+    fn test_parse_lineup_coverage_checks_unplaced_mass_only() {
+        // 1st place is Option A. At 2nd place, the model puts 0.90 mass on
+        // repeating A and only 0.04 on B + 0.02 on C. Total option mass is
+        // 0.96, but unplaced mass (B + C) is only 0.06 — must fail the 0.95
+        // coverage gate.
+        let lp = vec![
+            plain("1st"), plain(":"), plain(" Option"),
+            letter_tok(" A", 0.9, 0.03, 0.07),
+            plain("\n"),
+            plain("2nd"), plain(":"), plain(" Option"),
+            LogprobContent {
+                token: " B".to_string(),
+                top_logprobs: Some(vec![
+                    TopLogprob { token: "A".to_string(), logprob: (0.90_f64).ln() },
+                    TopLogprob { token: "B".to_string(), logprob: (0.04_f64).ln() },
+                    TopLogprob { token: "C".to_string(), logprob: (0.02_f64).ln() },
+                    TopLogprob { token: " the".to_string(), logprob: (0.04_f64).ln() },
+                ]),
+            },
+            plain("\n"),
+            plain("3rd"), plain(":"), plain(" Option"),
+            letter_tok(" C", 0.0, 0.0, 1.0),
+        ];
+        assert!(parse_lineup(&lp, 3, 0.95).is_none());
+    }
+
+    #[test]
+    fn test_parse_lineup_word_boundaries_bold_and_newlines() {
+        // Leading word-boundary rejects "description A" / "adoption B"; newline
+        // between "option" and "A" is rejected; bold "**Option** **A**" works.
+        let text = "1st: **Option** **B**\n2nd: Option **A**\n3rd: Option C\n\
+                    Matches description A and adoption B. That is the best option\nA closing note.";
+        assert_eq!(
+            parse_lineup_text(text, 3),
+            Some(LineupVerdict { ranking: vec![1, 0, 2], place_probs: vec![1.0, 1.0] })
+        );
+
+        let lp = vec![
+            plain("1st"), plain(":"), plain(" **"), plain("Option"), plain("**"), plain(" **"),
+            letter_tok("A", 0.9, 0.03, 0.07), plain("**"), plain("\n"),
+            plain("2nd"), plain(":"), plain(" Option"), plain(" **"),
+            letter_tok("B", 0.0, 0.8, 0.2), plain("**"), plain("\n"),
+            plain("3rd"), plain(":"), plain(" Option"),
+            letter_tok(" C", 0.0, 0.0, 1.0), plain("\n"),
+            plain("description"), letter_tok(" A", 0.99, 0.005, 0.005), plain("\n"),
+            plain("best"), plain(" option"), plain("\n"),
+            letter_tok("A", 0.99, 0.005, 0.005), plain(" note"),
+        ];
+        let v = parse_lineup(&lp, 3, 0.95).expect("bold block should survive trailing prose");
+        assert_verdict(&v, &[0, 1, 2], &[0.9, 0.8]);
     }
 }

@@ -112,6 +112,13 @@ struct Args {
     #[arg(long, default_value_t = 2)]
     lineup_size: usize,
 
+    /// Repeat identical ordered matchups with the same verdict (models a
+    /// non-reasoning, no-deliberation judge where CLI result reuse applies).
+    /// Omit (default) for independent draws on repeat matchups (models a judge
+    /// with reasoning/deliberation).
+    #[arg(long)]
+    deterministic_repeats: bool,
+
     /// Path to the nanojudge binary (auto-detected from sibling binary if omitted).
     #[arg(long)]
     bin: Option<PathBuf>,
@@ -207,6 +214,7 @@ struct SharedTrialConfig {
     min_uniform_edges: Option<usize>,
     judgements_per_refit: Option<usize>,
     lineup_size: usize,
+    deterministic_repeats: bool,
     nanojudge_bin: PathBuf,
 }
 
@@ -290,6 +298,7 @@ async fn main() {
     );
     eprintln!("  Samples per judgement: {}", args.samples_per_judgement);
     eprintln!("  Items per judgement: {}", args.lineup_size);
+    eprintln!("  Deterministic repeats: {}", args.deterministic_repeats);
     eprintln!("  Report top-K: {}", top_k);
     eprintln!("  Distribution: {}", args.judgement_distribution);
     eprintln!(
@@ -328,6 +337,7 @@ async fn main() {
         min_uniform_edges: args.min_uniform_edges,
         judgements_per_refit: args.judgements_per_refit,
         lineup_size: args.lineup_size,
+        deterministic_repeats: args.deterministic_repeats,
         nanojudge_bin: nanojudge_bin.clone(),
     });
 
@@ -365,6 +375,7 @@ async fn main() {
                 min_uniform_edges: shared.min_uniform_edges,
                 judgements_per_refit: shared.judgements_per_refit,
                 lineup_size: shared.lineup_size,
+                deterministic_repeats: shared.deterministic_repeats,
                 nanojudge_bin: &shared.nanojudge_bin,
             };
             let res = trial::run(&config, trial_seed, top_k, capture_example).await;

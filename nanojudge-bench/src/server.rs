@@ -92,6 +92,10 @@ pub struct JudgeState {
     pub seed: u64,
     /// Independent draws used to estimate each verdict-token distribution.
     pub samples_per_judgement: usize,
+    /// When true, repeated encounters of the same ordered matchup reuse
+    /// encounter 0 (same output every time). When false, each repeat increments
+    /// `encounter_counts` and gets an independent sample set.
+    pub deterministic_repeats: bool,
     /// Per-pair encounter counter so repeated matchups get independent sample sets.
     pub encounter_counts: Mutex<HashMap<(String, String), u64>>,
 }
@@ -461,8 +465,10 @@ async fn handle_chat(
         .unwrap_or_else(|| panic!("unknown item: {item2:?}"));
 
     let sampled_verdict = {
-        let key = (item1.clone(), item2.clone());
-        let encounter = {
+        let encounter = if state.deterministic_repeats {
+            0
+        } else {
+            let key = (item1.clone(), item2.clone());
             let mut counts = state.encounter_counts.lock().unwrap();
             let n = counts.entry(key).or_insert(0);
             let current = *n;
@@ -523,8 +529,10 @@ fn handle_lineup_judgement(
 
     // Independent draw per repeated (ordered) lineup, keyed via the shared
     // encounter counter (the second key slot is unused for lineups).
-    let key = (items.join("\u{0}"), String::new());
-    let encounter = {
+    let encounter = if state.deterministic_repeats {
+        0
+    } else {
+        let key = (items.join("\u{0}"), String::new());
         let mut counts = state.encounter_counts.lock().unwrap();
         let n = counts.entry(key).or_insert(0);
         let current = *n;
@@ -694,5 +702,64 @@ mod tests {
     fn zero_samples_panics() {
         let mut rng = StdRng::seed_from_u64(4);
         let _ = sample_token_distribution([0.5, 0.5], 0, &mut rng);
+    }
+
+    #[tokio::test]
+    async fn repeat_mode_controls_whether_repeats_draw_fresh_samples() {
+        let make_state = |deterministic_repeats: bool| {
+            let mut strengths = HashMap::new();
+            strengths.insert("item_0001".to_string(), 0.0);
+            strengths.insert("item_0002".to_string(), 0.0);
+            strengths.insert("item_0003".to_string(), 0.0);
+            Arc::new(JudgeState {
+                strengths,
+                seed: 42,
+                samples_per_judgement: 1,
+                deterministic_repeats,
+                encounter_counts: Mutex::new(HashMap::new()),
+            })
+        };
+
+        let pair_prompt = "Which is better?\n\nOption 1:\nitem_0001\n\nOption 2:\nitem_0002\n\nInstructions:\n...";
+        let lineup_prompt = "Which is better?\n\nOption A:\nitem_0001\n\nOption B:\nitem_0002\n\nOption C:\nitem_0003\n\nInstructions:\n...";
+
+        for prompt in [pair_prompt, lineup_prompt] {
+            let stochastic = make_state(false);
+            let mut stochastic_outputs = std::collections::HashSet::new();
+            for _ in 0..32 {
+                let resp = handle_chat(
+                    State(stochastic.clone()),
+                    Json(ChatRequest {
+                        messages: vec![RequestMessage { content: prompt.to_string() }],
+                        logprobs: Some(true),
+                    }),
+                )
+                .await;
+                stochastic_outputs.insert(resp.0.choices[0].message.content.clone());
+            }
+            assert!(
+                stochastic_outputs.len() > 1,
+                "stochastic repeats should vary across equal-strength draws"
+            );
+
+            let deterministic = make_state(true);
+            let mut deterministic_outputs = std::collections::HashSet::new();
+            for _ in 0..32 {
+                let resp = handle_chat(
+                    State(deterministic.clone()),
+                    Json(ChatRequest {
+                        messages: vec![RequestMessage { content: prompt.to_string() }],
+                        logprobs: Some(true),
+                    }),
+                )
+                .await;
+                deterministic_outputs.insert(resp.0.choices[0].message.content.clone());
+            }
+            assert_eq!(
+                deterministic_outputs.len(),
+                1,
+                "deterministic repeats must return the identical verdict every time"
+            );
+        }
     }
 }

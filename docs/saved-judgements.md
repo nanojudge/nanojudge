@@ -69,9 +69,9 @@ Pairwise runs are unaffected: a reader written against the two-item shape keeps 
 
 ### Repeated prompts
 
-A judge with deliberation off and `reasoning_effort = "none"` gives the same answer to the same prompt, as long as its verdict isn't sampled: in logprobs mode, or in text mode at `temperature = 0`. When a run sends such a judge a prompt it has already answered, the run reuses the earlier result instead of sending the request again. Prompts are matched by `prompt_hash`. The reused judgement still counts as a judgement of its own: it is scored, counted and saved like any other, with `reused` set to `true`. The run's summary reports how many judgements were reused.
+A judge with deliberation off and `reasoning_effort = "none"` gives the same answer to the same prompt, as long as its verdict isn't sampled: in logprobs mode for two-item judgements, or at `temperature = 0`. Lineups of three or more items are only covered at `temperature = 0`, even in logprobs mode, because the judge samples its earlier places and its later places depend on them. When a run sends such a judge a prompt it has already answered, the run reuses the earlier result instead of sending the request again. Prompts are matched by `prompt_hash`. The reused judgement still counts as a judgement of its own: it is scored, counted and saved like any other, with `reused` set to `true`. The run's summary reports how many judgements were reused.
 
-Results from a file passed to `--load-judgements` are reused too, when the loaded judgement was made by the same judge with the same `deliberation`, `reasoning_effort`, `provider` and `chat_template_kwargs` as this run, and, in text mode, at temperature 0. If a loaded judgement from a judge that reuses results is missing any of these fields, or `prompt_hash`, the load fails.
+Results from a file passed to `--load-judgements` are reused too, when the loaded judgement was made by the same judge with the same `deliberation`, `reasoning_effort`, `provider` and `chat_template_kwargs` as this run, and, in text mode or for lineups of three or more items, at temperature 0. If a loaded judgement from a judge that reuses results is missing any of these fields, or `prompt_hash`, the load fails.
 
 ## Reusing saved judgements
 
