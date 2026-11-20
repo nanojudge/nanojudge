@@ -51,6 +51,12 @@ async fn run_benchmark_cmd(args: BenchmarkArgs) {
     let config_path = args.config.clone().unwrap_or_else(config::config_path);
     let cfg = config::load_config(&config_path);
     let resolved = resolve_config(&args.cfg, &cfg);
+    if resolved.lineup_size != 2 {
+        bail(format!(
+            "benchmark only runs pairwise comparisons (got lineup_size = {}). Pass --lineup-size 2 to override.",
+            resolved.lineup_size
+        ));
+    }
     let judges = resolve_judges(&args.cfg, &cfg, &config_path, resolved.deliberation_enabled, resolved.lineup_size);
 
     if args.num_pairs == 0 {
