@@ -180,7 +180,8 @@ fn loaded_reuse_entries(
         if !reuses_results(judge, deliberation_enabled, lineup_size) {
             continue;
         }
-        let same_settings = field(&record, "deliberation") == serde_json::json!(deliberation_enabled)
+        let same_settings = field(&record, "logprobs") == serde_json::json!(judge.logprobs)
+            && field(&record, "deliberation") == serde_json::json!(deliberation_enabled)
             && field(&record, "reasoning_effort") == serde_json::json!(judge.reasoning_effort)
             && field(&record, "provider") == serde_json::json!(judge.provider)
             && field(&record, "chat_template_kwargs") == serde_json::json!(judge.chat_template_kwargs);
@@ -2407,9 +2408,10 @@ mod tests {
     }
 
     /// A saved pair record from `reuse_judge`'s judge with matching settings.
-    fn reuse_record(temperature: f64) -> serde_json::Value {
+    fn reuse_record(temperature: f64, logprobs: bool) -> serde_json::Value {
         serde_json::json!({
             "judge_model": "m", "judge_endpoint": "http://e",
+            "logprobs": logprobs,
             "deliberation": false, "reasoning_effort": "none",
             "provider": null, "chat_template_kwargs": null,
             "prompt_hash": "00000000000000ff", "temperature": temperature,
@@ -2443,7 +2445,7 @@ mod tests {
 
     #[test]
     fn test_loaded_reuse_keeps_matching_judgement() {
-        let entries = loaded_reuse_entries(vec![reuse_record(0.0)], &[reuse_judge(0.0, false)], false, 2, Path::new("f.jsonl"));
+        let entries = loaded_reuse_entries(vec![reuse_record(0.0, false)], &[reuse_judge(0.0, false)], false, 2, Path::new("f.jsonl"));
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].key, (0, 0xff));
         assert_eq!(entries[0].temperature, 0.0);
@@ -2454,12 +2456,13 @@ mod tests {
     #[test]
     fn test_loaded_reuse_skips_changed_settings() {
         for (field, value) in [
+            ("logprobs", serde_json::json!(true)),
             ("deliberation", serde_json::json!(true)),
             ("reasoning_effort", serde_json::json!("low")),
             ("provider", serde_json::json!({"order": ["x"]})),
             ("chat_template_kwargs", serde_json::json!({"enable_thinking": false})),
         ] {
-            let mut record = reuse_record(0.0);
+            let mut record = reuse_record(0.0, false);
             record[field] = value;
             assert!(reused_keys(vec![record], reuse_judge(0.0, false), 2).is_empty(), "{field}");
         }
@@ -2467,10 +2470,10 @@ mod tests {
 
     #[test]
     fn test_loaded_reuse_text_and_lineup_modes_need_temperature_zero() {
-        assert!(reused_keys(vec![reuse_record(0.7)], reuse_judge(0.0, false), 2).is_empty());
-        assert_eq!(reused_keys(vec![reuse_record(0.7)], reuse_judge(0.7, true), 2), vec![(0, 0xff)]);
+        assert!(reused_keys(vec![reuse_record(0.7, false)], reuse_judge(0.0, false), 2).is_empty());
+        assert_eq!(reused_keys(vec![reuse_record(0.7, true)], reuse_judge(0.7, true), 2), vec![(0, 0xff)]);
         // Lineups (size >= 3) also require temperature 0 even with logprobs.
-        assert!(reused_keys(vec![reuse_record(0.7)], reuse_judge(0.0, true), 3).is_empty());
-        assert_eq!(reused_keys(vec![reuse_record(0.0)], reuse_judge(0.0, true), 3), vec![(0, 0xff)]);
+        assert!(reused_keys(vec![reuse_record(0.7, true)], reuse_judge(0.0, true), 3).is_empty());
+        assert_eq!(reused_keys(vec![reuse_record(0.0, true)], reuse_judge(0.0, true), 3), vec![(0, 0xff)]);
     }
 }

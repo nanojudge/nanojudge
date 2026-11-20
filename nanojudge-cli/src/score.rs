@@ -219,6 +219,26 @@ fn resolve_edge_temperature(
     }
 }
 
+/// Reject a file that mixes `logprobs: true` and `logprobs: false` records.
+fn check_logprobs_consistency(
+    seen: &mut Option<(bool, usize)>,
+    line_logprobs: bool,
+    path: &Path,
+    line_num: usize,
+) -> Result<(), String> {
+    if let Some((prev, first_line)) = *seen {
+        if line_logprobs != prev {
+            return Err(format!(
+                "{}:{}: mixed logprobs modes in file (logprobs={line_logprobs}, but line {first_line} had logprobs={prev})",
+                path.display(), line_num
+            ));
+        }
+    } else {
+        *seen = Some((line_logprobs, line_num));
+    }
+    Ok(())
+}
+
 /// `expected_lineup_size`: when `Some(k)`, every record must describe a
 /// `k`-item judgement (pairwise = 2); a differing size is a hard error. This is
 /// how `rank --load-judgements` enforces "loaded file must match the run's
@@ -248,7 +268,7 @@ pub(crate) fn load_edges(
     let mut edge_judgements: Vec<usize> = Vec::new();
     let mut judgement_records: Vec<serde_json::Value> = Vec::new();
     let mut total_judgements: usize = 0;
-    let mut logprobs_mode = false;
+    let mut logprobs_mode: Option<(bool, usize)> = None;
     let mut judge_deliberation_seen: HashMap<u64, (bool, usize)> = HashMap::new();
     let mut judge_temps_used: HashMap<u64, f64> = HashMap::new();
     let mut line_num: usize = 0;
@@ -373,9 +393,8 @@ pub(crate) fn load_edges(
                 judge_display_names.push(format!("{judge_model} @ {judge_endpoint}"));
                 judge_flag_keys.push(format!("{judge_model}@{judge_endpoint}"));
             }
-            if line_logprobs {
-                logprobs_mode = true;
-            }
+            check_logprobs_consistency(&mut logprobs_mode, line_logprobs, path, line_num)
+                .unwrap_or_else(|e| bail(e));
 
             let mut lineup_edges = lineup_verdict_to_edges(&item_ids, &verdict, judge_id);
             temper_edges_in_place(&mut lineup_edges, edge_temp);
@@ -463,9 +482,8 @@ pub(crate) fn load_edges(
                 judge_display_names.push(format!("{judge_model} @ {judge_endpoint}"));
                 judge_flag_keys.push(format!("{judge_model}@{judge_endpoint}"));
             }
-            if line_logprobs {
-                logprobs_mode = true;
-            }
+            check_logprobs_consistency(&mut logprobs_mode, line_logprobs, path, line_num)
+                .unwrap_or_else(|e| bail(e));
 
             let tempered = temper_verdict(probs, edge_temp);
             edges.push(Edge::new(id1, id2, tempered, judge_id));
@@ -505,6 +523,7 @@ pub(crate) fn load_edges(
         edge.item2 = remap[edge.item2 as usize];
     }
 
+    let logprobs_mode = logprobs_mode.map(|(b, _)| b).unwrap_or(false);
     (edges, edge_judgements, sorted_names, judge_id_set, judge_display_names, judge_flag_keys, total_judgements, logprobs_mode, judge_temps_used, sorted_hash_keys, judgement_records)
 }
 
@@ -767,6 +786,17 @@ mod tests {
         ]);
         let (_, _, _, _, _, _, _, logprobs, _, _, _) = load_edges(f.path(), Some(1.0), &HashMap::new(), None);
         assert!(!logprobs);
+    }
+
+    #[test]
+    fn test_mixed_logprobs_modes_rejected() {
+        let mut seen = None;
+        let p = Path::new("mixed.jsonl");
+        assert!(check_logprobs_consistency(&mut seen, true, p, 1).is_ok());
+        assert!(check_logprobs_consistency(&mut seen, true, p, 2).is_ok());
+        let err = check_logprobs_consistency(&mut seen, false, p, 3).unwrap_err();
+        assert!(err.contains("mixed logprobs modes"), "unexpected error: {err}");
+        assert!(err.contains("line 1"), "should name the first line: {err}");
     }
 
     #[test]
