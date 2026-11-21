@@ -16,18 +16,28 @@ use crate::llm::{build_completions_url, describe_request_error, TOP_LOGPROBS};
 use crate::resolve::{resolve_config, resolve_judges, ResolvedJudge, NO_DELIBERATION_MAX_TOKENS};
 
 /// Bumped whenever the record layout or the set of test requests changes.
-const PROBE_FORMAT_VERSION: u32 = 4;
+const PROBE_FORMAT_VERSION: u32 = 5;
 
-/// A question that invites working things out, with an instruction that keeps
-/// the visible answer short, so hidden reasoning stands out in the token count.
-const PROBE_PROMPT: &str = "What is 55*17? Reply with only the number.";
+/// Designed to test response, reasoning, and `max_tokens` enforcement in one
+/// cheap request:
+/// - `347*629` invites working things out, so a model that ignores
+///   `reasoning_effort = "none"` either reports reasoning or burns the whole
+///   16-token budget thinking with no visible answer.
+/// - Repeating the 6-digit answer 20 times (~60-80 tokens) ensures the natural
+///   reply overflows `max_tokens = 16`, catching endpoints that ignore the cap.
+const PROBE_PROMPT: &str =
+    "What is 347*629? Reply with only the number, repeated 20 times, one per line.";
+
+/// Minimal prompt for the separate logprobs request when `judge.logprobs` is on.
+/// Kept separate from `PROBE_PROMPT` so an endpoint that rejects `logprobs` or
+/// `top_logprobs` with HTTP 400 still reports `responded`, `reasoned`, and
+/// `max_tokens_respected` cleanly, and sent with `judge.max_tokens` so
+/// reasoning models aren't starved of visible tokens.
+const LOGPROBS_PROBE_PROMPT: &str = "Reply with only the letter A.";
 
 /// Tokens a reply may use beyond one per byte of its visible answer, for
 /// special tokens that aren't in the answer, like the end-of-turn token.
 const PROBE_SPECIAL_TOKEN_ALLOWANCE: u64 = 5;
-
-/// Largest `top_logprobs` the probe asks for.
-const PROBE_TOP_LOGPROBS: u32 = 20;
 
 
 /// Where probe records are kept: `<data dir>/nanojudge/probes.jsonl`.
@@ -67,11 +77,11 @@ pub async fn run(args: ProbeArgs) {
 /// none. Pass only the judges that will send requests. Bails, listing every
 /// problem, if a judge's probe failed or shows its settings aren't honoured.
 ///
-/// A probe belongs to a judge when the URL, model, `reasoning_effort`,
-/// `chat_template_kwargs` and `provider` match, and it's in the current
-/// format. Other settings don't change what the probe tests, except that a
-/// failed probe is redone under a longer `request_timeout_secs` (see
-/// `reusable`).
+/// A probe belongs to a judge when the URL, model, `logprobs`,
+/// `reasoning_effort`, `chat_template_kwargs` and `provider` match, and it's
+/// in the current format. Other settings don't change what the probe tests,
+/// except that a failed probe is redone under a longer `request_timeout_secs`
+/// or larger `max_tokens` (see `reprobe_reason`).
 pub async fn check_judges<'a>(judges: impl IntoIterator<Item = &'a ResolvedJudge>) {
     let path = probes_path();
     let records = read_records(&path);
@@ -80,17 +90,20 @@ pub async fn check_judges<'a>(judges: impl IntoIterator<Item = &'a ResolvedJudge
     let mut problems = Vec::new();
     for judge in judges {
         let latest = latest_record(&records, judge);
-        let record = match latest.filter(|record| reusable(record, judge)) {
-            Some(record) => record.clone(),
+        let record = match latest {
+            Some(record) if reprobe_reason(record, judge).is_none() => record.clone(),
+            Some(record) => {
+                let reason = reprobe_reason(record, judge).expect("checked above");
+                eprintln!(
+                    "The last probe of {} failed under {reason}. Probing it again; records: {}",
+                    judge.display_name, path.display()
+                );
+                let record = probe_judge(&client, judge).await;
+                append_record(&path, &record);
+                record
+            }
             None => {
-                if latest.is_some() {
-                    eprintln!(
-                        "The last probe of {} failed under a shorter request_timeout_secs. Probing it again; records: {}",
-                        judge.display_name, path.display()
-                    );
-                } else {
-                    eprintln!("No probe of {} yet. Probing it now; records: {}", judge.display_name, path.display());
-                }
+                eprintln!("No probe of {} yet. Probing it now; records: {}", judge.display_name, path.display());
                 let record = probe_judge(&client, judge).await;
                 append_record(&path, &record);
                 record
@@ -135,19 +148,20 @@ fn latest_record<'a>(records: &'a [Value], judge: &ResolvedJudge) -> Option<&'a 
         r["format_version"] == json!(PROBE_FORMAT_VERSION)
             && r["url"] == json!(url)
             && r["model"] == json!(judge.model)
+            && r["settings"]["logprobs"] == json!(judge.logprobs)
             && r["settings"]["reasoning_effort"] == json!(judge.reasoning_effort)
             && r["settings"]["chat_template_kwargs"] == json!(judge.chat_template_kwargs)
             && r["settings"]["provider"] == json!(judge.provider)
     })
 }
 
-/// Whether a judge's latest probe can stand in for a new one. A passed probe
-/// always can. A failed one can unless `request_timeout_secs` is now longer,
-/// since the old timeout may be why it failed. Unset waits indefinitely, so
-/// it counts as the longest.
-fn reusable(record: &Value, judge: &ResolvedJudge) -> bool {
+/// Why a judge's latest probe should be redone instead of reused, or `None` if
+/// it can stand in. A passed probe is always reused. A failed one is redone
+/// when `request_timeout_secs` is now longer (unset counts as longest) or
+/// `max_tokens` is now larger, since tighter limits may be why it failed.
+fn reprobe_reason(record: &Value, judge: &ResolvedJudge) -> Option<&'static str> {
     if judge_problems(judge, &record["findings"]).is_empty() {
-        return true;
+        return None;
     }
     let old = record["settings"]["request_timeout_secs"].as_f64();
     let new = judge.request_timeout.map(|t| t.as_secs_f64());
@@ -156,7 +170,16 @@ fn reusable(record: &Value, judge: &ResolvedJudge) -> bool {
         (Some(_), None) => true,
         (None, _) => false,
     };
-    !longer
+    if longer {
+        return Some("a shorter request_timeout_secs");
+    }
+    if record["settings"]["max_tokens"]
+        .as_u64()
+        .is_some_and(|old| u64::from(judge.max_tokens) > old)
+    {
+        return Some("a smaller max_tokens");
+    }
+    None
 }
 
 /// Why runs can't use this judge, given its probe findings. Empty if they can.
@@ -200,13 +223,14 @@ fn judge_problems(judge: &ResolvedJudge, findings: &Value) -> Vec<String> {
     problems
 }
 
-/// The request body shared by every test: the judge's own settings.
-fn base_request(judge: &ResolvedJudge) -> serde_json::Map<String, Value> {
+/// The request body shared by probe requests: the judge's own settings with
+/// the given prompt and token limit.
+fn base_request(judge: &ResolvedJudge, prompt: &str, max_tokens: u32) -> serde_json::Map<String, Value> {
     let mut body = serde_json::Map::new();
     body.insert("model".into(), json!(judge.model));
-    body.insert("messages".into(), json!([{"role": "user", "content": PROBE_PROMPT}]));
+    body.insert("messages".into(), json!([{"role": "user", "content": prompt}]));
     body.insert("temperature".into(), json!(judge.temperature));
-    body.insert("max_tokens".into(), json!(judge.max_tokens));
+    body.insert("max_tokens".into(), json!(max_tokens));
     if let Some(p) = judge.presence_penalty {
         body.insert("presence_penalty".into(), json!(p));
     }
@@ -227,53 +251,37 @@ fn base_request(judge: &ResolvedJudge) -> serde_json::Map<String, Value> {
 
 async fn probe_judge(client: &Client, judge: &ResolvedJudge) -> Value {
     let url = build_completions_url(&judge.endpoint);
+    let max_tokens_limit = judge.max_tokens.min(NO_DELIBERATION_MAX_TOKENS);
 
-    // Reasoning: a plain request with the judge's own max_tokens. No logprobs,
-    // so an endpoint without them can still be probed for reasoning.
-    let reasoning = base_request(judge);
-
-    // Logprobs and top logprobs: a short reply is enough to see what comes back.
-    // Separate requests, so a rejected top_logprobs doesn't hide whether
-    // logprobs work at all.
-    let mut logprobs = base_request(judge);
-    logprobs.insert("max_tokens".into(), json!(NO_DELIBERATION_MAX_TOKENS));
-    logprobs.insert("logprobs".into(), json!(true));
-
-    let mut top_logprobs = base_request(judge);
-    top_logprobs.insert("max_tokens".into(), json!(NO_DELIBERATION_MAX_TOKENS));
-    top_logprobs.insert("logprobs".into(), json!(true));
-    top_logprobs.insert("top_logprobs".into(), json!(PROBE_TOP_LOGPROBS));
-
-    // Max tokens: a limit the answer can't fit in.
-    let mut max_tokens = base_request(judge);
-    max_tokens.insert("max_tokens".into(), json!(NO_DELIBERATION_MAX_TOKENS));
-
-    let tests = [
-        ("reasoning", reasoning),
-        ("logprobs", logprobs),
-        ("top_logprobs", top_logprobs),
-        ("max_tokens", max_tokens),
-    ];
-
-    let mut requests = Vec::new();
-    for (test, body) in tests {
-        let body = Value::Object(body);
-        requests.push(send_test(client, judge, &url, test, body).await);
-    }
+    let main_body = base_request(judge, PROBE_PROMPT, max_tokens_limit);
+    let mut requests = vec![send_test(client, judge, &url, "probe", Value::Object(main_body)).await];
 
     let responded = first_choice(&requests[0]["response"]).is_some();
-    let reasoned = reasoned(&requests[0]["response"]);
-    let logprobs_returned = logprobs_returned(&requests[1]["response"]);
-    let top_logprobs_returned = top_logprobs_returned(&requests[2]["response"]);
-    let max_tokens_respected = max_tokens_respected(&requests[3]["response"]);
+    let did_reason = reasoned(&requests[0]["response"]);
+    let kept_max_tokens = max_tokens_respected(&requests[0]["response"], max_tokens_limit);
+    let (has_logprobs, top_lp_count) = if judge.logprobs && responded {
+        let mut lp_body = base_request(judge, LOGPROBS_PROBE_PROMPT, judge.max_tokens);
+        lp_body.insert("logprobs".into(), json!(true));
+        lp_body.insert("top_logprobs".into(), json!(TOP_LOGPROBS));
+        requests.push(send_test(client, judge, &url, "logprobs", Value::Object(lp_body)).await);
+        (
+            logprobs_returned(&requests[1]["response"]),
+            top_logprobs_returned(&requests[1]["response"]),
+        )
+    } else {
+        (None, None)
+    };
+
     eprintln!("  responded: {}", finding_str(Some(responded)));
-    eprintln!("  reasoned: {}", finding_str(reasoned));
-    eprintln!("  logprobs returned: {}", finding_str(logprobs_returned));
-    match top_logprobs_returned {
-        Some(n) => eprintln!("  top logprobs returned: {n} of {PROBE_TOP_LOGPROBS}"),
-        None => eprintln!("  top logprobs returned: can't tell"),
+    eprintln!("  reasoned: {}", finding_str(did_reason));
+    if judge.logprobs {
+        eprintln!("  logprobs returned: {}", finding_str(has_logprobs));
+        match top_lp_count {
+            Some(n) => eprintln!("  top logprobs returned: {n} of {TOP_LOGPROBS}"),
+            None => eprintln!("  top logprobs returned: can't tell"),
+        }
     }
-    eprintln!("  max_tokens respected: {}", finding_str(max_tokens_respected));
+    eprintln!("  max_tokens respected: {}", finding_str(kept_max_tokens));
 
     json!({
         "format_version": PROBE_FORMAT_VERSION,
@@ -283,17 +291,19 @@ async fn probe_judge(client: &Client, judge: &ResolvedJudge) -> Value {
         "url": url,
         "model": judge.model,
         "settings": {
+            "logprobs": judge.logprobs,
             "reasoning_effort": judge.reasoning_effort,
             "chat_template_kwargs": judge.chat_template_kwargs,
             "provider": judge.provider,
+            "max_tokens": judge.max_tokens,
             "request_timeout_secs": judge.request_timeout.map(|t| t.as_secs_f64()),
         },
         "findings": {
             "responded": responded,
-            "reasoned": reasoned,
-            "logprobs_returned": logprobs_returned,
-            "top_logprobs_returned": top_logprobs_returned,
-            "max_tokens_respected": max_tokens_respected,
+            "reasoned": did_reason,
+            "logprobs_returned": has_logprobs,
+            "top_logprobs_returned": top_lp_count,
+            "max_tokens_respected": kept_max_tokens,
         },
         "requests": requests,
     })
@@ -342,12 +352,12 @@ fn top_logprobs_returned(response: &Value) -> Option<usize> {
         .min()
 }
 
-/// Whether the reply to the max_tokens test kept to its limit.
+/// Whether the reply kept to `limit`.
 /// None if the response isn't a usable reply or reports no token count.
-fn max_tokens_respected(response: &Value) -> Option<bool> {
+fn max_tokens_respected(response: &Value, limit: u32) -> Option<bool> {
     first_choice(response)?;
     let completion_tokens = response.pointer("/usage/completion_tokens").and_then(Value::as_u64)?;
-    Some(completion_tokens <= u64::from(NO_DELIBERATION_MAX_TOKENS))
+    Some(completion_tokens <= u64::from(limit))
 }
 
 /// Whether a reply shows the model reasoned.
@@ -361,7 +371,8 @@ fn max_tokens_respected(response: &Value) -> Option<bool> {
 /// reply or reports no token count.
 ///
 /// Hidden reasoning shorter than the answer's spare bytes goes unnoticed,
-/// which is why the probe prompt asks for a short answer.
+/// though a 3-digit multiplication under a 16-token cap leaves a reasoning
+/// model with no visible answer at all.
 fn reasoned(response: &Value) -> Option<bool> {
     let choice = first_choice(response)?;
     let message = &choice["message"];
@@ -552,12 +563,17 @@ mod tests {
         })
     }
 
-    fn record(url: &str, model: &str, effort: Option<&str>, kwargs: Value, tag: u32) -> Value {
+    fn record(url: &str, model: &str, logprobs: bool, effort: Option<&str>, kwargs: Value, tag: u32) -> Value {
         json!({
             "format_version": PROBE_FORMAT_VERSION,
             "url": url,
             "model": model,
-            "settings": {"reasoning_effort": effort, "chat_template_kwargs": kwargs, "provider": null},
+            "settings": {
+                "logprobs": logprobs,
+                "reasoning_effort": effort,
+                "chat_template_kwargs": kwargs,
+                "provider": null,
+            },
             "tag": tag,
         })
     }
@@ -567,12 +583,13 @@ mod tests {
         let url = "http://127.0.0.1:8001/v1/chat/completions";
         let mut j = judge(Some("none"), false);
         let records = vec![
-            record(url, "m", Some("none"), Value::Null, 1),
-            record(url, "m", Some("none"), Value::Null, 2),
-            record(url, "other", Some("none"), Value::Null, 3),
-            record(url, "m", None, Value::Null, 4),
-            record("http://elsewhere/v1/chat/completions", "m", Some("none"), Value::Null, 5),
-            record(url, "m", Some("none"), json!({"enable_thinking": false}), 6),
+            record(url, "m", false, Some("none"), Value::Null, 1),
+            record(url, "m", false, Some("none"), Value::Null, 2),
+            record(url, "other", false, Some("none"), Value::Null, 3),
+            record(url, "m", false, None, Value::Null, 4),
+            record("http://elsewhere/v1/chat/completions", "m", false, Some("none"), Value::Null, 5),
+            record(url, "m", false, Some("none"), json!({"enable_thinking": false}), 6),
+            record(url, "m", true, Some("none"), Value::Null, 7),
         ];
         assert_eq!(latest_record(&records, &j).unwrap()["tag"], 2);
 
@@ -580,6 +597,10 @@ mod tests {
         j.endpoint = "http://127.0.0.1:8001/".into();
         assert_eq!(latest_record(&records, &j).unwrap()["tag"], 2);
 
+        j.logprobs = true;
+        assert_eq!(latest_record(&records, &j).unwrap()["tag"], 7);
+
+        j.logprobs = false;
         j.chat_template_kwargs = Some([("enable_thinking".to_string(), json!(false))].into());
         assert_eq!(latest_record(&records, &j).unwrap()["tag"], 6);
 
@@ -589,34 +610,42 @@ mod tests {
     }
 
     #[test]
-    fn failed_probe_is_redone_only_under_a_longer_timeout() {
+    fn failed_probe_is_redone_under_a_longer_timeout_or_larger_max_tokens() {
         use std::time::Duration;
         let url = "http://127.0.0.1:8001/v1/chat/completions";
-        let mut passed = record(url, "m", None, Value::Null, 1);
+        let mut passed = record(url, "m", false, None, Value::Null, 1);
         passed["findings"] = good_findings();
-        let mut failed = record(url, "m", None, Value::Null, 2);
+        let mut failed = record(url, "m", false, None, Value::Null, 2);
         failed["findings"] = json!({"responded": false});
         failed["settings"]["request_timeout_secs"] = json!(5);
-        let mut failed_unset = record(url, "m", None, Value::Null, 3);
+        failed["settings"]["max_tokens"] = json!(64);
+        let mut failed_unset = record(url, "m", false, None, Value::Null, 3);
         failed_unset["findings"] = json!({"responded": false});
 
         let mut j = judge(None, false);
+        j.max_tokens = 64;
         for (timeout, failed_reusable) in [(Some(1.0), true), (Some(5.0), true), (Some(5.5), false), (None, false)] {
             j.request_timeout = timeout.map(Duration::from_secs_f64);
-            assert!(reusable(&passed, &j));
-            assert_eq!(reusable(&failed, &j), failed_reusable, "timeout {timeout:?}");
+            assert!(reprobe_reason(&passed, &j).is_none());
+            assert_eq!(reprobe_reason(&failed, &j).is_none(), failed_reusable, "timeout {timeout:?}");
             // A failed probe with no timeout already waited indefinitely.
-            assert!(reusable(&failed_unset, &j));
+            assert!(reprobe_reason(&failed_unset, &j).is_none());
         }
+
+        // Larger max_tokens re-probes a failed record, never a passed one.
+        j.request_timeout = Some(Duration::from_secs(5));
+        j.max_tokens = 128;
+        assert!(reprobe_reason(&passed, &j).is_none());
+        assert_eq!(reprobe_reason(&failed, &j), Some("a smaller max_tokens"));
     }
 
     #[test]
     fn latest_record_matches_provider() {
         let url = "https://openrouter.ai/api/v1/chat/completions";
         let pinned = json!({"only": ["xiaomi"], "allow_fallbacks": false});
-        let mut other = record(url, "m", None, Value::Null, 1);
+        let mut other = record(url, "m", false, None, Value::Null, 1);
         other["settings"]["provider"] = json!({"only": ["novita"], "allow_fallbacks": false});
-        let mut same = record(url, "m", None, Value::Null, 2);
+        let mut same = record(url, "m", false, None, Value::Null, 2);
         same["settings"]["provider"] = pinned.clone();
         let records = vec![same, other];
 
@@ -632,7 +661,7 @@ mod tests {
     #[test]
     fn latest_record_skips_other_formats() {
         let url = "http://127.0.0.1:8001/v1/chat/completions";
-        let mut old = record(url, "m", None, Value::Null, 1);
+        let mut old = record(url, "m", false, None, Value::Null, 1);
         old["format_version"] = json!(PROBE_FORMAT_VERSION - 1);
         assert!(latest_record(&[old], &judge(None, false)).is_none());
     }
@@ -713,9 +742,11 @@ mod tests {
     #[test]
     fn max_tokens_respected_compares_completion_tokens() {
         let with_usage = |n: u64| json!({"choices": [{"message": {"content": null}}], "usage": {"completion_tokens": n}});
-        assert_eq!(max_tokens_respected(&with_usage(16)), Some(true));
-        assert_eq!(max_tokens_respected(&with_usage(17)), Some(false));
-        assert_eq!(max_tokens_respected(&reply(json!({"content": "935"}), None)), None);
-        assert_eq!(max_tokens_respected(&json!({"error": {"message": "nope"}})), None);
+        assert_eq!(max_tokens_respected(&with_usage(16), 16), Some(true));
+        assert_eq!(max_tokens_respected(&with_usage(17), 16), Some(false));
+        assert_eq!(max_tokens_respected(&with_usage(8), 8), Some(true));
+        assert_eq!(max_tokens_respected(&with_usage(9), 8), Some(false));
+        assert_eq!(max_tokens_respected(&reply(json!({"content": "935"}), None), 16), None);
+        assert_eq!(max_tokens_respected(&json!({"error": {"message": "nope"}}), 16), None);
     }
 }

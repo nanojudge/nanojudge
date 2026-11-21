@@ -2,7 +2,7 @@
 
 ## What it is
 
-Before `nanojudge rank` or `nanojudge benchmark` uses a judge for the first time, NanoJudge sends the judge's endpoint a few cheap test requests and records how it behaves. The results are saved to a local file. Later runs use the saved results instead of probing again. `nanojudge probe` runs a new probe of every judge in the config on demand.
+Before `nanojudge rank` or `nanojudge benchmark` uses a judge for the first time, NanoJudge sends the judge's endpoint one or two cheap test requests and records how it behaves. The results are saved to a local file. Later runs use the saved results instead of probing again. `nanojudge probe` runs a new probe of every judge in the config on demand.
 
 ## Why
 
@@ -14,12 +14,13 @@ The probe checks the endpoint's behaviour directly with cheap prompts, so NanoJu
 
 ## What it tests
 
-The probe sends four requests, each with the judge's own settings (temperature, `top_p`, `presence_penalty`, `reasoning_effort` and `chat_template_kwargs`) and the prompt "What is 55*17? Reply with only the number.":
+The probe sends one request (two when `logprobs` is on), each with the judge's own settings (temperature, `top_p`, `presence_penalty`, `reasoning_effort`, `chat_template_kwargs`, and `provider`):
 
-- **Reasoning:** a plain request with the judge's `max_tokens`. The model reasoned if the reply has reasoning text (`reasoning` or `reasoning_content`), reports reasoning tokens, or has `<think>` tags in the answer. It also reasoned if the reply used more completion tokens than the answer can account for. Every token of the answer is at least one byte, so tokens beyond the answer's length in bytes (plus a few special tokens, like the end-of-turn token) are reasoning that the endpoint counted but didn't show. The prompt asks for a short answer so that hidden reasoning stands out.
-- **Logprobs:** a 16-token request with logprobs, to check that logprobs come back.
-- **Top logprobs:** a 16-token request for 20 top logprobs, to record how many come back.
-- **`max_tokens`:** a request limited to 16 tokens, to check the limit is kept. 16 is the default for pairwise runs with deliberation disabled.
+- **Main probe:** `max_tokens` capped at 16 (the default for pairwise runs with deliberation disabled) and the prompt "What is 347*629? Reply with only the number, repeated 20 times, one per line.", with no `logprobs` options. From this single reply, the probe checks:
+  - **Responded:** whether the endpoint returned a usable chat completion.
+  - **`max_tokens` respected:** whether `usage.completion_tokens` stayed at or below the token limit. Repeating a 6-digit number 20 times needs well over 16 tokens, so an endpoint that ignores `max_tokens` overflows the limit.
+  - **Reasoned:** the model reasoned if the reply has reasoning text (`reasoning` or `reasoning_content`), reports reasoning tokens, or has `<think>` tags in the answer. It also reasoned if the reply used more completion tokens than the visible answer can account for: every token of the answer is at least one byte, so tokens beyond the answer's length in bytes (plus a few special tokens, like the end-of-turn token) are reasoning that the endpoint counted but didn't show. A 3-digit multiplication under a 16-token cap leaves a reasoning model with no visible answer at all.
+- **Logprobs** (only when `logprobs` is on and the main probe responded): the judge's full `max_tokens`, `logprobs: true`, `top_logprobs: 10` (the number runs need), and the prompt "Reply with only the letter A.". Kept separate so an endpoint that rejects `logprobs` or `top_logprobs` with HTTP 400 still reports the main findings cleanly, and given the judge's full `max_tokens` so reasoning models have room to emit a visible token. Checks whether `choices[0].logprobs.content` is non-empty and records the smallest `top_logprobs` array length across the returned tokens.
 
 Each finding is yes, no, or can't tell. The probe can't tell when the endpoint gives no usable reply, or leaves out the data a finding needs, such as the token counts.
 
@@ -29,7 +30,7 @@ The probe also records how long each request takes, in milliseconds.
 
 A run refuses to start, listing every problem it finds, if a judge's probe shows any of these:
 
-- The endpoint gave no usable reply to the reasoning request.
+- The endpoint gave no usable reply to the probe.
 - The endpoint doesn't keep to `max_tokens`.
 - The judge sets `reasoning_effort = "none"`, but the model reasoned.
 - The judge uses logprobs, but the endpoint returns none, or returns fewer top logprobs than runs ask for (10).
@@ -42,7 +43,7 @@ A finding the probe can't make counts against the judge. `rank` only checks judg
 
 Probe results are saved to `probes.jsonl` in a `nanojudge` folder in the user data directory (`~/.local/share/nanojudge/` on Linux). The file is append-only: each probe adds a new line, and old records are never deleted or overwritten. Each record keeps the raw requests (never headers, so API keys stay out of the file) and responses along with the findings, so new findings can later be worked out from old probes without probing again.
 
-A run uses the most recent record whose URL, model, `reasoning_effort`, `chat_template_kwargs` and `provider` match the judge. Changing one of these settings starts a new probe; changing others, such as temperature, doesn't. Records from an older version of the probe are ignored. After fixing an endpoint, run `nanojudge probe` to replace its saved result.
+A run uses the most recent record whose URL, model, `logprobs`, `reasoning_effort`, `chat_template_kwargs` and `provider` match the judge. Changing one of these settings starts a new probe; changing others, such as temperature, doesn't. Records from an older version of the probe are ignored. After fixing an endpoint, run `nanojudge probe` to replace its saved result.
 
 ## Routing endpoints are not supported
 
