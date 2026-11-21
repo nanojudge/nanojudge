@@ -307,24 +307,42 @@ pub fn config_path() -> PathBuf {
     config_dir.join("nanojudge").join("config.toml")
 }
 
-/// Load config from a file path. Returns default (all None) if file doesn't exist.
-pub fn load_config(path: &Path) -> NanojudgeConfig {
-    match std::fs::read_to_string(path) {
-        Ok(content) => {
-            toml::from_str(&content).unwrap_or_else(|e| {
-                let mut msg = format!("Bad config at {}:\n  {e}", path.display());
-                if let Some(span) = e.span() {
-                    let line_num = content[..span.start].matches('\n').count() + 1;
-                    if let Some(line) = content.lines().nth(line_num - 1) {
-                        msg.push_str(&format!("\n\n  line {line_num}: {}", line.trim()));
-                    }
-                }
-                bail(msg)
-            })
+/// Resolve the config path (`--config` if given, otherwise the default path)
+/// and load it. Bails if the file is missing, unreadable, or invalid TOML.
+pub fn load_config(explicit_path: Option<&Path>) -> (PathBuf, NanojudgeConfig) {
+    let (path, is_default) = match explicit_path {
+        Some(p) => (p.to_path_buf(), false),
+        None => (config_path(), true),
+    };
+    let cfg = try_load_config(&path, is_default).unwrap_or_else(|msg| bail(msg));
+    (path, cfg)
+}
+
+fn try_load_config(path: &Path, is_default: bool) -> Result<NanojudgeConfig, String> {
+    let content = match std::fs::read_to_string(path) {
+        Ok(content) => content,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            return Err(if is_default {
+                format!(
+                    "Config file not found at {}. Run `nanojudge init` to create one.",
+                    path.display()
+                )
+            } else {
+                format!("Config file not found: {}", path.display())
+            });
         }
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => NanojudgeConfig::default(),
-        Err(e) => bail(format!("Failed to read config at {}: {e}", path.display())),
-    }
+        Err(e) => return Err(format!("Failed to read config at {}: {e}", path.display())),
+    };
+    toml::from_str(&content).map_err(|e| {
+        let mut msg = format!("Bad config at {}:\n  {e}", path.display());
+        if let Some(span) = e.span() {
+            let line_num = content[..span.start].matches('\n').count() + 1;
+            if let Some(line) = content.lines().nth(line_num - 1) {
+                msg.push_str(&format!("\n\n  line {line_num}: {}", line.trim()));
+            }
+        }
+        msg
+    })
 }
 
 /// Create the default config file. Errors if it already exists.
@@ -359,11 +377,17 @@ mod tests {
     }
 
     #[test]
-    fn test_load_config_missing_file_returns_defaults() {
-        let config = load_config(Path::new("/tmp/nanojudge-test-nonexistent/config.toml"));
-        assert!(config.judgements_per_item.is_none());
-        assert!(config.concurrency.is_none());
-        assert!(config.judge.is_none());
+    fn test_load_config_missing_file_errors() {
+        let missing = Path::new("/tmp/nanojudge-test-nonexistent/config.toml");
+
+        let err_explicit = try_load_config(missing, false).unwrap_err();
+        assert!(err_explicit.contains("Config file not found"), "{err_explicit}");
+        assert!(err_explicit.contains("config.toml"), "{err_explicit}");
+        assert!(!err_explicit.contains("nanojudge init"), "{err_explicit}");
+
+        let err_default = try_load_config(missing, true).unwrap_err();
+        assert!(err_default.contains("Config file not found"), "{err_default}");
+        assert!(err_default.contains("nanojudge init"), "{err_default}");
     }
 
     #[test]
@@ -385,7 +409,7 @@ presence_penalty = 1.5
 top_p = 0.95
 "#).unwrap();
 
-        let config = load_config(tmpfile.path());
+        let config = load_config(Some(tmpfile.path())).1;
         assert_eq!(config.judgements_per_item.unwrap(), 10);
         assert_eq!(config.judgements_per_refit, Some(3));
         assert_eq!(config.concurrency.unwrap(), 16);
@@ -408,7 +432,7 @@ top_p = 0.95
 judgements_per_item = 5
 "#).unwrap();
 
-        let config = load_config(tmpfile.path());
+        let config = load_config(Some(tmpfile.path())).1;
         assert_eq!(config.judgements_per_item.unwrap(), 5);
         assert!(config.judge.is_none());
         assert!(config.concurrency.is_none());
@@ -446,7 +470,7 @@ weight = 3.0
 temperature = 1.0
 "#).unwrap();
 
-        let config = load_config(tmpfile.path());
+        let config = load_config(Some(tmpfile.path())).1;
         assert_eq!(config.judgements_per_item.unwrap(), 10);
         let judges = config.judge.unwrap();
         assert_eq!(judges.len(), 2);
@@ -470,7 +494,7 @@ temperature = 1.0
 judgements_per_item = 5
 "#).unwrap();
 
-        let config = load_config(tmpfile.path());
+        let config = load_config(Some(tmpfile.path())).1;
         assert!(config.judge.is_none());
         assert_eq!(config.judgements_per_item.unwrap(), 5);
     }
@@ -482,7 +506,7 @@ judgements_per_item = 5
 deliberation_enabled = false
 "#).unwrap();
 
-        let config = load_config(tmpfile.path());
+        let config = load_config(Some(tmpfile.path())).1;
         assert_eq!(config.deliberation_enabled, Some(false));
     }
 
@@ -499,7 +523,7 @@ temperature = 0.6
 verdict_temperature = 2.5
 "#).unwrap();
 
-        let config = load_config(tmpfile.path());
+        let config = load_config(Some(tmpfile.path())).1;
         assert_eq!(config.verdict_temperature, Some(6.0));
         assert_eq!(config.judge.unwrap()[0].verdict_temperature, Some(2.5));
     }
@@ -511,7 +535,7 @@ verdict_temperature = 2.5
 judgements_per_item = 5
 "#).unwrap();
 
-        let config = load_config(tmpfile.path());
+        let config = load_config(Some(tmpfile.path())).1;
         assert!(config.deliberation_enabled.is_none());
     }
 

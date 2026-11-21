@@ -48,8 +48,7 @@ async fn main() {
 }
 
 async fn run_benchmark_cmd(args: BenchmarkArgs) {
-    let config_path = args.config.clone().unwrap_or_else(config::config_path);
-    let cfg = config::load_config(&config_path);
+    let (config_path, cfg) = config::load_config(args.config.as_deref());
     let resolved = resolve_config(&args.cfg, &cfg);
     if resolved.lineup_size != 2 {
         bail(format!(

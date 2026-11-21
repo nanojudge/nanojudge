@@ -1184,8 +1184,7 @@ fn finish_run(
 }
 
 pub async fn run(args: RankArgs) {
-    let config_path = args.config.clone().unwrap_or_else(config::config_path);
-    let cfg = config::load_config(&config_path);
+    let (config_path, cfg) = config::load_config(args.config.as_deref());
     let resolved = resolve_config(&args.cfg, &cfg);
     let judgements_per_item = resolve_judgements_per_item(&args.cfg, &cfg);
 
