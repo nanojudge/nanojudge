@@ -226,23 +226,9 @@ pub fn resolve_judges(
     } else if specified_max_tokens.is_empty() {
         2048
     } else {
-        let sum: u32 = specified_max_tokens.iter().sum();
-        sum / specified_max_tokens.len() as u32
+        let sum: u64 = specified_max_tokens.iter().map(|&n| u64::from(n)).sum();
+        (sum / specified_max_tokens.len() as u64) as u32
     };
-    // Print message if some judges are missing max_tokens and we're using the average
-    if deliberation_enabled && !specified_max_tokens.is_empty() && specified_max_tokens.len() < judge_configs.len() {
-        let missing: Vec<&str> = judge_configs.iter()
-            .filter(|jc| jc.max_tokens.is_none())
-            .map(|jc| jc.model.as_str())
-            .collect();
-        let specified: Vec<String> = judge_configs.iter()
-            .filter_map(|jc| jc.max_tokens.map(|_| jc.model.clone()))
-            .collect();
-        eprintln!(
-            "max_tokens not set for {}; using {} (average of {})",
-            missing.join(", "), default_max_tokens, specified.join(", ")
-        );
-    }
 
     // Compute display names: model is default, disambiguate with the endpoint if models collide
     let mut model_counts: HashMap<String, usize> = HashMap::new();
@@ -269,6 +255,18 @@ pub fn resolve_judges(
                 jc.model,
             ));
         }
+
+        let temperature_jitter = jc.temperature_jitter.unwrap_or(DEFAULT_TEMPERATURE_JITTER);
+        let max_tokens = jc.max_tokens.unwrap_or(default_max_tokens);
+        validate_judge_sampling_params(
+            &jc.model,
+            temperature,
+            temperature_jitter,
+            jc.top_p,
+            jc.presence_penalty,
+            max_tokens,
+        )
+        .unwrap_or_else(|msg| bail(msg));
 
         let api_key = if let Some(ref env_name) = jc.api_key_env {
             match std::env::var(env_name) {
@@ -344,7 +342,7 @@ pub fn resolve_judges(
             model: jc.model.clone(),
             api_key,
             temperature,
-            temperature_jitter: jc.temperature_jitter.unwrap_or(DEFAULT_TEMPERATURE_JITTER),
+            temperature_jitter,
             presence_penalty: jc.presence_penalty,
             top_p: jc.top_p,
             logprobs: global_logprobs,
@@ -358,7 +356,7 @@ pub fn resolve_judges(
             weight,
             min_logprob_coverage,
             verdict_temperature,
-            max_tokens: jc.max_tokens.unwrap_or(default_max_tokens),
+            max_tokens,
             reasoning_effort: jc.reasoning_effort.clone(),
             chat_template_kwargs: jc.chat_template_kwargs.as_ref().map(|m| {
                 m.iter().map(|(k, v)| (k.clone(), toml_to_json(v))).collect()
@@ -376,7 +374,63 @@ pub fn resolve_judges(
         bail("At least one judge must have positive weight.".to_string());
     }
 
+    // Print message only after all judges pass validation so a judge that
+    // requires explicit max_tokens doesn't get a misleading fallback notice.
+    if deliberation_enabled && !specified_max_tokens.is_empty() && specified_max_tokens.len() < judge_configs.len() {
+        let missing: Vec<&str> = judge_configs.iter()
+            .filter(|jc| jc.max_tokens.is_none())
+            .map(|jc| jc.model.as_str())
+            .collect();
+        let specified: Vec<String> = judge_configs.iter()
+            .filter_map(|jc| jc.max_tokens.map(|_| jc.model.clone()))
+            .collect();
+        eprintln!(
+            "max_tokens not set for {}; using {} (average of {})",
+            missing.join(", "), default_max_tokens, specified.join(", ")
+        );
+    }
+
     judges
+}
+
+fn validate_judge_sampling_params(
+    model: &str,
+    temperature: f64,
+    temperature_jitter: f64,
+    top_p: Option<f64>,
+    presence_penalty: Option<f64>,
+    max_tokens: u32,
+) -> Result<(), String> {
+    if !temperature.is_finite() || temperature < 0.0 {
+        return Err(format!(
+            "Judge {model} has temperature={temperature}, must be finite and >= 0"
+        ));
+    }
+    if !temperature_jitter.is_finite() || temperature_jitter < 0.0 {
+        return Err(format!(
+            "Judge {model} has temperature_jitter={temperature_jitter}, must be finite and >= 0"
+        ));
+    }
+    if let Some(p) = top_p
+        && (!p.is_finite() || p <= 0.0 || p > 1.0)
+    {
+        return Err(format!(
+            "Judge {model} has top_p={p}, must be finite, > 0.0 and <= 1.0"
+        ));
+    }
+    if let Some(p) = presence_penalty
+        && !p.is_finite()
+    {
+        return Err(format!(
+            "Judge {model} has presence_penalty={p}, must be finite"
+        ));
+    }
+    if max_tokens == 0 {
+        return Err(format!(
+            "Judge {model} has max_tokens=0, must be at least 1"
+        ));
+    }
+    Ok(())
 }
 
 /// Resolve the ranking budget. Kept out of resolve_config() because only
@@ -951,5 +1005,34 @@ mod tests {
         let cfg = NanojudgeConfig::default();
         let resolved = resolve_config(&cli, &cfg);
         assert_eq!(resolved.judgement_distribution, JudgementDistribution::TopHeavy);
+    }
+
+    #[test]
+    fn test_validate_judge_sampling_params_accepts_valid_values() {
+        assert!(validate_judge_sampling_params("m", 0.0, 0.0, None, None, 1).is_ok());
+        assert!(validate_judge_sampling_params("m", 1.5, 0.05, Some(1.0), Some(-2.0), 2048).is_ok());
+        assert!(validate_judge_sampling_params("m", 0.7, 0.1, Some(0.01), Some(2.0), 16).is_ok());
+    }
+
+    #[test]
+    fn test_validate_judge_sampling_params_rejects_invalid_values() {
+        for bad_temp in [-0.1, f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            let err = validate_judge_sampling_params("m", bad_temp, 0.0, None, None, 16).unwrap_err();
+            assert!(err.contains("temperature="), "{err}");
+        }
+        for bad_jitter in [-0.01, f64::NAN, f64::INFINITY] {
+            let err = validate_judge_sampling_params("m", 0.7, bad_jitter, None, None, 16).unwrap_err();
+            assert!(err.contains("temperature_jitter="), "{err}");
+        }
+        for bad_top_p in [0.0, -0.5, 1.01, f64::NAN, f64::INFINITY] {
+            let err = validate_judge_sampling_params("m", 0.7, 0.0, Some(bad_top_p), None, 16).unwrap_err();
+            assert!(err.contains("top_p="), "{err}");
+        }
+        for bad_penalty in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            let err = validate_judge_sampling_params("m", 0.7, 0.0, None, Some(bad_penalty), 16).unwrap_err();
+            assert!(err.contains("presence_penalty="), "{err}");
+        }
+        let err = validate_judge_sampling_params("m", 0.7, 0.0, None, None, 0).unwrap_err();
+        assert!(err.contains("max_tokens=0"), "{err}");
     }
 }

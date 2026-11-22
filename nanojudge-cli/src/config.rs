@@ -237,7 +237,7 @@ const DEFAULT_CONFIG_TEMPLATE: &str = "\
 #   weight                 - Relative weight for pair assignment (default: 1)
 #   temperature_jitter     - Std dev of N(1.0, jitter) temperature multiplier (default: 0)
 #   presence_penalty       - Penalizes repeated tokens, range -2.0 to 2.0
-#   top_p                  - Nucleus sampling threshold, range 0.0 to 1.0
+#   top_p                  - Nucleus sampling threshold, > 0.0 and <= 1.0
 #   min_logprob_coverage   - Min verdict-token logprob mass to trust a verdict, > 0.0 and <= 1.0 (default: 0.95)
 #   verdict_temperature    - Temper this judge's parsed verdicts, q^(1/T); > 1 softens overconfidence, must be > 0 (default: global value, else 3.0 deliberation / 1.0 no-deliberation)
 #   max_tokens             - Maximum tokens in LLM response, required unless reasoning_effort = \"none\" (then default: 2048, or average of specified judges; without deliberation, just enough for the verdict)

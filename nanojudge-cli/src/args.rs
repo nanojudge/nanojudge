@@ -149,7 +149,7 @@ pub struct ConfigArgs {
     pub deliberation_length: Option<String>,
 
     /// Enable LLM deliberation before the verdict. Default: true.
-    /// Use --deliberation false to skip deliberation (faster/cheaper, forces max_tokens down to fit just the verdict).
+    /// Use --deliberation false to skip deliberation (faster/cheaper, lowers the default max_tokens to fit just the verdict when unset).
     #[arg(long, num_args = 0..=1, default_missing_value = "true")]
     pub deliberation: Option<bool>,
 
