@@ -523,6 +523,70 @@ fn seed_prior_edges(
     (contributing.len(), contributing_records)
 }
 
+struct JsonlWriter {
+    path: PathBuf,
+    file: std::fs::File,
+}
+
+impl JsonlWriter {
+    fn open(path: PathBuf) -> Self {
+        let file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path)
+            .unwrap_or_else(|e| bail(format!("Failed to open {}: {e}", path.display())));
+        Self { path, file }
+    }
+
+    fn append(&mut self, value: &serde_json::Value) {
+        append_jsonl_line(&mut self.file, &self.path, value).unwrap_or_else(|msg| bail(msg));
+    }
+}
+
+/// A file that can be cut back to an earlier length, so a failed append can
+/// remove the partial line it left behind.
+trait TruncatableWrite: Write {
+    fn current_len(&self) -> std::io::Result<u64>;
+    fn truncate_to(&mut self, len: u64) -> std::io::Result<()>;
+}
+
+impl TruncatableWrite for std::fs::File {
+    fn current_len(&self) -> std::io::Result<u64> {
+        Ok(self.metadata()?.len())
+    }
+
+    fn truncate_to(&mut self, len: u64) -> std::io::Result<()> {
+        self.set_len(len)
+    }
+}
+
+/// Append one record as a single line. If the write fails, the file is cut
+/// back to its length before the write so it never ends in a partial line.
+fn append_jsonl_line(
+    file: &mut impl TruncatableWrite,
+    path: &Path,
+    value: &serde_json::Value,
+) -> Result<(), String> {
+    let mut line = serde_json::to_string(value)
+        .map_err(|e| format!("Failed to serialize judgement for {}: {e}", path.display()))?;
+    line.push('\n');
+    let len_before = file
+        .current_len()
+        .map_err(|e| format!("Failed to read the length of {}: {e}", path.display()))?;
+    let Err(write_err) = file.write_all(line.as_bytes()).and_then(|()| file.flush()) else {
+        return Ok(());
+    };
+    match file.truncate_to(len_before) {
+        Ok(()) => Err(format!("Failed to write {}: {write_err}", path.display())),
+        Err(truncate_err) => Err(format!(
+            "Failed to write {}: {write_err}. Removing the partially written line also failed \
+             ({truncate_err}), so the file's last line may be incomplete; remove it before \
+             loading the file with --load-judgements",
+            path.display()
+        )),
+    }
+}
+
 /// Everything both runs build before their refit loop: judges, items, budget,
 /// per-judge request config, criteria, output files, the engine (with any
 /// loaded judgements seeded) and the Ctrl-C handler.
@@ -545,8 +609,8 @@ struct RunSetup {
     criteria: Vec<String>,
     template: Arc<String>,
     client: Client,
-    save_file: Option<std::sync::Mutex<std::fs::File>>,
-    failures_file: Option<std::sync::Mutex<std::fs::File>>,
+    save_file: Option<JsonlWriter>,
+    failures_file: Option<JsonlWriter>,
     engine: RankingEngine,
     /// Loaded judgements that contributed edges to this run; None without
     /// `--load-judgements`. Added to displayed judgement counts only.
@@ -722,42 +786,24 @@ async fn setup_run(
     }
 
     // Set up judgement saving if requested
-    let save_file = if let Some(ref save_path) = resolved.save_successful_judgements {
+    let save_file = resolved.save_successful_judgements.as_ref().map(|save_path| {
         let path = resolve_save_path(save_path, "judgements");
-
-        let file = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&path)
-            .unwrap_or_else(|e| bail(format!("Failed to open {}: {e}", path.display())));
-
+        let writer = JsonlWriter::open(path);
         if resolved.verbose {
-            eprintln!("Saving successful judgements to {}", path.display());
+            eprintln!("Saving successful judgements to {}", writer.path.display());
         }
-
-        Some(std::sync::Mutex::new(file))
-    } else {
-        None
-    };
+        writer
+    });
 
     // Set up failure saving if requested
-    let failures_file = if let Some(ref save_path) = resolved.save_failed_judgements {
+    let failures_file = resolved.save_failed_judgements.as_ref().map(|save_path| {
         let path = resolve_save_path(save_path, "failures");
-
-        let file = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&path)
-            .unwrap_or_else(|e| bail(format!("Failed to open {}: {e}", path.display())));
-
+        let writer = JsonlWriter::open(path);
         if resolved.verbose {
-            eprintln!("Saving failed judgements to {}", path.display());
+            eprintln!("Saving failed judgements to {}", writer.path.display());
         }
-
-        Some(std::sync::Mutex::new(file))
-    } else {
-        None
-    };
+        writer
+    });
 
     let judgement_distribution = resolved.judgement_distribution;
 
@@ -1214,8 +1260,8 @@ pub async fn run(args: RankArgs) {
         criteria,
         template,
         client,
-        save_file,
-        failures_file,
+        mut save_file,
+        mut failures_file,
         mut engine,
         loaded_judgements,
         loaded_reuse,
@@ -1421,7 +1467,7 @@ pub async fn run(args: RankArgs) {
                         }
                     }
                     if let Some(category_probs) = result.parse_result.category_probs {
-                        if let Some(ref file_mutex) = save_file {
+                        if let Some(ref mut writer) = save_file {
                             let mut line = serde_json::json!({
                                 "refit": refits_run,
                                 "item1": titles[id1 as usize],
@@ -1455,9 +1501,7 @@ pub async fn run(args: RankArgs) {
                             if save_reasoning_text {
                                 line["reasoning"] = serde_json::json!(result.reasoning_text);
                             }
-                            let mut f = file_mutex.lock().unwrap();
-                            let _ = writeln!(f, "{}", line);
-                            let _ = f.flush();
+                            writer.append(&line);
                         }
 
                         // The raw distribution is what went to the JSONL above;
@@ -1470,7 +1514,7 @@ pub async fn run(args: RankArgs) {
                         ));
                     } else {
                         failed_parse += 1;
-                        if let Some(ref file_mutex) = failures_file {
+                        if let Some(ref mut writer) = failures_file {
                             let mut line = serde_json::json!({
                                 "refit": refits_run,
                                 "item1": titles[id1 as usize],
@@ -1496,9 +1540,7 @@ pub async fn run(args: RankArgs) {
                             if let Some(ref usage) = result.usage {
                                 line["usage"] = usage.to_json();
                             }
-                            let mut f = file_mutex.lock().unwrap();
-                            let _ = writeln!(f, "{}", line);
-                            let _ = f.flush();
+                            writer.append(&line);
                         }
                         if resolved.verbose {
                             if judges.len() > 1 {
@@ -1639,8 +1681,8 @@ async fn run_lineup_judgements(
         criteria,
         template,
         client,
-        save_file,
-        failures_file,
+        mut save_file,
+        mut failures_file,
         mut engine,
         loaded_judgements,
         loaded_reuse,
@@ -1834,7 +1876,7 @@ async fn run_lineup_judgements(
                     }
                     if let Some(verdict) = &tw.verdict {
                         calls_before_refit += 1;
-                        if let Some(ref file_mutex) = save_file {
+                        if let Some(ref mut writer) = save_file {
                             let lineup_titles: Vec<&str> = slot.item_ids
                                 .iter()
                                 .map(|&id| titles[id as usize].as_str())
@@ -1875,9 +1917,7 @@ async fn run_lineup_judgements(
                             if save_reasoning_text {
                                 line["reasoning"] = serde_json::json!(tw.reasoning_text);
                             }
-                            let mut f = file_mutex.lock().unwrap();
-                            let _ = writeln!(f, "{}", line);
-                            let _ = f.flush();
+                            writer.append(&line);
                         }
 
                         // Decomposed edges for engine and scoring.
@@ -1890,7 +1930,7 @@ async fn run_lineup_judgements(
                         refit_results.extend(edges);
                     } else {
                         failed_parse += 1;
-                        if let Some(ref file_mutex) = failures_file {
+                        if let Some(ref mut writer) = failures_file {
                             let lineup_titles: Vec<&str> = slot.item_ids
                                 .iter()
                                 .map(|&id| titles[id as usize].as_str())
@@ -1922,9 +1962,7 @@ async fn run_lineup_judgements(
                             if let Some(ref usage) = tw.usage {
                                 line["usage"] = usage.to_json();
                             }
-                            let mut f = file_mutex.lock().unwrap();
-                            let _ = writeln!(f, "{}", line);
-                            let _ = f.flush();
+                            writer.append(&line);
                         }
                         if resolved.verbose {
                             let lineup_titles: Vec<&str> = slot.item_ids
@@ -2474,5 +2512,103 @@ mod tests {
         // Lineups (size >= 3) also require temperature 0 even with logprobs.
         assert!(reused_keys(vec![reuse_record(0.7, true)], reuse_judge(0.0, true), 3).is_empty());
         assert_eq!(reused_keys(vec![reuse_record(0.0, true)], reuse_judge(0.0, true), 3), vec![(0, 0xff)]);
+    }
+
+    #[test]
+    fn test_append_jsonl_line_removes_partial_line_on_write_error() {
+        /// In-memory file that accepts `write_budget` bytes, then fails.
+        struct FakeFile {
+            data: Vec<u8>,
+            write_budget: usize,
+            fail_flush: bool,
+            fail_truncate: bool,
+        }
+        impl FakeFile {
+            fn new(write_budget: usize) -> Self {
+                Self {
+                    data: b"{\"old\":1}\n".to_vec(),
+                    write_budget,
+                    fail_flush: false,
+                    fail_truncate: false,
+                }
+            }
+        }
+        impl Write for FakeFile {
+            fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+                if self.write_budget == 0 {
+                    return Err(std::io::Error::other("disk full"));
+                }
+                let n = buf.len().min(self.write_budget);
+                self.data.extend_from_slice(&buf[..n]);
+                self.write_budget -= n;
+                Ok(n)
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                if self.fail_flush {
+                    return Err(std::io::Error::other("flush failed"));
+                }
+                Ok(())
+            }
+        }
+        impl TruncatableWrite for FakeFile {
+            fn current_len(&self) -> std::io::Result<u64> {
+                Ok(self.data.len() as u64)
+            }
+            fn truncate_to(&mut self, len: u64) -> std::io::Result<()> {
+                if self.fail_truncate {
+                    return Err(std::io::Error::other("truncate failed"));
+                }
+                self.data.truncate(len as usize);
+                Ok(())
+            }
+        }
+
+        let val = serde_json::json!({"ok": true});
+        let path = Path::new("judgements.jsonl");
+        let old = "{\"old\":1}\n";
+
+        // Success appends the full line.
+        let mut file = FakeFile::new(usize::MAX);
+        append_jsonl_line(&mut file, path, &val).unwrap();
+        assert_eq!(String::from_utf8(file.data).unwrap(), format!("{old}{{\"ok\":true}}\n"));
+
+        // A write that fails partway leaves the file exactly as it was.
+        let mut file = FakeFile::new(4);
+        let err = append_jsonl_line(&mut file, path, &val).unwrap_err();
+        assert!(err.contains("judgements.jsonl") && err.contains("disk full"), "{err}");
+        assert!(!err.contains("may be incomplete"), "{err}");
+        assert_eq!(String::from_utf8(file.data).unwrap(), old);
+
+        // A failed flush after a full write also removes the line.
+        let mut file = FakeFile::new(usize::MAX);
+        file.fail_flush = true;
+        let err = append_jsonl_line(&mut file, path, &val).unwrap_err();
+        assert!(err.contains("judgements.jsonl") && err.contains("flush failed"), "{err}");
+        assert_eq!(String::from_utf8(file.data).unwrap(), old);
+
+        // If removing the partial line fails too, the error says so.
+        let mut file = FakeFile::new(4);
+        file.fail_truncate = true;
+        let err = append_jsonl_line(&mut file, path, &val).unwrap_err();
+        assert!(err.contains("disk full") && err.contains("truncate failed"), "{err}");
+        assert!(err.contains("may be incomplete"), "{err}");
+        assert_eq!(String::from_utf8(file.data).unwrap(), format!("{old}{{\"ok"));
+    }
+
+    #[test]
+    fn test_jsonl_writer_truncates_and_keeps_appending_on_real_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("judgements.jsonl");
+        let mut writer = JsonlWriter::open(path.clone());
+        writer.append(&serde_json::json!({"a": 1}));
+
+        // Simulate a partial line, then cut it back as a failed append would.
+        let len_before = writer.file.current_len().unwrap();
+        writer.file.write_all(b"{\"b\"").unwrap();
+        writer.file.truncate_to(len_before).unwrap();
+
+        // Append mode writes at the new end of the file, not the old one.
+        writer.append(&serde_json::json!({"c": 3}));
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "{\"a\":1}\n{\"c\":3}\n");
     }
 }
