@@ -76,10 +76,16 @@ impl RankingEngine {
     ///
     /// - if `item_ids` contains a duplicate ID
     /// - if there are fewer than two items
+    /// - if `config.regularization_strength` is not finite and `> 0.0`
     pub fn new(item_ids: &[i64], config: EngineConfig) -> Self {
         let id_map = IdMap::from_ids(item_ids);
         let num_items = id_map.len();
         assert!(num_items >= 2, "RankingEngine requires at least two items to compare.");
+        assert!(
+            config.regularization_strength.is_finite() && config.regularization_strength > 0.0,
+            "regularization_strength must be finite and > 0.0, got {}",
+            config.regularization_strength,
+        );
 
         let rng = make_rng(config.seed, crate::seed::SUBSYSTEM_PAIRING);
 
@@ -236,17 +242,22 @@ impl RankingEngine {
 
     /// Update current rating estimates using Bradley-Terry MLE.
     /// BT MLE is judge-agnostic — it consumes edges as
-    /// `(item1, item2, probability)` tuples.
+    /// `(item1, item2, probability, weight)` tuples.
     pub fn update_current_ratings(&mut self) {
         if self.completed_edges.is_empty() {
             return;
         }
 
         let num_items = self.id_map.len();
-        let indexed: Vec<(usize, usize, f64)> = self.completed_edges.iter().map(|c| {
-            (self.id_map.to_idx(c.item1), self.id_map.to_idx(c.item2), matchmaking_win_prob(&c.category_probs))
+        let indexed: Vec<(usize, usize, f64, f64)> = self.completed_edges.iter().map(|c| {
+            (
+                self.id_map.to_idx(c.item1),
+                self.id_map.to_idx(c.item2),
+                matchmaking_win_prob(&c.category_probs),
+                c.weight,
+            )
         }).collect();
-        let mut bt = BradleyTerry::new(num_items, &indexed, self.config.regularization_strength);
+        let mut bt = BradleyTerry::new_weighted(num_items, &indexed, self.config.regularization_strength);
         bt.calculate_scores(30);
 
         for i in 0..num_items {
@@ -625,5 +636,41 @@ mod tests {
             seed: None,
         };
         let _ = RankingEngine::new(&[1, 2, 1], config);
+    }
+
+    #[test]
+    #[should_panic(expected = "regularization_strength")]
+    fn test_engine_rejects_zero_regularization_strength() {
+        let config = EngineConfig {
+            judgement_distribution: JudgementDistribution::Uniform,
+            matchmaking_sharpness: 1.0,
+            min_uniform_edges: 3,
+            regularization_strength: 0.0,
+            seed: None,
+        };
+        let _ = RankingEngine::new(&[1, 2], config);
+    }
+
+    #[test]
+    fn test_update_current_ratings_honors_edge_weight() {
+        let config = EngineConfig {
+            judgement_distribution: JudgementDistribution::Uniform,
+            matchmaking_sharpness: 1.0,
+            min_uniform_edges: 3,
+            regularization_strength: 0.01,
+            seed: None,
+        };
+        let mut engine = RankingEngine::new(&[10, 20], config);
+        engine.record_edges(&[
+            Edge { slot1: 0, slot2: 1, item1: 10, item2: 20, category_probs: [0.9, 0.1], judge_id: 0, weight: 3.0 },
+            Edge { slot1: 0, slot2: 1, item1: 10, item2: 20, category_probs: [0.1, 0.9], judge_id: 0, weight: 0.5 },
+        ]);
+        engine.update_current_ratings();
+        let ratings = engine.current_ratings();
+        assert!(
+            ratings[0] > ratings[1],
+            "heavier win (w=3.0) should outweigh lighter loss (w=0.5), got {:?}",
+            ratings,
+        );
     }
 }

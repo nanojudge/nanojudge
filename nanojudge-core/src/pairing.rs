@@ -96,6 +96,12 @@ pub fn get_effective_judgement_distribution(
     edge_counts: &[usize],
     min_uniform_edges: usize,
 ) -> JudgementDistribution {
+    assert!(
+        edge_counts.len() >= num_items,
+        "edge_counts length ({}) must be at least num_items ({})",
+        edge_counts.len(),
+        num_items,
+    );
     if user_judgement_distribution == JudgementDistribution::Uniform {
         return JudgementDistribution::Uniform;
     }
@@ -1837,5 +1843,16 @@ mod tests {
             assert_ne!(a, b);
             assert!(*a == 0 || *b == 0, "item 0 holds all selection weight; it must be in every pair");
         }
+    }
+
+    #[test]
+    #[should_panic(expected = "edge_counts length")]
+    fn test_get_effective_judgement_distribution_panics_on_short_slice() {
+        let _ = get_effective_judgement_distribution(
+            JudgementDistribution::TopHeavy,
+            5,
+            &[10, 10],
+            3,
+        );
     }
 }

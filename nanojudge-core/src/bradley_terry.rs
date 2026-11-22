@@ -20,7 +20,8 @@ pub struct BradleyTerry {
 }
 
 impl BradleyTerry {
-    /// Build the wins table from `(item1_idx, item2_idx, item1_win_probability)` lineups.
+    /// Build the wins table from `(item1_idx, item2_idx, item1_win_probability)` tuples
+    /// with unit weight (`1.0`) per result.
     ///
     /// # Panics
     ///
@@ -30,18 +31,37 @@ impl BradleyTerry {
         results: &[(usize, usize, f64)],
         regularization_strength: f64,
     ) -> Self {
+        let weighted: Vec<(usize, usize, f64, f64)> = results
+            .iter()
+            .map(|&(i1, i2, prob)| (i1, i2, prob, 1.0))
+            .collect();
+        Self::new_weighted(num_items, &weighted, regularization_strength)
+    }
+
+    /// Build the wins table from `(item1_idx, item2_idx, item1_win_probability, weight)` tuples.
+    ///
+    /// # Panics
+    ///
+    /// Panics if any result's item index is `>= num_items`, or if any weight is
+    /// negative or non-finite.
+    pub fn new_weighted(
+        num_items: usize,
+        results: &[(usize, usize, f64, f64)],
+        regularization_strength: f64,
+    ) -> Self {
         let ghost_idx = num_items;
         let total = num_items + 1; // real items + ghost
 
         // Build sparse wins table
         let mut wins_table: Vec<BTreeMap<usize, f64>> = (0..total).map(|_| BTreeMap::new()).collect();
 
-        for &(i1, i2, prob) in results {
+        for &(i1, i2, prob, weight) in results {
             assert!(i1 < num_items, "item1 index {} out of range (num_items = {})", i1, num_items);
             assert!(i2 < num_items, "item2 index {} out of range (num_items = {})", i2, num_items);
+            assert!(weight.is_finite() && weight >= 0.0, "edge weight must be finite and >= 0, got {}", weight);
 
-            *wins_table[i1].entry(i2).or_insert(0.0) += prob;
-            *wins_table[i2].entry(i1).or_insert(0.0) += 1.0 - prob;
+            *wins_table[i1].entry(i2).or_insert(0.0) += prob * weight;
+            *wins_table[i2].entry(i1).or_insert(0.0) += (1.0 - prob) * weight;
         }
 
         // Ghost player regularization (O(n) instead of O(n²))
@@ -231,5 +251,33 @@ mod tests {
             "Geometric mean should be close to 1.0, got {}",
             geo_mean
         );
+    }
+
+    #[test]
+    fn test_weighted_edges_match_repeated_unweighted_edges() {
+        let repeated = vec![
+            (0, 1, 0.8),
+            (0, 1, 0.8),
+            (1, 2, 0.7),
+        ];
+        let weighted = vec![
+            (0, 1, 0.8, 2.0),
+            (1, 2, 0.7, 1.0),
+            (0, 2, 0.1, 0.0), // zero weight should have no effect
+        ];
+
+        let mut bt_rep = BradleyTerry::new(3, &repeated, 0.01);
+        bt_rep.calculate_scores(30);
+        let mut bt_wt = BradleyTerry::new_weighted(3, &weighted, 0.01);
+        bt_wt.calculate_scores(30);
+
+        for i in 0..3 {
+            assert!(
+                (bt_rep.get_score(i) - bt_wt.get_score(i)).abs() < 1e-12,
+                "item {i}: {} vs {}",
+                bt_rep.get_score(i),
+                bt_wt.get_score(i),
+            );
+        }
     }
 }
