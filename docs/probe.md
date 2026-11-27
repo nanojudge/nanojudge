@@ -35,7 +35,7 @@ A run refuses to start, listing every problem it finds, if a judge's probe shows
 - The judge sets `reasoning_effort = "none"`, but the model reasoned.
 - The judge uses logprobs, but the endpoint returns none, or returns fewer top logprobs than runs ask for (10).
 
-A finding the probe can't make counts against the judge. `rank` only checks judges with a weight above 0, since judges with weight 0 send no requests.
+A "can't tell" finding counts against the judge. `rank` only checks judges with a weight above 0, since judges with weight 0 send no requests.
 
 `--skip-probe` (on `rank` and `benchmark`) skips the check entirely: no probe is sent, no saved result is read, and nothing is refused.
 

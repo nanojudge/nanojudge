@@ -41,7 +41,7 @@ Each successful record is a JSON object with these fields:
 | `retries_used` | How many retries the judgement needed. `0` for a reused judgement |
 | `hit_max_tokens` | Whether the response was cut off by `max_tokens` |
 | `reused` | Whether the judgement reused an identical earlier prompt's result instead of sending a request (see [Repeated prompts](#repeated-prompts)) |
-| `usage` | Token counts, when the endpoint provides them; absent for a reused judgement: `prompt_tokens`, `completion_tokens`, `reasoning_tokens` and `visible_tokens`. The last two are `null` if the endpoint doesn't report reasoning tokens |
+| `usage` | Token counts (`prompt_tokens`, `completion_tokens`, `reasoning_tokens` and `visible_tokens`) when the endpoint provides them; absent for a reused judgement. The last two are `null` if the endpoint doesn't report reasoning tokens |
 
 Text is left out of successful records by default. Each flag adds one field:
 
@@ -69,7 +69,7 @@ Pairwise runs are unaffected: a reader written against the two-item shape keeps 
 
 ### Repeated prompts
 
-A judge with deliberation off and `reasoning_effort = "none"` gives the same answer to the same prompt, as long as its verdict isn't sampled: in logprobs mode for two-item judgements, or at `temperature = 0`. Lineups of three or more items are only covered at `temperature = 0`, even in logprobs mode, because the judge samples its earlier places and its later places depend on them. When a run sends such a judge a prompt it has already answered, the run reuses the earlier result instead of sending the request again. Prompts are matched by `prompt_hash`. The reused judgement still counts as a judgement of its own: it is scored, counted and saved like any other, with `reused` set to `true`. The run's summary reports how many judgements were reused.
+A judge with deliberation off and `reasoning_effort = "none"` gives the same answer to the same prompt, as long as its verdict isn't sampled: in logprobs mode for two-item judgements, or at `temperature = 0`. Lineups of three or more items are only covered at `temperature = 0`, even in logprobs mode, because the judge samples its earlier places and its later places depend on them. When a run sends such a judge a prompt it has already answered, the run reuses the earlier result instead of sending the request again. Prompts are matched by `prompt_hash`. The reused judgement is still treated as a judgement of its own: it is scored, counted and saved like any other, with `reused` set to `true`. The run's summary reports how many judgements were reused.
 
 Results from a file passed to `--load-judgements` are reused too, when the loaded judgement was made by the same judge with the same `logprobs`, `deliberation`, `reasoning_effort`, `provider` and `chat_template_kwargs` as this run, and, in text mode or for lineups of three or more items, at temperature 0. If a loaded judgement from a judge that reuses results is missing `deliberation`, `reasoning_effort`, `provider`, `chat_template_kwargs` or `prompt_hash`, the load fails. A loaded judgement missing `logprobs` is skipped with a warning, whichever judge made it.
 

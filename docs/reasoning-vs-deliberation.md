@@ -52,7 +52,7 @@ Verdict: Option 1
 
 **Models differ.** Some models reason and some don't, and some endpoints require reasoning to be enabled. Deliberation gives a non-reasoning model a way to think before its verdict. Keeping the two separate lets a reasoning model skip deliberation instead of thinking twice.
 
-**Deliberation follows instructions.** Deliberation is part of the visible answer, so it is expected to follow the prompt's instructions, such as its length and analysing both options before forming a preference, more closely than reasoning does. This makes it easier to predict total tokens and hence cost.
+**Deliberation follows instructions.** Deliberation is part of the visible answer, so it is expected to follow the prompt's instructions — such as how long to write and analysing both options before forming a preference — more closely than reasoning does. This makes it easier to predict total tokens and hence cost.
 
 ## The four combinations
 
@@ -65,4 +65,4 @@ Reasoning and deliberation can be combined freely. `max_tokens` in each case:
 | Off | Off (`reasoning_effort = "none"`) | Optional (default: just enough for the verdict: 16 for pairs, 16 per ranking line for lineups) |
 | Off | On | Required |
 
-Reasoning length varies too much between models for any default to fit, so reasoning judges must always set `max_tokens`.
+Reasoning length varies too much between models for a single default to work, so reasoning judges must always set `max_tokens`.

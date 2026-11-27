@@ -68,7 +68,7 @@
 
 - **Selection top k** (`selection_top_k`): How many top places top-heavy selection tries to settle. `selection_top_k = 1` works out which item is first; `selection_top_k = 10` works out which items make the top ten, without caring about their order within it.
 
-- **Selection draws** (`selection_draws`): The number of random draws used at each refit to estimate every item's top-k chance. More draws give a steadier estimate and take more computation.
+- **Selection draws** (`selection_draws`): The number of random draws used at each refit to estimate every item's top-k chance. More draws give a steadier estimate and require more computation.
 
 ## Coverage settings
 
@@ -110,7 +110,7 @@
 
 - **Posterior mean and standard deviation**: The current strength estimate and its uncertainty. Matchmaking uses both, so an uncertain matchup can remain valuable even when its current mean scores are not close.
 
-- **Confidence interval / credible interval**: The reported approximate posterior range around an item's score at the configured confidence level. The CLI labels it `CI`; internal documentation may call it credible.
+- **Confidence interval / credible interval**: The reported approximate posterior range around an item's score at the configured confidence level. The CLI labels it `CI`; internal documentation may call it a credible interval.
 
 - **Ghost player**: A weak virtual opponent used for regularization. It keeps scores finite when an item has only wins or only losses.
 

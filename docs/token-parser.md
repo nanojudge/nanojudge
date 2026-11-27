@@ -16,6 +16,6 @@ The extraction logic becomes outcome-specific and branching, rather than a singl
 
 ## What we don't defend against
 
-nanojudge does not harden against adversarial tokenizers. The logprob path assumes that the prompt template's verdict phrasing tokenizes consistently across the outcomes the template emits, and that the returned `top_logprobs` cover enough of each outcome's token span to compute a meaningful coverage. If those assumptions break, logprob verdicts are unreliable.
+NanoJudge is not hardened against adversarial tokenizers. The logprob path assumes that the prompt template's verdict phrasing tokenizes consistently across the outcomes the template emits, and that the returned `top_logprobs` cover enough of each outcome's token span to compute a meaningful coverage. If those assumptions break, logprob verdicts are unreliable.
 
 Every LLM tested so far has a well-behaved tokenizer where verdict outcomes tokenize consistently. This is a theoretical flaw unlikely to be a real issue in practice.
