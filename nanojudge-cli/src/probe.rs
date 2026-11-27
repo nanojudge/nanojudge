@@ -10,8 +10,8 @@ use reqwest::Client;
 use serde_json::{json, Value};
 
 use crate::args::ProbeArgs;
-use crate::bail;
 use crate::config;
+use crate::Error;
 use crate::llm::{build_completions_url, describe_request_error, TOP_LOGPROBS};
 use crate::resolve::{resolve_config, resolve_judges, ResolvedJudge, NO_DELIBERATION_MAX_TOKENS};
 
@@ -41,26 +41,25 @@ const PROBE_SPECIAL_TOKEN_ALLOWANCE: u64 = 5;
 
 
 /// Where probe records are kept: `<data dir>/nanojudge/probes.jsonl`.
-pub fn probes_path() -> PathBuf {
-    dirs::data_dir()
-        .unwrap_or_else(|| bail("could not find the user data directory"))
-        .join("nanojudge")
-        .join("probes.jsonl")
+pub fn probes_path() -> crate::Result<PathBuf> {
+    let data_dir = dirs::data_dir()
+        .ok_or_else(|| Error::Io("could not find the user data directory".into()))?;
+    Ok(data_dir.join("nanojudge").join("probes.jsonl"))
 }
 
-pub async fn run(args: ProbeArgs) {
-    let (config_path, cfg) = config::load_config(args.config.as_deref());
-    let resolved = resolve_config(&args.cfg, &cfg);
-    let judges = resolve_judges(&args.cfg, &cfg, &config_path, resolved.deliberation_enabled, resolved.lineup_size);
+pub async fn run(args: ProbeArgs) -> crate::Result<()> {
+    let (config_path, cfg) = config::load_config(args.config.as_deref())?;
+    let resolved = resolve_config(&args.cfg, &cfg)?;
+    let judges = resolve_judges(&args.cfg, &cfg, &config_path, resolved.deliberation_enabled, resolved.lineup_size)?;
 
-    let path = probes_path();
+    let path = probes_path()?;
     eprintln!("Probe records: {}", path.display());
 
     let client = Client::new();
     for judge in &judges {
         eprintln!("Probing {}", judge.display_name);
-        let record = probe_judge(&client, judge).await;
-        append_record(&path, &record);
+        let record = probe_judge(&client, judge).await?;
+        append_record(&path, &record)?;
         let problems = judge_problems(judge, &record["findings"]);
         if problems.is_empty() {
             eprintln!("  OK: runs can use this judge");
@@ -70,20 +69,22 @@ pub async fn run(args: ProbeArgs) {
             }
         }
     }
+    Ok(())
 }
 
 /// Check each judge against its latest probe, probing any judge that has
-/// none. Pass only the judges that will send requests. Bails, listing every
-/// problem, if a judge's probe failed or shows its settings aren't honoured.
+/// none. Pass only the judges that will send requests. Returns `Error::Probe`,
+/// listing every problem, if a judge's probe failed or shows its settings
+/// aren't honoured.
 ///
 /// A probe belongs to a judge when the URL, model, `logprobs`,
 /// `reasoning_effort`, `chat_template_kwargs` and `provider` match, and it's
 /// in the current format. Other settings don't change what the probe tests,
 /// except that a failed probe is redone under a longer `request_timeout_secs`
 /// or larger `max_tokens` (see `reprobe_reason`).
-pub async fn check_judges<'a>(judges: impl IntoIterator<Item = &'a ResolvedJudge>) {
-    let path = probes_path();
-    let records = read_records(&path);
+pub async fn check_judges<'a>(judges: impl IntoIterator<Item = &'a ResolvedJudge>) -> crate::Result<()> {
+    let path = probes_path()?;
+    let records = read_records(&path)?;
     let client = Client::new();
 
     let mut problems = Vec::new();
@@ -97,14 +98,14 @@ pub async fn check_judges<'a>(judges: impl IntoIterator<Item = &'a ResolvedJudge
                     "The last probe of {} failed under {reason}. Probing it again; records: {}",
                     judge.display_name, path.display()
                 );
-                let record = probe_judge(&client, judge).await;
-                append_record(&path, &record);
+                let record = probe_judge(&client, judge).await?;
+                append_record(&path, &record)?;
                 record
             }
             None => {
                 eprintln!("No probe of {} yet. Probing it now; records: {}", judge.display_name, path.display());
-                let record = probe_judge(&client, judge).await;
-                append_record(&path, &record);
+                let record = probe_judge(&client, judge).await?;
+                append_record(&path, &record)?;
                 record
             }
         };
@@ -114,28 +115,29 @@ pub async fn check_judges<'a>(judges: impl IntoIterator<Item = &'a ResolvedJudge
     }
 
     if !problems.is_empty() {
-        bail(format!(
+        return Err(Error::Probe(format!(
             "the endpoint probe rules out these judges:\n  {}\nChange the judge settings, or fix the endpoint and run `nanojudge probe` to probe it again. Probe records: {}",
             problems.join("\n  "),
             path.display()
-        ));
+        )));
     }
+    Ok(())
 }
 
 /// All probe records in the file, oldest first. Empty if the file doesn't
 /// exist yet.
-fn read_records(path: &PathBuf) -> Vec<Value> {
+fn read_records(path: &PathBuf) -> crate::Result<Vec<Value>> {
     let text = match std::fs::read_to_string(path) {
         Ok(text) => text,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Vec::new(),
-        Err(e) => bail(format!("could not read {}: {e}", path.display())),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(e) => return Err(Error::Io(format!("could not read {}: {e}", path.display()))),
     };
     text.lines()
         .enumerate()
         .filter(|(_, line)| !line.trim().is_empty())
         .map(|(i, line)| {
             serde_json::from_str(line)
-                .unwrap_or_else(|e| bail(format!("{} line {}: not valid JSON: {e}", path.display(), i + 1)))
+                .map_err(|e| Error::Input(format!("{} line {}: not valid JSON: {e}", path.display(), i + 1)))
         })
         .collect()
 }
@@ -248,7 +250,7 @@ fn base_request(judge: &ResolvedJudge, prompt: &str, max_tokens: u32) -> serde_j
     body
 }
 
-async fn probe_judge(client: &Client, judge: &ResolvedJudge) -> Value {
+async fn probe_judge(client: &Client, judge: &ResolvedJudge) -> crate::Result<Value> {
     let url = build_completions_url(&judge.endpoint);
     let max_tokens_limit = judge.max_tokens.min(NO_DELIBERATION_MAX_TOKENS);
 
@@ -282,9 +284,9 @@ async fn probe_judge(client: &Client, judge: &ResolvedJudge) -> Value {
     }
     eprintln!("  max_tokens respected: {}", finding_str(kept_max_tokens));
 
-    json!({
+    Ok(json!({
         "format_version": PROBE_FORMAT_VERSION,
-        "probed_at_unix_ms": unix_ms(),
+        "probed_at_unix_ms": unix_ms()?,
         "nanojudge_version": env!("CARGO_PKG_VERSION"),
         "endpoint": judge.endpoint,
         "url": url,
@@ -305,7 +307,7 @@ async fn probe_judge(client: &Client, judge: &ResolvedJudge) -> Value {
             "max_tokens_respected": kept_max_tokens,
         },
         "requests": requests,
-    })
+    }))
 }
 
 fn finding_str(finding: Option<bool>) -> &'static str {
@@ -443,29 +445,30 @@ async fn send_test(client: &Client, judge: &ResolvedJudge, url: &str, test: &str
     })
 }
 
-fn unix_ms() -> u64 {
-    SystemTime::now()
+fn unix_ms() -> crate::Result<u64> {
+    let dur = SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .unwrap_or_else(|e| bail(format!("system clock is before 1970: {e}")))
-        .as_millis() as u64
+        .map_err(|e| Error::Io(format!("system clock is before 1970: {e}")))?;
+    Ok(dur.as_millis() as u64)
 }
 
 /// Append one record as a single line, in a single write.
-fn append_record(path: &PathBuf, record: &Value) {
+fn append_record(path: &PathBuf, record: &Value) -> crate::Result<()> {
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir)
-            .unwrap_or_else(|e| bail(format!("could not create {}: {e}", dir.display())));
+            .map_err(|e| Error::Io(format!("could not create {}: {e}", dir.display())))?;
     }
     let mut line = serde_json::to_string(record)
-        .unwrap_or_else(|e| bail(format!("could not serialise the probe record: {e}")));
+        .expect("probe record Value always serializes to JSON");
     line.push('\n');
     let mut file = std::fs::OpenOptions::new()
         .create(true)
         .append(true)
         .open(path)
-        .unwrap_or_else(|e| bail(format!("could not open {}: {e}", path.display())));
+        .map_err(|e| Error::Io(format!("could not open {}: {e}", path.display())))?;
     file.write_all(line.as_bytes())
-        .unwrap_or_else(|e| bail(format!("could not write to {}: {e}", path.display())));
+        .map_err(|e| Error::Io(format!("could not write to {}: {e}", path.display())))?;
+    Ok(())
 }
 
 #[cfg(test)]

@@ -1,31 +1,12 @@
-mod args;
-mod benchmark;
-mod config;
-mod items;
-mod llm;
-mod output;
-mod parse;
-mod probe;
-mod prompt;
-mod rank;
-mod resolve;
-mod score;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use clap::Parser;
 
-use crate::args::{BenchmarkArgs, Cli, Commands};
-use crate::llm::LlmConfig;
-use crate::resolve::{resolve_config, resolve_judges};
+use nanojudge_cli::args::{Cli, Commands};
+use nanojudge_cli::{benchmark, config, probe, rank, score};
 
-const DEFAULT_BENCHMARK_PAIRS: &str = "100";
-
-const DEFAULT_CONFIDENCE_LEVEL: f64 = 0.95;
-const DEFAULT_REGULARIZATION_STRENGTH: f64 = 0.01;
-const DEFAULT_PRIOR_TAU2: f64 = 10.0;
-const DEFAULT_BIAS_PRIOR_TAU2: f64 = 2.0;
-const DEFAULT_BIAS_PRIOR: f64 = 0.5;
-
-pub fn bail(msg: impl std::fmt::Display) -> ! {
+fn bail(msg: impl std::fmt::Display) -> ! {
     eprintln!("Error: {msg}");
     std::process::exit(1);
 }
@@ -34,69 +15,34 @@ pub fn bail(msg: impl std::fmt::Display) -> ! {
 async fn main() {
     let cli = Cli::parse();
 
-    match cli.command {
-        Commands::Rank(args) => rank::run(args).await,
+    let result = match cli.command {
+        Commands::Rank(args) => match rank::prepare(args).await {
+            Ok(prepared) => {
+                let cancelled = Arc::new(AtomicBool::new(false));
+                {
+                    let cancelled = cancelled.clone();
+                    tokio::spawn(async move {
+                        let _ = tokio::signal::ctrl_c().await;
+                        eprintln!("\nCancelling... (press Ctrl-C again to force quit)");
+                        cancelled.store(true, Ordering::Relaxed);
+                        let _ = tokio::signal::ctrl_c().await;
+                        std::process::exit(130);
+                    });
+                }
+                prepared.run(cancelled).await
+            }
+            Err(e) => Err(e),
+        },
         Commands::Score(args) => score::run(args),
-        Commands::Benchmark(args) => run_benchmark_cmd(args).await,
+        Commands::Benchmark(args) => benchmark::run(args).await,
         Commands::Probe(args) => probe::run(args).await,
-        Commands::Init => {
-            let path = config::create_default_config();
+        Commands::Init => config::create_default_config().map(|path| {
             println!("Created config at {}", path.display());
             println!("Edit it to set your default endpoint, model, etc.");
-        }
-    }
-}
+        }),
+    };
 
-async fn run_benchmark_cmd(args: BenchmarkArgs) {
-    let (config_path, cfg) = config::load_config(args.config.as_deref());
-    let resolved = resolve_config(&args.cfg, &cfg);
-    if resolved.lineup_size != 2 {
-        bail(format!(
-            "benchmark only runs pairwise comparisons (got lineup_size = {}). Pass --lineup-size 2 to override.",
-            resolved.lineup_size
-        ));
-    }
-    let judges = resolve_judges(&args.cfg, &cfg, &config_path, resolved.deliberation_enabled, resolved.lineup_size);
-
-    if args.num_pairs == 0 {
-        bail("--num-pairs must be at least 1");
-    }
-
-    if !args.skip_probe {
-        probe::check_judges(&judges).await;
-    }
-
-    let template = &resolved.prompt_template;
-
-    for judge in &judges {
-        let llm_config = LlmConfig {
-            endpoint: judge.endpoint.clone(),
-            model: judge.model.clone(),
-            api_key: judge.api_key.clone(),
-            temperature: judge.temperature,
-            temperature_jitter: judge.temperature_jitter,
-            presence_penalty: judge.presence_penalty,
-            top_p: judge.top_p,
-            logprobs: judge.logprobs,
-            max_tokens: judge.max_tokens,
-            reasoning_effort: judge.reasoning_effort.clone(),
-            chat_template_kwargs: judge.chat_template_kwargs.clone(),
-            provider: judge.provider.clone(),
-            request_timeout: judge.request_timeout,
-        };
-
-        benchmark::run_benchmark(
-            &llm_config,
-            &judge.display_name,
-            args.num_pairs,
-            judge.concurrency,
-            judge.min_logprob_coverage,
-            template,
-            resolved.seed,
-        ).await;
-
-        if judges.len() > 1 {
-            eprintln!();
-        }
+    if let Err(e) = result {
+        bail(e);
     }
 }

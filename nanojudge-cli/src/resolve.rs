@@ -6,8 +6,8 @@ use nanojudge_core::constants::{MAX_LINEUP_SIZE, MIN_LINEUP_SIZE};
 use nanojudge_core::{JudgementDistribution, judge_hash};
 
 use crate::args::{ConfigArgs, OutputFormat};
-use crate::bail;
 use crate::config;
+use crate::Error;
 use crate::parse;
 use crate::prompt;
 use crate::{
@@ -156,25 +156,24 @@ pub fn resolve_judges(
     config_path: &Path,
     deliberation_enabled: bool,
     lineup_size: usize,
-) -> Vec<ResolvedJudge> {
-    let judge_configs = cfg.judge.as_ref().filter(|j| !j.is_empty())
-        .unwrap_or_else(|| {
-            bail(format!(
-                "No [[judge]] blocks defined in {}. At least one judge is required.\n\
-                 Example:\n\n  [[judge]]\n  endpoint = \"http://localhost:8000\"\n  model = \"my-model\"\n  temperature = 0.7",
-                config_path.display()
-            ));
-        });
+) -> crate::Result<Vec<ResolvedJudge>> {
+    let judge_configs = cfg.judge.as_ref().filter(|j| !j.is_empty()).ok_or_else(|| {
+        Error::Config(format!(
+            "No [[judge]] blocks defined in {}. At least one judge is required.\n\
+             Example:\n\n  [[judge]]\n  endpoint = \"http://localhost:8000\"\n  model = \"my-model\"\n  temperature = 0.7",
+            config_path.display()
+        ))
+    })?;
 
     // Validate: no duplicate endpoint+model
     let mut seen = HashSet::new();
     for jc in judge_configs {
         let key = format!("{}\0{}", jc.endpoint, jc.model);
         if !seen.insert(key) {
-            bail(format!(
+            return Err(Error::Config(format!(
                 "Duplicate judge: endpoint=\"{}\" model=\"{}\". Each judge must have a unique endpoint+model combination.",
                 jc.endpoint, jc.model
-            ));
+            )));
         }
     }
 
@@ -184,15 +183,15 @@ pub fn resolve_judges(
     let global_concurrency = merge_opt(shared.concurrency, cfg.concurrency, "concurrency")
         .unwrap_or(DEFAULT_CONCURRENCY);
     if global_concurrency == 0 {
-        bail("concurrency must be at least 1");
+        return Err(Error::Config("concurrency must be at least 1".into()));
     }
 
     let global_min_logprob_coverage = merge_opt(shared.min_logprob_coverage, cfg.min_logprob_coverage, "min-logprob-coverage")
         .unwrap_or(parse::DEFAULT_MIN_LOGPROB_COVERAGE);
     if !global_min_logprob_coverage.is_finite() || global_min_logprob_coverage <= 0.0 || global_min_logprob_coverage > 1.0 {
-        bail(format!(
+        return Err(Error::Config(format!(
             "min_logprob_coverage={global_min_logprob_coverage}, must be finite, > 0.0 and <= 1.0"
-        ));
+        )));
     }
 
     let global_verdict_temperature = merge_opt(shared.verdict_temperature, cfg.verdict_temperature, "verdict-temperature")
@@ -202,9 +201,9 @@ pub fn resolve_judges(
             DEFAULT_VERDICT_TEMPERATURE_NO_DELIBERATION
         });
     if !global_verdict_temperature.is_finite() || global_verdict_temperature <= 0.0 {
-        bail(format!(
+        return Err(Error::Config(format!(
             "verdict_temperature={global_verdict_temperature}, must be finite and > 0"
-        ));
+        )));
     }
 
     // CLI --api-key or OPENAI_API_KEY env var
@@ -239,21 +238,20 @@ pub fn resolve_judges(
     let mut judges: Vec<ResolvedJudge> = Vec::with_capacity(judge_configs.len());
 
     for jc in judge_configs {
-        let temperature = jc.temperature
-            .unwrap_or_else(|| {
-                bail(format!(
-                    "No temperature specified for judge {}. Set temperature in the [[judge]] block.",
-                    jc.model,
-                ));
-            });
+        let temperature = jc.temperature.ok_or_else(|| {
+            Error::Config(format!(
+                "No temperature specified for judge {}. Set temperature in the [[judge]] block.",
+                jc.model,
+            ))
+        })?;
 
         // Reasoning length varies too much between models for any default to fit.
         if jc.reasoning_effort.as_deref() != Some("none") && jc.max_tokens.is_none() {
-            bail(format!(
+            return Err(Error::Config(format!(
                 "No max_tokens specified for judge {}. Set max_tokens in the [[judge]] block \
                  (required unless reasoning_effort = \"none\").",
                 jc.model,
-            ));
+            )));
         }
 
         let temperature_jitter = jc.temperature_jitter.unwrap_or(DEFAULT_TEMPERATURE_JITTER);
@@ -266,15 +264,17 @@ pub fn resolve_judges(
             jc.presence_penalty,
             max_tokens,
         )
-        .unwrap_or_else(|msg| bail(msg));
+        .map_err(Error::Config)?;
 
         let api_key = if let Some(ref env_name) = jc.api_key_env {
             match std::env::var(env_name) {
                 Ok(key) => Some(key),
-                Err(_) => bail(format!(
-                    "Judge {}: api_key_env = \"{}\" but that environment variable is not set.",
-                    jc.model, env_name
-                )),
+                Err(_) => {
+                    return Err(Error::Config(format!(
+                        "Judge {}: api_key_env = \"{}\" but that environment variable is not set.",
+                        jc.model, env_name
+                    )));
+                }
             }
         } else {
             cli_api_key.clone()
@@ -294,48 +294,62 @@ pub fn resolve_judges(
 
         // OpenRouter can serve each request from a different provider, so an
         // unpinned judge's probe may describe a provider its run never uses.
-        let endpoint_url = reqwest::Url::parse(&jc.endpoint).unwrap_or_else(|e| {
-            bail(format!("Judge {}: invalid endpoint \"{}\": {}", jc.model, jc.endpoint, e));
-        });
+        let endpoint_url = reqwest::Url::parse(&jc.endpoint).map_err(|e| {
+            Error::Config(format!("Judge {}: invalid endpoint \"{}\": {}", jc.model, jc.endpoint, e))
+        })?;
         if endpoint_url.host_str() == Some("openrouter.ai") && jc.provider.is_none() {
-            bail(format!(
+            return Err(Error::Config(format!(
                 "Judge {}: OpenRouter judges must pin a provider with `provider`, e.g. \
                  provider = {{ only = [\"xiaomi\"], allow_fallbacks = false }}",
                 jc.model
-            ));
+            )));
         }
 
         let judge_id = judge_hash(&jc.endpoint, &jc.model);
         let weight = jc.weight.unwrap_or(1.0);
         if !weight.is_finite() || weight < 0.0 {
-            bail(format!("Judge {} has invalid weight {}. Weights must be finite and >= 0.", jc.model, weight));
+            return Err(Error::Config(format!(
+                "Judge {} has invalid weight {}. Weights must be finite and >= 0.",
+                jc.model, weight
+            )));
         }
 
         let min_logprob_coverage = jc.min_logprob_coverage.unwrap_or(global_min_logprob_coverage);
         if !min_logprob_coverage.is_finite() || min_logprob_coverage <= 0.0 || min_logprob_coverage > 1.0 {
-            bail(format!(
+            return Err(Error::Config(format!(
                 "Judge {} has min_logprob_coverage={}, must be finite, > 0.0 and <= 1.0",
                 jc.model, min_logprob_coverage
-            ));
+            )));
         }
 
         let verdict_temperature = jc.verdict_temperature.unwrap_or(global_verdict_temperature);
         if !verdict_temperature.is_finite() || verdict_temperature <= 0.0 {
-            bail(format!(
+            return Err(Error::Config(format!(
                 "Judge {} has verdict_temperature={}, must be finite and > 0",
                 jc.model, verdict_temperature
-            ));
+            )));
         }
 
-        let request_timeout = jc.request_timeout_secs.map(|secs| {
-            match Duration::try_from_secs_f64(secs) {
-                Ok(timeout) if !timeout.is_zero() => timeout,
-                _ => bail(format!(
-                    "Judge {} has request_timeout_secs={}, must be finite and > 0",
-                    jc.model, secs
-                )),
-            }
-        });
+        let request_timeout = match jc.request_timeout_secs {
+            Some(secs) => match Duration::try_from_secs_f64(secs) {
+                Ok(timeout) if !timeout.is_zero() => Some(timeout),
+                _ => {
+                    return Err(Error::Config(format!(
+                        "Judge {} has request_timeout_secs={}, must be finite and > 0",
+                        jc.model, secs
+                    )));
+                }
+            },
+            None => None,
+        };
+
+        let concurrency = jc.concurrency.unwrap_or(global_concurrency);
+        if concurrency == 0 {
+            return Err(Error::Config(format!(
+                "judge '{}': concurrency must be at least 1",
+                jc.endpoint
+            )));
+        }
 
         judges.push(ResolvedJudge {
             endpoint: jc.endpoint.clone(),
@@ -346,13 +360,7 @@ pub fn resolve_judges(
             presence_penalty: jc.presence_penalty,
             top_p: jc.top_p,
             logprobs: global_logprobs,
-            concurrency: {
-                let c = jc.concurrency.unwrap_or(global_concurrency);
-                if c == 0 {
-                    bail(format!("judge '{}': concurrency must be at least 1", jc.endpoint));
-                }
-                c
-            },
+            concurrency,
             weight,
             min_logprob_coverage,
             verdict_temperature,
@@ -371,7 +379,7 @@ pub fn resolve_judges(
     }
 
     if judges.iter().map(|j| j.weight).sum::<f64>() <= 0.0 {
-        bail("At least one judge must have positive weight.".to_string());
+        return Err(Error::Config("At least one judge must have positive weight.".into()));
     }
 
     // Print message only after all judges pass validation so a judge that
@@ -390,7 +398,7 @@ pub fn resolve_judges(
         );
     }
 
-    judges
+    Ok(judges)
 }
 
 fn validate_judge_sampling_params(
@@ -435,34 +443,32 @@ fn validate_judge_sampling_params(
 
 /// Resolve the ranking budget. Kept out of resolve_config() because only
 /// `rank` uses it; `probe` and `benchmark` shouldn't have to set it.
-pub fn resolve_judgements_per_item(shared: &ConfigArgs, cfg: &config::NanojudgeConfig) -> usize {
+pub fn resolve_judgements_per_item(shared: &ConfigArgs, cfg: &config::NanojudgeConfig) -> crate::Result<usize> {
     let judgements_per_item = merge_opt(shared.judgements_per_item, cfg.judgements_per_item, "judgements-per-item")
-        .unwrap_or_else(|| {
-            bail("--judgements-per-item is required (set it on the CLI or in the config file)");
-        });
+        .ok_or_else(|| Error::Config("--judgements-per-item is required (set it on the CLI or in the config file)".into()))?;
     if judgements_per_item == 0 {
-        bail("--judgements-per-item must be at least 1");
+        return Err(Error::Config("--judgements-per-item must be at least 1".into()));
     }
-    judgements_per_item
+    Ok(judgements_per_item)
 }
 
 /// Resolve CLI args + config file + defaults into final config.
 /// Judge-specific settings (endpoint, model, temperature, etc.) are handled by resolve_judges().
-pub fn resolve_config(shared: &ConfigArgs, cfg: &config::NanojudgeConfig) -> ResolvedConfig {
+pub fn resolve_config(shared: &ConfigArgs, cfg: &config::NanojudgeConfig) -> crate::Result<ResolvedConfig> {
     let judgement_distribution_str = merge_opt(shared.judgement_distribution.clone(), cfg.judgement_distribution.clone(), "judgement-distribution")
         .unwrap_or_else(|| "top-heavy".to_string());
     let judgement_distribution = match judgement_distribution_str.as_str() {
         "uniform" => JudgementDistribution::Uniform,
         "top-heavy" => JudgementDistribution::TopHeavy,
-        other => bail(format!("Unknown judgement distribution \"{other}\". Use \"uniform\" or \"top-heavy\".")),
+        other => return Err(Error::Config(format!("Unknown judgement distribution \"{other}\". Use \"uniform\" or \"top-heavy\"."))),
     };
 
     let lineup_size = merge_opt(shared.lineup_size, cfg.lineup_size, "lineup-size")
         .unwrap_or(2);
     if !(MIN_LINEUP_SIZE..=MAX_LINEUP_SIZE).contains(&lineup_size) {
-        bail(format!(
+        return Err(Error::Config(format!(
             "lineup-size={lineup_size}, must be between {MIN_LINEUP_SIZE} and {MAX_LINEUP_SIZE}"
-        ));
+        )));
     }
     // Size 2 keeps the dedicated pairwise path (graded clear/narrow verdicts);
     // 3 and up run the lineup path.
@@ -472,37 +478,39 @@ pub fn resolve_config(shared: &ConfigArgs, cfg: &config::NanojudgeConfig) -> Res
     let selection_sharpness = merge_opt(shared.selection_sharpness, cfg.selection_sharpness, "selection-sharpness")
         .unwrap_or(0.7);
     if !selection_sharpness.is_finite() || selection_sharpness <= 0.0 {
-        bail(format!("selection-sharpness={selection_sharpness}, must be finite and > 0"));
+        return Err(Error::Config(format!("selection-sharpness={selection_sharpness}, must be finite and > 0")));
     }
     let selection_top_k = merge_opt(shared.selection_top_k, cfg.selection_top_k, "selection-top-k")
         .unwrap_or(1);
     if selection_top_k < 1 {
-        bail(format!("selection-top-k={selection_top_k}, must be >= 1 (1 aims at first place)"));
+        return Err(Error::Config(format!("selection-top-k={selection_top_k}, must be >= 1 (1 aims at first place)")));
     }
     let selection_draws = merge_opt(shared.selection_draws, cfg.selection_draws, "selection-draws")
         .unwrap_or(DEFAULT_SELECTION_DRAWS);
     if selection_draws < 1 {
-        bail(format!("selection-draws={selection_draws}, must be >= 1"));
+        return Err(Error::Config(format!("selection-draws={selection_draws}, must be >= 1")));
     }
     let selection_cutoff = merge_opt(shared.cutoff, cfg.cutoff, "cutoff")
         .unwrap_or(0.0);
     if !selection_cutoff.is_finite() || !(0.0..1.0).contains(&selection_cutoff) {
-        bail(format!("cutoff={selection_cutoff}, must be in [0.0, 1.0) — 0 disables the cutoff"));
+        return Err(Error::Config(format!("cutoff={selection_cutoff}, must be in [0.0, 1.0) — 0 disables the cutoff")));
     }
     let selection_coverage = merge_opt(shared.coverage, cfg.coverage, "coverage")
         .unwrap_or(1.0);
     if !selection_coverage.is_finite() || selection_coverage < 0.0 {
-        bail(format!("coverage={selection_coverage}, must be finite and >= 0 (0 disables it)"));
+        return Err(Error::Config(format!("coverage={selection_coverage}, must be finite and >= 0 (0 disables it)")));
     }
     // Early stop has deliberately no default: absent means the run always uses
     // its full budget.
     let stop_confidence = merge_opt(shared.stop_confidence, cfg.stop_confidence, "stop-confidence");
     if let Some(c) = stop_confidence {
         if !c.is_finite() || c <= 0.5 || c >= 1.0 {
-            bail(format!("stop-confidence={c}, must be in (0.5, 1.0), e.g. 0.95"));
+            return Err(Error::Config(format!("stop-confidence={c}, must be in (0.5, 1.0), e.g. 0.95")));
         }
         if matches!(judgement_distribution, JudgementDistribution::Uniform) {
-            bail("stop-confidence requires judgement-distribution = \"top-heavy\" (uniform runs have no top-k boundary to measure against)");
+            return Err(Error::Config(
+                "stop-confidence requires judgement-distribution = \"top-heavy\" (uniform runs have no top-k boundary to measure against)".into(),
+            ));
         }
     }
     let retries = merge_opt(shared.retries, cfg.retries, "retries")
@@ -513,40 +521,40 @@ pub fn resolve_config(shared: &ConfigArgs, cfg: &config::NanojudgeConfig) -> Res
     let confidence_level = merge_opt(shared.confidence_level, cfg.confidence_level, "confidence-level")
         .unwrap_or(DEFAULT_CONFIDENCE_LEVEL);
     if !confidence_level.is_finite() || confidence_level <= 0.0 || confidence_level >= 1.0 {
-        bail(format!(
+        return Err(Error::Config(format!(
             "confidence-level={confidence_level}, must be between 0.0 and 1.0 (exclusive)"
-        ));
+        )));
     }
     let regularization_strength = merge_opt(shared.regularization_strength, cfg.regularization_strength, "regularization-strength")
         .unwrap_or(DEFAULT_REGULARIZATION_STRENGTH);
     if !regularization_strength.is_finite() || regularization_strength <= 0.0 {
-        bail(format!("regularization-strength={regularization_strength}, must be finite and > 0"));
+        return Err(Error::Config(format!("regularization-strength={regularization_strength}, must be finite and > 0")));
     }
     let matchmaking_sharpness = merge_opt(shared.matchmaking_sharpness, cfg.matchmaking_sharpness, "matchmaking-sharpness")
         .unwrap_or(1.0);
     if !matchmaking_sharpness.is_finite() || matchmaking_sharpness <= 0.0 {
-        bail(format!("matchmaking-sharpness={matchmaking_sharpness}, must be finite and > 0"));
+        return Err(Error::Config(format!("matchmaking-sharpness={matchmaking_sharpness}, must be finite and > 0")));
     }
     let min_uniform_edges = merge_opt(shared.min_uniform_edges, cfg.min_uniform_edges, "min-uniform-edges")
         .unwrap_or(2);
     if min_uniform_edges == 0 {
         // 0 would let top-heavy pairing start before any results exist —
         // selection weights are only derived after a completed refit.
-        bail("min-uniform-edges must be at least 1");
+        return Err(Error::Config("min-uniform-edges must be at least 1".into()));
     }
     let judgements_per_refit = merge_opt(shared.judgements_per_refit, cfg.judgements_per_refit, "judgements-per-refit");
     if judgements_per_refit == Some(0) {
-        bail("--judgements-per-refit must be at least 1");
+        return Err(Error::Config("--judgements-per-refit must be at least 1".into()));
     }
     let prior_tau2 = merge_opt(shared.prior_tau2, cfg.prior_tau2, "prior-tau2")
         .unwrap_or(DEFAULT_PRIOR_TAU2);
     if !prior_tau2.is_finite() || prior_tau2 <= 0.0 {
-        bail(format!("prior-tau2={prior_tau2}, must be finite and > 0"));
+        return Err(Error::Config(format!("prior-tau2={prior_tau2}, must be finite and > 0")));
     }
     let bias_prior_tau2 = merge_opt(shared.bias_prior_tau2, cfg.bias_prior_tau2, "bias-prior-tau2")
         .unwrap_or(DEFAULT_BIAS_PRIOR_TAU2);
     if !bias_prior_tau2.is_finite() || bias_prior_tau2 <= 0.0 {
-        bail(format!("bias-prior-tau2={bias_prior_tau2}, must be finite and > 0"));
+        return Err(Error::Config(format!("bias-prior-tau2={bias_prior_tau2}, must be finite and > 0")));
     }
     let live_top = merge_opt(shared.live_top, cfg.live_top, "live-top");
     let emit_interim_rankings = shared.emit_interim_rankings.unwrap_or(false);
@@ -574,7 +582,7 @@ pub fn resolve_config(shared: &ConfigArgs, cfg: &config::NanojudgeConfig) -> Res
             (save_reasoning_text, "save-reasoning-text"),
         ] {
             if enabled {
-                bail(format!("--{flag} requires --save-successful-judgements"));
+                return Err(Error::Config(format!("--{flag} requires --save-successful-judgements")));
             }
         }
     }
@@ -604,7 +612,7 @@ pub fn resolve_config(shared: &ConfigArgs, cfg: &config::NanojudgeConfig) -> Res
     let bias_prior = merge_opt(shared.bias_prior, cfg.bias_prior, "bias-prior")
         .unwrap_or(DEFAULT_BIAS_PRIOR);
     if !bias_prior.is_finite() || bias_prior <= 0.0 || bias_prior >= 1.0 {
-        bail("--bias-prior must be greater than 0.0 and less than 1.0");
+        return Err(Error::Config("--bias-prior must be greater than 0.0 and less than 1.0".into()));
     }
     let bias_prior_logit = (bias_prior / (1.0 - bias_prior)).ln();
 
@@ -629,8 +637,8 @@ pub fn resolve_config(shared: &ConfigArgs, cfg: &config::NanojudgeConfig) -> Res
 
         let template_path = cli_path.or(cfg_path);
         match template_path {
-            Some(path) if uses_lineups => prompt::load_lineup_template(&path, lineup_size),
-            Some(path) => prompt::load_template(&path),
+            Some(path) if uses_lineups => prompt::load_lineup_template(&path, lineup_size)?,
+            Some(path) => prompt::load_template(&path)?,
             None if uses_lineups && deliberation_enabled => prompt::default_lineup_template(lineup_size),
             None if uses_lineups => prompt::default_lineup_template_no_deliberation(lineup_size),
             None if deliberation_enabled => prompt::DEFAULT_TEMPLATE.to_string(),
@@ -638,7 +646,7 @@ pub fn resolve_config(shared: &ConfigArgs, cfg: &config::NanojudgeConfig) -> Res
         }
     };
 
-    ResolvedConfig {
+    Ok(ResolvedConfig {
         judgement_distribution,
         lineup_size,
         selection_sharpness,
@@ -669,7 +677,7 @@ pub fn resolve_config(shared: &ConfigArgs, cfg: &config::NanojudgeConfig) -> Res
         verbose,
         save_failed_judgements,
         seed,
-    }
+    })
 }
 
 #[cfg(test)]
@@ -746,11 +754,11 @@ mod tests {
     fn test_request_timeout_unset_waits_indefinitely() {
         let cli = default_cli();
         let mut cfg = one_judge_config();
-        let judges = resolve_judges(&cli, &cfg, Path::new("test.toml"), true, 2);
+        let judges = resolve_judges(&cli, &cfg, Path::new("test.toml"), true, 2).unwrap();
         assert_eq!(judges[0].request_timeout, None);
 
         cfg.judge.as_mut().unwrap()[0].request_timeout_secs = Some(2.5);
-        let judges = resolve_judges(&cli, &cfg, Path::new("test.toml"), true, 2);
+        let judges = resolve_judges(&cli, &cfg, Path::new("test.toml"), true, 2).unwrap();
         assert_eq!(judges[0].request_timeout, Some(Duration::from_millis(2500)));
     }
 
@@ -761,7 +769,7 @@ mod tests {
         let judge = &mut cfg.judge.as_mut().unwrap()[0];
         judge.max_tokens = None;
         judge.reasoning_effort = Some("none".into());
-        let judges = resolve_judges(&cli, &cfg, Path::new("test.toml"), true, 2);
+        let judges = resolve_judges(&cli, &cfg, Path::new("test.toml"), true, 2).unwrap();
         assert_eq!(judges[0].max_tokens, 2048);
     }
 
@@ -772,9 +780,9 @@ mod tests {
         let judge = &mut cfg.judge.as_mut().unwrap()[0];
         judge.max_tokens = None;
         judge.reasoning_effort = Some("none".into());
-        let pairwise = resolve_judges(&cli, &cfg, Path::new("test.toml"), false, 2);
+        let pairwise = resolve_judges(&cli, &cfg, Path::new("test.toml"), false, 2).unwrap();
         assert_eq!(pairwise[0].max_tokens, NO_DELIBERATION_MAX_TOKENS);
-        let lineup = resolve_judges(&cli, &cfg, Path::new("test.toml"), false, 4);
+        let lineup = resolve_judges(&cli, &cfg, Path::new("test.toml"), false, 4).unwrap();
         assert_eq!(lineup[0].max_tokens, TOKENS_PER_RANKING_LINE * 4);
     }
 
@@ -782,9 +790,9 @@ mod tests {
     fn test_max_tokens_explicit_kept_without_deliberation() {
         let cli = default_cli();
         let cfg = one_judge_config();
-        let pairwise = resolve_judges(&cli, &cfg, Path::new("test.toml"), false, 2);
+        let pairwise = resolve_judges(&cli, &cfg, Path::new("test.toml"), false, 2).unwrap();
         assert_eq!(pairwise[0].max_tokens, 2048);
-        let lineup = resolve_judges(&cli, &cfg, Path::new("test.toml"), false, 4);
+        let lineup = resolve_judges(&cli, &cfg, Path::new("test.toml"), false, 4).unwrap();
         assert_eq!(lineup[0].max_tokens, 2048);
     }
 
@@ -792,7 +800,7 @@ mod tests {
     fn test_min_logprob_coverage_default() {
         let cli = default_cli();
         let cfg = one_judge_config();
-        let judges = resolve_judges(&cli, &cfg, Path::new("test.toml"), true, 2);
+        let judges = resolve_judges(&cli, &cfg, Path::new("test.toml"), true, 2).unwrap();
         assert_eq!(judges[0].min_logprob_coverage, parse::DEFAULT_MIN_LOGPROB_COVERAGE);
     }
 
@@ -801,7 +809,7 @@ mod tests {
         let mut cli = default_cli();
         cli.min_logprob_coverage = Some(0.9);
         let cfg = one_judge_config();
-        let judges = resolve_judges(&cli, &cfg, Path::new("test.toml"), true, 2);
+        let judges = resolve_judges(&cli, &cfg, Path::new("test.toml"), true, 2).unwrap();
         assert_eq!(judges[0].min_logprob_coverage, 0.9);
     }
 
@@ -810,7 +818,7 @@ mod tests {
         let cli = default_cli();
         let mut cfg = one_judge_config();
         cfg.min_logprob_coverage = Some(0.85);
-        let judges = resolve_judges(&cli, &cfg, Path::new("test.toml"), true, 2);
+        let judges = resolve_judges(&cli, &cfg, Path::new("test.toml"), true, 2).unwrap();
         assert_eq!(judges[0].min_logprob_coverage, 0.85);
     }
 
@@ -820,7 +828,7 @@ mod tests {
         cli.min_logprob_coverage = Some(0.9);
         let mut cfg = one_judge_config();
         cfg.min_logprob_coverage = Some(0.85);
-        let judges = resolve_judges(&cli, &cfg, Path::new("test.toml"), true, 2);
+        let judges = resolve_judges(&cli, &cfg, Path::new("test.toml"), true, 2).unwrap();
         assert_eq!(judges[0].min_logprob_coverage, 0.9);
     }
 
@@ -830,7 +838,7 @@ mod tests {
         cli.min_logprob_coverage = Some(0.9);
         let mut cfg = one_judge_config();
         cfg.judge.as_mut().unwrap()[0].min_logprob_coverage = Some(0.7);
-        let judges = resolve_judges(&cli, &cfg, Path::new("test.toml"), true, 2);
+        let judges = resolve_judges(&cli, &cfg, Path::new("test.toml"), true, 2).unwrap();
         assert_eq!(judges[0].min_logprob_coverage, 0.7);
     }
 
@@ -838,7 +846,7 @@ mod tests {
     fn test_verdict_temperature_default_deliberation() {
         let cli = default_cli();
         let cfg = one_judge_config();
-        let judges = resolve_judges(&cli, &cfg, Path::new("test.toml"), true, 2);
+        let judges = resolve_judges(&cli, &cfg, Path::new("test.toml"), true, 2).unwrap();
         assert_eq!(judges[0].verdict_temperature, DEFAULT_VERDICT_TEMPERATURE_DELIBERATION);
     }
 
@@ -846,7 +854,7 @@ mod tests {
     fn test_verdict_temperature_default_no_deliberation() {
         let cli = default_cli();
         let cfg = one_judge_config();
-        let judges = resolve_judges(&cli, &cfg, Path::new("test.toml"), false, 2);
+        let judges = resolve_judges(&cli, &cfg, Path::new("test.toml"), false, 2).unwrap();
         assert_eq!(judges[0].verdict_temperature, DEFAULT_VERDICT_TEMPERATURE_NO_DELIBERATION);
     }
 
@@ -855,7 +863,7 @@ mod tests {
         let mut cli = default_cli();
         cli.verdict_temperature = Some(6.0);
         let cfg = one_judge_config();
-        let judges = resolve_judges(&cli, &cfg, Path::new("test.toml"), true, 2);
+        let judges = resolve_judges(&cli, &cfg, Path::new("test.toml"), true, 2).unwrap();
         assert_eq!(judges[0].verdict_temperature, 6.0);
     }
 
@@ -864,7 +872,7 @@ mod tests {
         let cli = default_cli();
         let mut cfg = one_judge_config();
         cfg.verdict_temperature = Some(2.0);
-        let judges = resolve_judges(&cli, &cfg, Path::new("test.toml"), true, 2);
+        let judges = resolve_judges(&cli, &cfg, Path::new("test.toml"), true, 2).unwrap();
         assert_eq!(judges[0].verdict_temperature, 2.0);
     }
 
@@ -874,7 +882,7 @@ mod tests {
         cli.verdict_temperature = Some(6.0);
         let mut cfg = one_judge_config();
         cfg.verdict_temperature = Some(2.0);
-        let judges = resolve_judges(&cli, &cfg, Path::new("test.toml"), true, 2);
+        let judges = resolve_judges(&cli, &cfg, Path::new("test.toml"), true, 2).unwrap();
         assert_eq!(judges[0].verdict_temperature, 6.0);
     }
 
@@ -884,7 +892,7 @@ mod tests {
         cli.verdict_temperature = Some(6.0);
         let mut cfg = one_judge_config();
         cfg.judge.as_mut().unwrap()[0].verdict_temperature = Some(2.5);
-        let judges = resolve_judges(&cli, &cfg, Path::new("test.toml"), true, 2);
+        let judges = resolve_judges(&cli, &cfg, Path::new("test.toml"), true, 2).unwrap();
         assert_eq!(judges[0].verdict_temperature, 2.5);
     }
 
@@ -895,7 +903,7 @@ mod tests {
         let cli = default_cli();
         let mut cfg = one_judge_config();
         cfg.verdict_temperature = Some(4.0);
-        let judges = resolve_judges(&cli, &cfg, Path::new("test.toml"), false, 2);
+        let judges = resolve_judges(&cli, &cfg, Path::new("test.toml"), false, 2).unwrap();
         assert_eq!(judges[0].verdict_temperature, 4.0);
     }
 
@@ -904,7 +912,7 @@ mod tests {
         let mut cli = default_cli();
         cli.concurrency = Some(32);
         let cfg = one_judge_config();
-        let judges = resolve_judges(&cli, &cfg, Path::new("test.toml"), true, 2);
+        let judges = resolve_judges(&cli, &cfg, Path::new("test.toml"), true, 2).unwrap();
         assert_eq!(judges[0].concurrency, 32);
     }
 
@@ -914,7 +922,7 @@ mod tests {
         cli.concurrency = Some(32);
         let mut cfg = one_judge_config();
         cfg.concurrency = Some(8);
-        let judges = resolve_judges(&cli, &cfg, Path::new("test.toml"), true, 2);
+        let judges = resolve_judges(&cli, &cfg, Path::new("test.toml"), true, 2).unwrap();
         assert_eq!(judges[0].concurrency, 32);
     }
 
@@ -923,7 +931,7 @@ mod tests {
         let mut cli = default_cli();
         cli.logprobs = Some(true);
         let cfg = one_judge_config();
-        let judges = resolve_judges(&cli, &cfg, Path::new("test.toml"), true, 2);
+        let judges = resolve_judges(&cli, &cfg, Path::new("test.toml"), true, 2).unwrap();
         assert!(judges[0].logprobs);
     }
 
@@ -933,7 +941,7 @@ mod tests {
         cli.logprobs = Some(false);
         let mut cfg = one_judge_config();
         cfg.logprobs = Some(true);
-        let judges = resolve_judges(&cli, &cfg, Path::new("test.toml"), true, 2);
+        let judges = resolve_judges(&cli, &cfg, Path::new("test.toml"), true, 2).unwrap();
         assert!(!judges[0].logprobs);
     }
 
@@ -942,7 +950,7 @@ mod tests {
         let mut cli = default_cli();
         cli.deliberation = Some(false);
         let cfg = NanojudgeConfig::default();
-        let resolved = resolve_config(&cli, &cfg);
+        let resolved = resolve_config(&cli, &cfg).unwrap();
         assert!(!resolved.deliberation_enabled);
     }
 
@@ -951,7 +959,7 @@ mod tests {
         let mut cli = default_cli();
         cli.deliberation = Some(true);
         let cfg = NanojudgeConfig { deliberation_enabled: Some(false), ..Default::default() };
-        let resolved = resolve_config(&cli, &cfg);
+        let resolved = resolve_config(&cli, &cfg).unwrap();
         assert!(resolved.deliberation_enabled);
     }
 
@@ -959,7 +967,7 @@ mod tests {
     fn test_deliberation_from_config() {
         let cli = default_cli();
         let cfg = NanojudgeConfig { deliberation_enabled: Some(false), ..Default::default() };
-        let resolved = resolve_config(&cli, &cfg);
+        let resolved = resolve_config(&cli, &cfg).unwrap();
         assert!(!resolved.deliberation_enabled);
     }
 
@@ -967,7 +975,7 @@ mod tests {
     fn test_stop_confidence_absent_means_no_early_stop() {
         let cli = default_cli();
         let cfg = NanojudgeConfig::default();
-        let resolved = resolve_config(&cli, &cfg);
+        let resolved = resolve_config(&cli, &cfg).unwrap();
         assert_eq!(resolved.stop_confidence, None);
     }
 
@@ -975,7 +983,7 @@ mod tests {
     fn test_judgements_per_refit_is_literal() {
         let mut cli = default_cli();
         cli.judgements_per_refit = Some(3);
-        let resolved = resolve_config(&cli, &NanojudgeConfig::default());
+        let resolved = resolve_config(&cli, &NanojudgeConfig::default()).unwrap();
         assert_eq!(resolved.judgements_per_refit, Some(3));
     }
 
@@ -985,7 +993,7 @@ mod tests {
         cli.judgement_distribution = Some("top-heavy".into());
         cli.stop_confidence = Some(0.95);
         let cfg = NanojudgeConfig::default();
-        let resolved = resolve_config(&cli, &cfg);
+        let resolved = resolve_config(&cli, &cfg).unwrap();
         assert_eq!(resolved.stop_confidence, Some(0.95));
     }
 
@@ -995,7 +1003,7 @@ mod tests {
         cli.judgement_distribution = Some("top-heavy".into());
         cli.stop_confidence = Some(0.99);
         let cfg = NanojudgeConfig { stop_confidence: Some(0.9), ..Default::default() };
-        let resolved = resolve_config(&cli, &cfg);
+        let resolved = resolve_config(&cli, &cfg).unwrap();
         assert_eq!(resolved.stop_confidence, Some(0.99));
     }
 
@@ -1003,7 +1011,7 @@ mod tests {
     fn test_judgement_distribution_defaults_to_top_heavy() {
         let cli = default_cli();
         let cfg = NanojudgeConfig::default();
-        let resolved = resolve_config(&cli, &cfg);
+        let resolved = resolve_config(&cli, &cfg).unwrap();
         assert_eq!(resolved.judgement_distribution, JudgementDistribution::TopHeavy);
     }
 
@@ -1034,5 +1042,26 @@ mod tests {
         }
         let err = validate_judge_sampling_params("m", 0.7, 0.0, None, None, 0).unwrap_err();
         assert!(err.contains("max_tokens=0"), "{err}");
+    }
+
+    #[test]
+    fn test_resolve_errors_return_config_variant() {
+        let cli = default_cli();
+        let empty = NanojudgeConfig::default();
+        let err = resolve_judges(&cli, &empty, Path::new("test.toml"), true, 2).err().unwrap();
+        assert!(matches!(err, Error::Config(_)), "{err:?}");
+
+        let mut bad_cli = default_cli();
+        bad_cli.judgement_distribution = Some("uniform".into());
+        bad_cli.stop_confidence = Some(0.95);
+        let err = resolve_config(&bad_cli, &empty).err().unwrap();
+        assert!(matches!(err, Error::Config(_)), "{err:?}");
+        assert!(err.to_string().contains("top-heavy"), "{err}");
+
+        let mut openrouter_cfg = one_judge_config();
+        openrouter_cfg.judge.as_mut().unwrap()[0].endpoint = "https://openrouter.ai/api/v1".into();
+        let err = resolve_judges(&cli, &openrouter_cfg, Path::new("test.toml"), true, 2).err().unwrap();
+        assert!(matches!(err, Error::Config(_)), "{err:?}");
+        assert!(err.to_string().contains("OpenRouter"), "{err}");
     }
 }

@@ -16,10 +16,10 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::sync::OnceCell;
 
 use crate::args::{OutputFormat, RankArgs};
-use crate::bail;
 use crate::config;
+use crate::Error;
 use crate::items::load_items;
-use crate::llm::{LineupJudgementResult, LlmConfig, PairJudgementResult, judge_pair, judge_lineup};
+use crate::llm::{FatalSlot, JudgementError, LineupJudgementResult, LlmConfig, PairJudgementResult, judge_pair, judge_lineup};
 use crate::output;
 use crate::parse::ParseResult;
 use crate::prompt::{build_lineup_prompt, build_prompt};
@@ -74,7 +74,7 @@ type ReuseCell<R> = Arc<OnceCell<Arc<Judged<R>>>>;
 
 /// Why a judgement did not fill its reuse cell.
 enum Unfilled<R> {
-    Failed(String),
+    Failed(JudgementError),
     NoVerdict(Arc<Judged<R>>),
 }
 
@@ -87,9 +87,9 @@ async fn judge_or_reuse<R, Fut>(
     cell: Option<ReuseCell<R>>,
     has_verdict: fn(&R) -> bool,
     send: impl FnOnce() -> Fut,
-) -> Result<(Arc<Judged<R>>, bool), String>
+) -> Result<(Arc<Judged<R>>, bool), JudgementError>
 where
-    Fut: Future<Output = Result<Judged<R>, String>>,
+    Fut: Future<Output = Result<Judged<R>, JudgementError>>,
 {
     let Some(cell) = cell else {
         return send().await.map(|judged| (Arc::new(judged), false));
@@ -110,6 +110,12 @@ where
         Ok(judged) => Ok((judged.clone(), !sent)),
         Err(Unfilled::Failed(e)) => Err(e),
         Err(Unfilled::NoVerdict(judged)) => Ok((judged, false)),
+    }
+}
+
+fn abort_remaining<T>(handles: impl Iterator<Item = (tokio::task::JoinHandle<T>, usize, Slot)>) {
+    for (h, _, _) in handles {
+        h.abort();
     }
 }
 
@@ -156,15 +162,15 @@ fn loaded_reuse_entries(
     deliberation_enabled: bool,
     lineup_size: usize,
     path: &Path,
-) -> Vec<LoadedReuse> {
-    let field = |record: &serde_json::Value, name: &str| -> serde_json::Value {
+) -> crate::Result<Vec<LoadedReuse>> {
+    let field = |record: &serde_json::Value, name: &str| -> crate::Result<serde_json::Value> {
         match record.get(name) {
-            Some(v) => v.clone(),
-            None => bail(format!("A judgement in {} has no {name} field", path.display())),
+            Some(v) => Ok(v.clone()),
+            None => Err(Error::Input(format!("A judgement in {} has no {name} field", path.display()))),
         }
     };
-    let malformed = |name: &str| -> ! {
-        bail(format!("A judgement in {} has a malformed {name} field", path.display()))
+    let malformed = |name: &str| -> Error {
+        Error::Input(format!("A judgement in {} has a malformed {name} field", path.display()))
     };
     let mut entries = Vec::new();
     for record in records {
@@ -180,23 +186,24 @@ fn loaded_reuse_entries(
         if !reuses_results(judge, deliberation_enabled, lineup_size) {
             continue;
         }
-        let same_settings = field(&record, "logprobs") == serde_json::json!(judge.logprobs)
-            && field(&record, "deliberation") == serde_json::json!(deliberation_enabled)
-            && field(&record, "reasoning_effort") == serde_json::json!(judge.reasoning_effort)
-            && field(&record, "provider") == serde_json::json!(judge.provider)
-            && field(&record, "chat_template_kwargs") == serde_json::json!(judge.chat_template_kwargs);
+        let same_settings = field(&record, "logprobs")? == serde_json::json!(judge.logprobs)
+            && field(&record, "deliberation")? == serde_json::json!(deliberation_enabled)
+            && field(&record, "reasoning_effort")? == serde_json::json!(judge.reasoning_effort)
+            && field(&record, "provider")? == serde_json::json!(judge.provider)
+            && field(&record, "chat_template_kwargs")? == serde_json::json!(judge.chat_template_kwargs);
         if !same_settings {
             continue;
         }
-        let hash = match field(&record, "prompt_hash").as_str() {
-            Some(h) if h.len() == 16 => u64::from_str_radix(h, 16).unwrap_or_else(|_| malformed("prompt_hash")),
-            _ => malformed("prompt_hash"),
+        let hash_val = field(&record, "prompt_hash")?;
+        let hash = match hash_val.as_str() {
+            Some(h) if h.len() == 16 => u64::from_str_radix(h, 16).map_err(|_| malformed("prompt_hash"))?,
+            _ => return Err(malformed("prompt_hash")),
         };
-        let temperature = field(&record, "temperature").as_f64().unwrap_or_else(|| malformed("temperature"));
+        let temperature = field(&record, "temperature")?.as_f64().ok_or_else(|| malformed("temperature"))?;
         if (!judge.logprobs || lineup_size > 2) && temperature != 0.0 {
             continue;
         }
-        let hit_max_tokens = field(&record, "hit_max_tokens").as_bool().unwrap_or_else(|| malformed("hit_max_tokens"));
+        let hit_max_tokens = field(&record, "hit_max_tokens")?.as_bool().ok_or_else(|| malformed("hit_max_tokens"))?;
         // A text field is absent when its run didn't save it, and null when the
         // endpoint returned none; either way there is no text to carry over.
         let text = |name: &str| record.get(name).and_then(|v| v.as_str()).map(str::to_owned);
@@ -211,7 +218,7 @@ fn loaded_reuse_entries(
             reasoning_text,
         });
     }
-    entries
+    Ok(entries)
 }
 
 /// Fill a reuse cache from loaded judgements, keeping the first of any repeats.
@@ -274,11 +281,13 @@ fn loaded_lineup_result(
     }
 }
 
-fn resolve_save_path(path: &Path, prefix: &str) -> PathBuf {
+fn resolve_save_path(path: &Path, prefix: &str) -> crate::Result<PathBuf> {
     let ts = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_err(|e| Error::Io(format!("system clock is before 1970: {e}")))?
+        .as_secs();
     if path.is_dir() {
-        path.join(format!("{prefix}-{ts}.jsonl"))
+        Ok(path.join(format!("{prefix}-{ts}.jsonl")))
     } else {
         // A bare filename has an empty parent, not None; treat it as ".".
         let parent = match path.parent() {
@@ -286,9 +295,9 @@ fn resolve_save_path(path: &Path, prefix: &str) -> PathBuf {
             _ => Path::new("."),
         };
         if !parent.exists() {
-            bail(format!("Directory {} does not exist", parent.display()));
+            return Err(Error::Io(format!("Directory {} does not exist", parent.display())));
         }
-        path.to_path_buf()
+        Ok(path.to_path_buf())
     }
 }
 
@@ -334,7 +343,7 @@ pub(crate) fn temper_edges_in_place(edges: &mut [Edge], temperature: f64) {
 fn sort_and_dedup_items(
     titles: Vec<String>,
     texts: Vec<String>,
-) -> (Vec<String>, Vec<String>, Vec<String>) {
+) -> crate::Result<(Vec<String>, Vec<String>, Vec<String>)> {
     let text_hashes: Vec<String> = texts.iter().map(|t| format!("{:016x}", item_hash(t))).collect();
 
     let mut order: Vec<usize> = (0..texts.len()).collect();
@@ -346,14 +355,14 @@ fn sort_and_dedup_items(
     for i in 1..text_hashes.len() {
         if text_hashes[i] == text_hashes[i - 1] {
             let (a, b) = (order[i - 1] + 1, order[i] + 1);
-            bail(format!(
+            return Err(Error::Input(format!(
                 "Items {} and {} have identical text (hash {}). Remove the duplicate.",
                 a.min(b), a.max(b), text_hashes[i],
-            ));
+            )));
         }
     }
 
-    (titles, texts, text_hashes)
+    Ok((titles, texts, text_hashes))
 }
 
 /// Parse a criterion file into a list of criteria, splitting on ---CRITERION---.
@@ -429,24 +438,24 @@ fn seed_prior_edges(
     run_logprobs_mode: bool,
     per_judge_verdict_temperatures: &HashMap<String, f64>,
     verbose: bool,
-) -> (usize, Vec<serde_json::Value>) {
+) -> crate::Result<(usize, Vec<serde_json::Value>)> {
     let (mut edges, edge_judgements, _names, file_judge_ids, file_judge_display_names, _flag_keys,
          total_judgements, file_logprobs_mode, _temps, hash_keys, records) =
-        crate::score::load_edges(path, None, per_judge_verdict_temperatures, Some(lineup_size));
+        crate::score::load_edges(path, None, per_judge_verdict_temperatures, Some(lineup_size))?;
 
     if edges.is_empty() {
-        bail(format!("No valid judgements found in {}", path.display()));
+        return Err(Error::Input(format!("No valid judgements found in {}", path.display())));
     }
 
     // Mixing one-hot verdicts (text mode) and full distributions (logprobs mode)
     // under one global flag is not well-defined, so require an exact match.
     if file_logprobs_mode != run_logprobs_mode {
-        bail(format!(
+        return Err(Error::Input(format!(
             "{} was saved in {} mode, but this run uses {} mode. Loading requires a matching logprobs mode.",
             path.display(),
             if file_logprobs_mode { "logprobs" } else { "text" },
             if run_logprobs_mode { "logprobs" } else { "text" },
-        ));
+        )));
     }
 
     // Every judge that produced a loaded edge must be a configured judge here, so
@@ -455,12 +464,12 @@ fn seed_prior_edges(
     // weight 0 rather than dropping it.
     for (i, jid) in file_judge_ids.iter().enumerate() {
         if !run_judge_ids.contains(jid) {
-            bail(format!(
+            return Err(Error::Input(format!(
                 "Loaded file {} contains judge \"{}\", which is not in this run's judge panel. \
                  Every judge in a loaded file must be a configured judge here. Add it to your \
                  panel with weight 0 if you don't want new comparisons from it.",
                 path.display(), file_judge_display_names[i],
-            ));
+            )));
         }
     }
 
@@ -494,11 +503,11 @@ fn seed_prior_edges(
     }
 
     if seeded.is_empty() {
-        bail(format!(
+        return Err(Error::Input(format!(
             "None of the {} loaded judgements in {} reference items in this run. \
              Check that the file and the item list belong together.",
             total_judgements, path.display(),
-        ));
+        )));
     }
 
     engine.record_edges(&seeded);
@@ -520,7 +529,7 @@ fn seed_prior_edges(
         .filter(|(i, _)| contributing.contains(i))
         .map(|(_, record)| record)
         .collect();
-    (contributing.len(), contributing_records)
+    Ok((contributing.len(), contributing_records))
 }
 
 struct JsonlWriter {
@@ -529,17 +538,17 @@ struct JsonlWriter {
 }
 
 impl JsonlWriter {
-    fn open(path: PathBuf) -> Self {
+    fn open(path: PathBuf) -> crate::Result<Self> {
         let file = std::fs::OpenOptions::new()
             .create(true)
             .append(true)
             .open(&path)
-            .unwrap_or_else(|e| bail(format!("Failed to open {}: {e}", path.display())));
-        Self { path, file }
+            .map_err(|e| Error::Io(format!("Failed to open {}: {e}", path.display())))?;
+        Ok(Self { path, file })
     }
 
-    fn append(&mut self, value: &serde_json::Value) {
-        append_jsonl_line(&mut self.file, &self.path, value).unwrap_or_else(|msg| bail(msg));
+    fn append(&mut self, value: &serde_json::Value) -> crate::Result<()> {
+        append_jsonl_line(&mut self.file, &self.path, value).map_err(Error::Io)
     }
 }
 
@@ -588,8 +597,8 @@ fn append_jsonl_line(
 }
 
 /// Everything both runs build before their refit loop: judges, items, budget,
-/// per-judge request config, criteria, output files, the engine (with any
-/// loaded judgements seeded) and the Ctrl-C handler.
+/// per-judge request config, criteria, output files, and the engine (with any
+/// loaded judgements seeded).
 struct RunSetup {
     judges: Vec<ResolvedJudge>,
     logprobs_mode: bool,
@@ -622,7 +631,6 @@ struct RunSetup {
     judge_models: Arc<Vec<String>>,
     judge_endpoints: Arc<Vec<String>>,
     judge_reasoning_efforts: Arc<Vec<Option<String>>>,
-    cancelled: Arc<AtomicBool>,
 }
 
 /// Build the shared run state. All validation happens here, before any LLM
@@ -635,26 +643,26 @@ async fn setup_run(
     resolved: &ResolvedConfig,
     judgements_per_item: usize,
     noun: &str,
-) -> RunSetup {
+) -> crate::Result<RunSetup> {
     // Resolve judges from [[judge]] blocks
-    let judges = resolve_judges(&args.cfg, cfg, config_path, resolved.deliberation_enabled, resolved.lineup_size);
+    let judges = resolve_judges(&args.cfg, cfg, config_path, resolved.deliberation_enabled, resolved.lineup_size)?;
     let logprobs_mode = judges[0].logprobs;
 
     if !logprobs_mode {
         eprintln!("Warning: Running without logprobs. Requires more judgements to reach equivalent accuracy as when using logprobs.");
     }
 
-    let (titles, texts) = load_items(args);
-    let (titles, texts, text_hashes) = sort_and_dedup_items(titles, texts);
+    let (titles, texts) = load_items(args)?;
+    let (titles, texts, text_hashes) = sort_and_dedup_items(titles, texts)?;
 
     let item_ids: Vec<i64> = (0..texts.len() as i64).collect();
 
     let lineup_size = resolved.lineup_size;
     if texts.len() < lineup_size {
-        bail(format!(
+        return Err(Error::Config(format!(
             "lineup-size={} needs at least {} items; got {}.",
             lineup_size, lineup_size, texts.len()
-        ));
+        )));
     }
 
     // The top k cannot be larger than the list: fail here, before any LLM
@@ -662,11 +670,11 @@ async fn setup_run(
     if matches!(resolved.judgement_distribution, JudgementDistribution::TopHeavy)
         && resolved.selection_top_k > texts.len()
     {
-        bail(format!(
+        return Err(Error::Config(format!(
             "selection-top-k={} exceeds the number of items ({})",
             resolved.selection_top_k,
             texts.len(),
-        ));
+        )));
     }
 
     let budget = calculate_budget(texts.len(), judgements_per_item, lineup_size);
@@ -715,14 +723,18 @@ async fn setup_run(
 
     let criteria: Vec<String> = if let Some(ref path) = args.criterion_file {
         let content = std::fs::read_to_string(path)
-            .unwrap_or_else(|e| bail(format!("Failed to read criterion file {}: {e}", path.display())));
+            .map_err(|e| Error::Io(format!("Failed to read criterion file {}: {e}", path.display())))?;
         let parts = parse_criteria(&content);
         if parts.is_empty() {
-            bail(format!("No criteria found in {}", path.display()));
+            return Err(Error::Input(format!("No criteria found in {}", path.display())));
         }
         parts
     } else {
-        vec![args.criterion.clone().unwrap()]
+        let criterion = args
+            .criterion
+            .clone()
+            .ok_or_else(|| Error::Config("Either --criterion or --criterion-file is required".into()))?;
+        vec![criterion]
     };
 
     let template = Arc::new(resolved.prompt_template.clone());
@@ -731,18 +743,18 @@ async fn setup_run(
         let mut seen = HashMap::new();
         for (i, title) in titles.iter().enumerate() {
             if let Some(_prev) = seen.insert(title.as_str(), i) {
-                bail(format!(
+                return Err(Error::Input(format!(
                     "Template uses $name1/$name2 but multiple items have the same name {:?}. \
                      Rename one so the LLM can distinguish them in verdict lines.",
                     title,
-                ));
+                )));
             }
         }
     }
 
     // Weight-0 judges only contribute prior data; they send no requests.
     if !args.skip_probe {
-        crate::probe::check_judges(judges.iter().filter(|j| j.weight > 0.0)).await;
+        crate::probe::check_judges(judges.iter().filter(|j| j.weight > 0.0)).await?;
     }
 
     let client = Client::new();
@@ -786,24 +798,30 @@ async fn setup_run(
     }
 
     // Set up judgement saving if requested
-    let save_file = resolved.save_successful_judgements.as_ref().map(|save_path| {
-        let path = resolve_save_path(save_path, "judgements");
-        let writer = JsonlWriter::open(path);
-        if resolved.verbose {
-            eprintln!("Saving successful judgements to {}", writer.path.display());
+    let save_file = match resolved.save_successful_judgements.as_ref() {
+        Some(save_path) => {
+            let path = resolve_save_path(save_path, "judgements")?;
+            let writer = JsonlWriter::open(path)?;
+            if resolved.verbose {
+                eprintln!("Saving successful judgements to {}", writer.path.display());
+            }
+            Some(writer)
         }
-        writer
-    });
+        None => None,
+    };
 
     // Set up failure saving if requested
-    let failures_file = resolved.save_failed_judgements.as_ref().map(|save_path| {
-        let path = resolve_save_path(save_path, "failures");
-        let writer = JsonlWriter::open(path);
-        if resolved.verbose {
-            eprintln!("Saving failed judgements to {}", writer.path.display());
+    let failures_file = match resolved.save_failed_judgements.as_ref() {
+        Some(save_path) => {
+            let path = resolve_save_path(save_path, "failures")?;
+            let writer = JsonlWriter::open(path)?;
+            if resolved.verbose {
+                eprintln!("Saving failed judgements to {}", writer.path.display());
+            }
+            Some(writer)
         }
-        writer
-    });
+        None => None,
+    };
 
     let judgement_distribution = resolved.judgement_distribution;
 
@@ -843,8 +861,8 @@ async fn setup_run(
             logprobs_mode,
             &per_judge_verdict_temps,
             resolved.verbose,
-        );
-        let reuse = loaded_reuse_entries(records, &judges, resolved.deliberation_enabled, lineup_size, load_path);
+        )?;
+        let reuse = loaded_reuse_entries(records, &judges, resolved.deliberation_enabled, lineup_size, load_path)?;
         (Some(loaded), reuse)
     } else {
         (None, Vec::new())
@@ -875,19 +893,7 @@ async fn setup_run(
     let judge_endpoints: Arc<Vec<String>> = Arc::new(judges.iter().map(|j| j.endpoint.clone()).collect());
     let judge_reasoning_efforts: Arc<Vec<Option<String>>> = Arc::new(judges.iter().map(|j| j.reasoning_effort.clone()).collect());
 
-    let cancelled = Arc::new(AtomicBool::new(false));
-    {
-        let cancelled = cancelled.clone();
-        tokio::spawn(async move {
-            let _ = tokio::signal::ctrl_c().await;
-            eprintln!("\nCancelling... (press Ctrl-C again to force quit)");
-            cancelled.store(true, Ordering::Relaxed);
-            let _ = tokio::signal::ctrl_c().await;
-            std::process::exit(130);
-        });
-    }
-
-    RunSetup {
+    Ok(RunSetup {
         judges,
         logprobs_mode,
         titles,
@@ -916,8 +922,7 @@ async fn setup_run(
         judge_models,
         judge_endpoints,
         judge_reasoning_efforts,
-        cancelled,
-    }
+    })
 }
 
 /// The shared interim scoring options with a fresh seed for this pass's top-k
@@ -1082,8 +1087,9 @@ struct RunTotals {
     judge_stats: Vec<JudgeStats>,
 }
 
-/// Bail if nothing usable was collected, run the final scoring, print the
-/// failure summary and print the ranking. `noun` as in `setup_run`.
+/// Return `Error::NoResults` if nothing usable was collected, otherwise run the
+/// final scoring, print the failure summary and print the ranking. `noun` as in
+/// `setup_run`.
 #[allow(clippy::too_many_arguments)]
 fn finish_run(
     resolved: &ResolvedConfig,
@@ -1098,7 +1104,7 @@ fn finish_run(
     early_stop: bool,
     cancelled: bool,
     interim_rankings: &[(usize, Vec<String>)],
-) {
+) -> crate::Result<()> {
     let RunTotals {
         total_judgements,
         loaded_judgements,
@@ -1118,13 +1124,13 @@ fn finish_run(
     // (early stop or Ctrl-C). A deliberate stop scores whatever edges exist,
     // including ones seeded from --load-judgements.
     if total_judgements == 0 && !early_stop && !cancelled {
-        bail(format!("All {noun} failed."));
+        return Err(Error::NoResults(format!("All {noun} failed.")));
     }
     if engine.completed_edges.is_empty() {
-        bail(format!("Cancelled before any {noun} completed. No results to score."));
+        return Err(Error::NoResults(format!("Cancelled before any {noun} completed. No results to score.")));
     }
 
-    // Displayed counts include loaded judgements; the bail above and the
+    // Displayed counts include loaded judgements; the error above and the
     // success ratio below describe this run's requests only.
     let shown_judgements = total_judgements + loaded_judgements.unwrap_or(0);
     if resolved.verbose {
@@ -1227,20 +1233,52 @@ fn finish_run(
             scoring_result.panel_positional_bias_ci,
         ),
     }
+    Ok(())
 }
 
-pub async fn run(args: RankArgs) {
-    let (config_path, cfg) = config::load_config(args.config.as_deref());
-    let resolved = resolve_config(&args.cfg, &cfg);
-    let judgements_per_item = resolve_judgements_per_item(&args.cfg, &cfg);
+/// Validated, probed, and seeded run state ready to execute its refit loop.
+/// Built by [`prepare`], so callers (like the CLI) can install cancellation
+/// handlers only once setup, item loading, and endpoint probing have finished.
+pub struct PreparedRun {
+    resolved: ResolvedConfig,
+    setup: RunSetup,
+}
 
-    // Lineup judgements (3+ items) run their own refit loop; setup and
-    // teardown are shared with the pairwise loop below.
-    if resolved.lineup_size >= 3 {
-        run_lineup_judgements(&args, &config_path, &cfg, &resolved, judgements_per_item).await;
-        return;
+/// Validate config, load items, probe judges, open save files, and seed any
+/// prior judgements. No ranking LLM requests are sent until [`PreparedRun::run`].
+pub async fn prepare(args: RankArgs) -> crate::Result<PreparedRun> {
+    let (config_path, cfg) = config::load_config(args.config.as_deref())?;
+    let resolved = resolve_config(&args.cfg, &cfg)?;
+    let judgements_per_item = resolve_judgements_per_item(&args.cfg, &cfg)?;
+    let noun = if resolved.lineup_size >= 3 {
+        "lineup judgements"
+    } else {
+        "judgements"
+    };
+    let setup = setup_run(&args, &config_path, &cfg, &resolved, judgements_per_item, noun).await?;
+    Ok(PreparedRun { resolved, setup })
+}
+
+pub async fn run(args: RankArgs, cancelled: Arc<AtomicBool>) -> crate::Result<()> {
+    prepare(args).await?.run(cancelled).await
+}
+
+impl PreparedRun {
+    pub async fn run(self, cancelled: Arc<AtomicBool>) -> crate::Result<()> {
+        let PreparedRun { resolved, setup } = self;
+        if resolved.lineup_size >= 3 {
+            run_lineup_judgements(resolved, setup, cancelled).await
+        } else {
+            run_pairwise_judgements(resolved, setup, cancelled).await
+        }
     }
+}
 
+async fn run_pairwise_judgements(
+    resolved: ResolvedConfig,
+    setup: RunSetup,
+    cancelled: Arc<AtomicBool>,
+) -> crate::Result<()> {
     let RunSetup {
         judges,
         logprobs_mode,
@@ -1270,8 +1308,7 @@ pub async fn run(args: RankArgs) {
         judge_models,
         judge_endpoints,
         judge_reasoning_efforts,
-        cancelled,
-    } = setup_run(&args, &config_path, &cfg, &resolved, judgements_per_item, "judgements").await;
+    } = setup;
 
     let save_prompt_text = resolved.save_prompt_text;
     let save_response_text = resolved.save_response_text;
@@ -1340,6 +1377,7 @@ pub async fn run(args: RankArgs) {
         );
 
         let mut handles = Vec::with_capacity(pairs.len());
+        let fatal = Arc::new(FatalSlot::new());
 
         let precomputed_temperatures: Vec<f64> = pairs.iter().enumerate().map(|(pair_idx, _)| {
             let judge_idx = pair_assignments[pair_idx];
@@ -1389,6 +1427,7 @@ pub async fn run(args: RankArgs) {
             });
 
             let verbose = resolved.verbose;
+            let fatal_task = fatal.clone();
             let handle = tokio::spawn(async move {
                 let has_verdict = |r: &PairJudgementResult| r.parse_result.category_probs.is_some();
                 let result = judge_or_reuse(cell, has_verdict, move || async move {
@@ -1408,6 +1447,9 @@ pub async fn run(args: RankArgs) {
                     Ok(Judged { result, temperature })
                 })
                 .await;
+                if let Err(JudgementError::Fatal(ref msg)) = result {
+                    fatal_task.set(msg.clone());
+                }
                 (result, assigned_judge_id, judge_idx, std::time::Instant::now())
             });
 
@@ -1418,7 +1460,13 @@ pub async fn run(args: RankArgs) {
         let mut judge_last_finish: Vec<Option<std::time::Instant>> = vec![None; judges.len()];
         let mut judge_aborted: Vec<usize> = vec![0; judges.len()];
 
-        for (pair_result_idx, (handle, handle_judge_idx, slot)) in handles.into_iter().enumerate() {
+        let mut handles_iter = handles.into_iter().enumerate();
+        while let Some((pair_result_idx, (handle, handle_judge_idx, slot))) = handles_iter.next() {
+            if let Some(msg) = fatal.get() {
+                handle.abort();
+                abort_remaining(handles_iter.map(|(_, item)| item));
+                return Err(Error::Endpoint(msg));
+            }
             // Once cancelled, every uncollected request is aborted, including
             // ones that have already finished. Harvesting finished results
             // would keep only the fast responses from the tail of the batch,
@@ -1434,6 +1482,11 @@ pub async fn run(args: RankArgs) {
             let abort_handle = handle.abort_handle();
             let result = tokio::select! {
                 r = handle => r,
+                msg = fatal.wait() => {
+                    abort_handle.abort();
+                    abort_remaining(handles_iter.map(|(_, item)| item));
+                    return Err(Error::Endpoint(msg));
+                }
                 _ = async { while !cancelled_ref.load(Ordering::Relaxed) { tokio::time::sleep(std::time::Duration::from_millis(50)).await; } } => {
                     abort_handle.abort();
                     judge_aborted[handle_judge_idx] += 1;
@@ -1501,7 +1554,10 @@ pub async fn run(args: RankArgs) {
                             if save_reasoning_text {
                                 line["reasoning"] = serde_json::json!(result.reasoning_text);
                             }
-                            writer.append(&line);
+                            if let Err(e) = writer.append(&line) {
+                                abort_remaining(handles_iter.map(|(_, item)| item));
+                                return Err(e);
+                            }
                         }
 
                         // The raw distribution is what went to the JSONL above;
@@ -1540,7 +1596,10 @@ pub async fn run(args: RankArgs) {
                             if let Some(ref usage) = result.usage {
                                 line["usage"] = usage.to_json();
                             }
-                            writer.append(&line);
+                            if let Err(e) = writer.append(&line) {
+                                abort_remaining(handles_iter.map(|(_, item)| item));
+                                return Err(e);
+                            }
                         }
                         if resolved.verbose {
                             if judges.len() > 1 {
@@ -1560,7 +1619,11 @@ pub async fn run(args: RankArgs) {
                         }
                     }
                 }
-                Ok((Err(e), _judge_id, judge_idx, finished_at)) => {
+                Ok((Err(JudgementError::Fatal(msg)), ..)) => {
+                    abort_remaining(handles_iter.map(|(_, item)| item));
+                    return Err(Error::Endpoint(msg));
+                }
+                Ok((Err(JudgementError::Failed(e)), _judge_id, judge_idx, finished_at)) => {
                     let entry = &mut judge_last_finish[judge_idx];
                     if entry.is_none() || finished_at > entry.unwrap() {
                         *entry = Some(finished_at);
@@ -1646,7 +1709,7 @@ pub async fn run(args: RankArgs) {
         &resolved, "judgements", &judges, &judge_info, &item_ids, &titles, &text_hashes, &engine,
         RunTotals { total_judgements, loaded_judgements, judgements_done, reused_judgements, total_retries, failed_http, failed_parse, judge_stats },
         early_stop, cancelled.load(Ordering::Relaxed), &interim_rankings,
-    );
+    )
 }
 
 /// Lineup acquisition loop. Selects lineups, asks each judge to rank
@@ -1656,12 +1719,11 @@ pub async fn run(args: RankArgs) {
 /// directly comparable to pairwise; each call contributes up to k(k-1)/2 edges
 /// to the fit, for a lineup of k items.
 async fn run_lineup_judgements(
-    args: &RankArgs,
-    config_path: &Path,
-    cfg: &config::NanojudgeConfig,
-    resolved: &ResolvedConfig,
-    judgements_per_item: usize,
-) {
+    resolved: ResolvedConfig,
+    setup: RunSetup,
+    cancelled: Arc<AtomicBool>,
+) -> crate::Result<()> {
+    let resolved = &resolved;
     let RunSetup {
         judges,
         logprobs_mode,
@@ -1691,8 +1753,7 @@ async fn run_lineup_judgements(
         judge_models,
         judge_endpoints,
         judge_reasoning_efforts,
-        cancelled,
-    } = setup_run(args, config_path, cfg, resolved, judgements_per_item, "lineup judgements").await;
+    } = setup;
 
     let lineup_size = resolved.lineup_size;
     let save_prompt_text = resolved.save_prompt_text;
@@ -1765,6 +1826,7 @@ async fn run_lineup_judgements(
         }).collect();
 
         let mut handles = Vec::with_capacity(lineups.len());
+        let fatal = Arc::new(FatalSlot::new());
         for (lineup_idx, lineup) in lineups.iter().enumerate() {
             // Shuffle the lineup into random slot order so no item has a fixed
             // presentation position (every permutation equally likely).
@@ -1807,6 +1869,7 @@ async fn run_lineup_judgements(
                 reuse_cache.entry((judge_idx, slot.prompt_hash)).or_default().clone()
             });
 
+            let fatal_task = fatal.clone();
             let handle = tokio::spawn(async move {
                 let has_verdict = |r: &LineupJudgementResult| r.verdict.is_some();
                 let result = judge_or_reuse(cell, has_verdict, move || async move {
@@ -1818,6 +1881,9 @@ async fn run_lineup_judgements(
                     Ok(Judged { result, temperature })
                 })
                 .await;
+                if let Err(JudgementError::Fatal(ref msg)) = result {
+                    fatal_task.set(msg.clone());
+                }
                 (result, assigned_judge_id, judge_idx, std::time::Instant::now())
             });
             handles.push((handle, judge_idx, slot));
@@ -1828,7 +1894,13 @@ async fn run_lineup_judgements(
         let mut judge_last_finish: Vec<Option<std::time::Instant>> = vec![None; judges.len()];
         let mut judge_aborted: Vec<usize> = vec![0; judges.len()];
 
-        for (lineup_result_idx, (handle, handle_judge_idx, slot)) in handles.into_iter().enumerate() {
+        let mut handles_iter = handles.into_iter().enumerate();
+        while let Some((lineup_result_idx, (handle, handle_judge_idx, slot))) = handles_iter.next() {
+            if let Some(msg) = fatal.get() {
+                handle.abort();
+                abort_remaining(handles_iter.map(|(_, item)| item));
+                return Err(Error::Endpoint(msg));
+            }
             // Once cancelled, every uncollected request is aborted, including
             // ones that have already finished. Harvesting finished results
             // would keep only the fast responses from the tail of the batch,
@@ -1844,6 +1916,11 @@ async fn run_lineup_judgements(
             let abort_handle = handle.abort_handle();
             let result = tokio::select! {
                 r = handle => r,
+                msg = fatal.wait() => {
+                    abort_handle.abort();
+                    abort_remaining(handles_iter.map(|(_, item)| item));
+                    return Err(Error::Endpoint(msg));
+                }
                 _ = async { while !cancelled_ref.load(Ordering::Relaxed) { tokio::time::sleep(std::time::Duration::from_millis(50)).await; } } => {
                     abort_handle.abort();
                     judge_aborted[handle_judge_idx] += 1;
@@ -1917,7 +1994,10 @@ async fn run_lineup_judgements(
                             if save_reasoning_text {
                                 line["reasoning"] = serde_json::json!(tw.reasoning_text);
                             }
-                            writer.append(&line);
+                            if let Err(e) = writer.append(&line) {
+                                abort_remaining(handles_iter.map(|(_, item)| item));
+                                return Err(e);
+                            }
                         }
 
                         // Decomposed edges for engine and scoring.
@@ -1962,7 +2042,10 @@ async fn run_lineup_judgements(
                             if let Some(ref usage) = tw.usage {
                                 line["usage"] = usage.to_json();
                             }
-                            writer.append(&line);
+                            if let Err(e) = writer.append(&line) {
+                                abort_remaining(handles_iter.map(|(_, item)| item));
+                                return Err(e);
+                            }
                         }
                         if resolved.verbose {
                             let lineup_titles: Vec<&str> = slot.item_ids
@@ -1984,7 +2067,11 @@ async fn run_lineup_judgements(
                         }
                     }
                 }
-                Ok((Err(e), _judge_id, judge_idx, finished_at)) => {
+                Ok((Err(JudgementError::Fatal(msg)), ..)) => {
+                    abort_remaining(handles_iter.map(|(_, item)| item));
+                    return Err(Error::Endpoint(msg));
+                }
+                Ok((Err(JudgementError::Failed(e)), _judge_id, judge_idx, finished_at)) => {
                     let entry = &mut judge_last_finish[judge_idx];
                     if entry.is_none() || finished_at > entry.unwrap() {
                         *entry = Some(finished_at);
@@ -2066,7 +2153,7 @@ async fn run_lineup_judgements(
         resolved, "lineup judgements", &judges, &judge_info, &item_ids, &titles, &text_hashes, &engine,
         RunTotals { total_judgements, loaded_judgements, judgements_done, reused_judgements, total_retries, failed_http, failed_parse, judge_stats },
         early_stop, cancelled.load(Ordering::Relaxed), &interim_rankings,
-    );
+    )
 }
 
 #[cfg(test)]
@@ -2077,7 +2164,7 @@ mod tests {
     fn test_resolve_save_path_bare_filename() {
         // Path::parent() of "x.jsonl" is Some(""), not None. The empty
         // parent must resolve to "." rather than failing the exists check.
-        let resolved = resolve_save_path(Path::new("x.jsonl"), "judgements");
+        let resolved = resolve_save_path(Path::new("x.jsonl"), "judgements").unwrap();
         assert_eq!(resolved, PathBuf::from("x.jsonl"));
     }
 
@@ -2085,14 +2172,14 @@ mod tests {
     fn test_resolve_save_path_explicit_file_in_existing_dir() {
         let dir = std::env::temp_dir();
         let file = dir.join("nanojudge-resolve-save-path-test.jsonl");
-        let resolved = resolve_save_path(&file, "judgements");
+        let resolved = resolve_save_path(&file, "judgements").unwrap();
         assert_eq!(resolved, file);
     }
 
     #[test]
     fn test_resolve_save_path_directory_gets_timestamped_name() {
         let dir = std::env::temp_dir();
-        let resolved = resolve_save_path(&dir, "judgements");
+        let resolved = resolve_save_path(&dir, "judgements").unwrap();
         assert_eq!(resolved.parent(), Some(dir.as_path()));
         let name = resolved.file_name().unwrap().to_str().unwrap();
         assert!(name.starts_with("judgements-") && name.ends_with(".jsonl"), "{name}");
@@ -2281,7 +2368,7 @@ mod tests {
         let mut temps = HashMap::new();
         temps.insert("m@http://e".to_string(), 1.0);
 
-        let (loaded, _) = seed_prior_edges(&mut engine, f.path(), &text_hashes, 2, &[judge_id], true, &temps, false);
+        let (loaded, _) = seed_prior_edges(&mut engine, f.path(), &text_hashes, 2, &[judge_id], true, &temps, false).unwrap();
 
         // Both records load; each pairwise record is one edge.
         assert_eq!(loaded, 2);
@@ -2306,7 +2393,7 @@ mod tests {
         let mut temps = HashMap::new();
         temps.insert("m@http://e".to_string(), 1.0);
 
-        let (loaded, _) = seed_prior_edges(&mut engine, f.path(), &text_hashes, 2, &[judge_id], true, &temps, false);
+        let (loaded, _) = seed_prior_edges(&mut engine, f.path(), &text_hashes, 2, &[judge_id], true, &temps, false).unwrap();
 
         // Only A>B survives; it remaps to (0, 1).
         assert_eq!(loaded, 1);
@@ -2336,7 +2423,7 @@ mod tests {
         let mut temps = HashMap::new();
         temps.insert("m@http://e".to_string(), 1.0);
 
-        let (loaded, _) = seed_prior_edges(&mut engine, f.path(), &text_hashes, 3, &[judge_id], true, &temps, false);
+        let (loaded, _) = seed_prior_edges(&mut engine, f.path(), &text_hashes, 3, &[judge_id], true, &temps, false).unwrap();
 
         assert_eq!(loaded, 2);
         assert_eq!(engine.completed_edges.len(), 4);
@@ -2345,15 +2432,15 @@ mod tests {
     use std::sync::atomic::AtomicUsize;
 
     /// A stand-in judgement: `Some` is a verdict, `None` an unparseable reply.
-    fn reply(verdict: Option<u8>) -> Result<Judged<Option<u8>>, String> {
+    fn reply(verdict: Option<u8>) -> Result<Judged<Option<u8>>, JudgementError> {
         Ok(Judged { result: verdict, temperature: 0.5 })
     }
 
     async fn judge_counted(
         cell: Option<ReuseCell<Option<u8>>>,
         sends: &AtomicUsize,
-        outcome: Result<Judged<Option<u8>>, String>,
-    ) -> Result<(Option<u8>, bool), String> {
+        outcome: Result<Judged<Option<u8>>, JudgementError>,
+    ) -> Result<(Option<u8>, bool), JudgementError> {
         judge_or_reuse(cell, Option::is_some, || async {
             sends.fetch_add(1, Ordering::SeqCst);
             tokio::task::yield_now().await;
@@ -2385,7 +2472,10 @@ mod tests {
     async fn test_judge_or_reuse_resends_after_failure_or_no_verdict() {
         let sends = AtomicUsize::new(0);
         let cell = Arc::new(OnceCell::new());
-        assert_eq!(judge_counted(Some(cell.clone()), &sends, Err("down".into())).await, Err("down".into()));
+        assert_eq!(
+            judge_counted(Some(cell.clone()), &sends, Err(JudgementError::Failed("down".into()))).await,
+            Err(JudgementError::Failed("down".into()))
+        );
         assert_eq!(judge_counted(Some(cell.clone()), &sends, reply(None)).await, Ok((None, false)));
         assert_eq!(judge_counted(Some(cell.clone()), &sends, reply(Some(3))).await, Ok((Some(3), false)));
         assert_eq!(judge_counted(Some(cell.clone()), &sends, reply(Some(4))).await, Ok((Some(3), true)));
@@ -2410,10 +2500,10 @@ mod tests {
         let sends = AtomicUsize::new(0);
         let cell = Arc::new(OnceCell::new());
         let (first, second) = tokio::join!(
-            judge_counted(Some(cell.clone()), &sends, Err("down".into())),
+            judge_counted(Some(cell.clone()), &sends, Err(JudgementError::Failed("down".into()))),
             judge_counted(Some(cell.clone()), &sends, reply(Some(2))),
         );
-        assert_eq!(first, Err("down".into()));
+        assert_eq!(first, Err(JudgementError::Failed("down".into())));
         assert_eq!(second, Ok((Some(2), false)));
         assert_eq!(sends.load(Ordering::SeqCst), 2);
     }
@@ -2459,6 +2549,7 @@ mod tests {
 
     fn reused_keys(records: Vec<serde_json::Value>, judge: ResolvedJudge, lineup_size: usize) -> Vec<(usize, u64)> {
         loaded_reuse_entries(records, &[judge], false, lineup_size, Path::new("f.jsonl"))
+            .unwrap()
             .iter()
             .map(|l| l.key)
             .collect()
@@ -2482,7 +2573,7 @@ mod tests {
 
     #[test]
     fn test_loaded_reuse_keeps_matching_judgement() {
-        let entries = loaded_reuse_entries(vec![reuse_record(0.0, false)], &[reuse_judge(0.0, false)], false, 2, Path::new("f.jsonl"));
+        let entries = loaded_reuse_entries(vec![reuse_record(0.0, false)], &[reuse_judge(0.0, false)], false, 2, Path::new("f.jsonl")).unwrap();
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].key, (0, 0xff));
         assert_eq!(entries[0].temperature, 0.0);
@@ -2599,8 +2690,8 @@ mod tests {
     fn test_jsonl_writer_truncates_and_keeps_appending_on_real_file() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("judgements.jsonl");
-        let mut writer = JsonlWriter::open(path.clone());
-        writer.append(&serde_json::json!({"a": 1}));
+        let mut writer = JsonlWriter::open(path.clone()).unwrap();
+        writer.append(&serde_json::json!({"a": 1})).unwrap();
 
         // Simulate a partial line, then cut it back as a failed append would.
         let len_before = writer.file.current_len().unwrap();
@@ -2608,7 +2699,139 @@ mod tests {
         writer.file.truncate_to(len_before).unwrap();
 
         // Append mode writes at the new end of the file, not the old one.
-        writer.append(&serde_json::json!({"c": 3}));
+        writer.append(&serde_json::json!({"c": 3})).unwrap();
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "{\"a\":1}\n{\"c\":3}\n");
+    }
+
+    #[test]
+    fn test_error_categories_for_rank_helpers() {
+        let err = resolve_save_path(Path::new("/nonexistent-nanojudge-dir/out.jsonl"), "judgements").unwrap_err();
+        assert!(matches!(err, Error::Io(_)), "{err:?}");
+
+        let err = sort_and_dedup_items(
+            vec!["A".into(), "A2".into()],
+            vec!["same".into(), "same".into()],
+        ).unwrap_err();
+        assert!(matches!(err, Error::Input(_)), "{err:?}");
+
+        // seed_prior_edges rejects mismatched logprobs mode as Error::Input.
+        let f = seed_fixture();
+        let mut engine = seed_test_engine(3);
+        let text_hashes = vec![HASH_A.to_string(), HASH_B.to_string(), HASH_C.to_string()];
+        let judge_id = nanojudge_core::judge_hash("http://e", "m");
+        let mut temps = HashMap::new();
+        temps.insert("m@http://e".to_string(), 1.0);
+        let err = seed_prior_edges(&mut engine, f.path(), &text_hashes, 2, &[judge_id], false, &temps, false).unwrap_err();
+        assert!(matches!(err, Error::Input(_)), "{err:?}");
+        assert!(err.to_string().contains("logprobs mode"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn test_fatal_endpoint_error_aborts_run_and_sibling_requests() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+
+        // Fake endpoint: first connection stalls for 10s; second immediately
+        // replies 200 OK without `logprobs` while logprobs mode is on.
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = tokio::spawn(async move {
+            let mut req_num = 0usize;
+            while let Ok((mut stream, _)) = listener.accept().await {
+                req_num += 1;
+                let n = req_num;
+                tokio::spawn(async move {
+                    let mut buf = [0u8; 4096];
+                    let _ = stream.read(&mut buf).await;
+                    if n == 1 {
+                        tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+                    }
+                    let body = r#"{"choices":[{"message":{"content":"Verdict: Option 1"},"finish_reason":"stop"}]}"#;
+                    let resp = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                        body.len(),
+                        body
+                    );
+                    let _ = stream.write_all(resp.as_bytes()).await;
+                });
+            }
+        });
+
+        let mut cfg_file = tempfile::NamedTempFile::new().unwrap();
+        writeln!(
+            cfg_file,
+            "logprobs = true\n\
+             deliberation_enabled = false\n\
+             judgements_per_item = 2\n\
+             judgements_per_refit = 2\n\
+             \n\
+             [[judge]]\n\
+             endpoint = \"http://127.0.0.1:{port}\"\n\
+             model = \"broken-judge\"\n\
+             temperature = 0.0\n\
+             reasoning_effort = \"none\"\n\
+             concurrency = 2\n"
+        ).unwrap();
+
+        let args = <crate::args::Cli as clap::Parser>::parse_from([
+            "nanojudge",
+            "rank",
+            "--config", cfg_file.path().to_str().unwrap(),
+            "--criterion", "Which is better?",
+            "--item", "alpha",
+            "--item", "beta",
+            "--item", "gamma",
+            "--skip-probe",
+        ]);
+        let crate::args::Commands::Rank(rank_args) = args.command else {
+            unreachable!();
+        };
+
+        let start = std::time::Instant::now();
+        let err = run(rank_args, Arc::new(AtomicBool::new(false))).await.unwrap_err();
+        let elapsed = start.elapsed();
+        server.abort();
+
+        assert!(matches!(err, Error::Endpoint(_)), "expected Error::Endpoint, got {err:?}");
+        assert!(err.to_string().contains("returned no logprobs"), "{err}");
+        assert!(
+            elapsed < std::time::Duration::from_secs(2),
+            "expected immediate abort of sibling 10s request, took {elapsed:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_cancelled_before_any_judgement_returns_no_results() {
+        let mut cfg_file = tempfile::NamedTempFile::new().unwrap();
+        writeln!(
+            cfg_file,
+            "logprobs = false\n\
+             deliberation_enabled = false\n\
+             judgements_per_item = 2\n\
+             \n\
+             [[judge]]\n\
+             endpoint = \"http://127.0.0.1:9\"\n\
+             model = \"unused-judge\"\n\
+             temperature = 0.0\n\
+             reasoning_effort = \"none\"\n"
+        ).unwrap();
+
+        let args = <crate::args::Cli as clap::Parser>::parse_from([
+            "nanojudge",
+            "rank",
+            "--config", cfg_file.path().to_str().unwrap(),
+            "--criterion", "Which is better?",
+            "--item", "alpha",
+            "--item", "beta",
+            "--skip-probe",
+        ]);
+        let crate::args::Commands::Rank(rank_args) = args.command else {
+            unreachable!();
+        };
+
+        let cancelled = Arc::new(AtomicBool::new(true));
+        let err = run(rank_args, cancelled).await.unwrap_err();
+        assert!(matches!(err, Error::NoResults(_)), "expected Error::NoResults, got {err:?}");
+        assert!(err.to_string().contains("No results to score"), "{err}");
     }
 }

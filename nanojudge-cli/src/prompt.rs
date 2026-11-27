@@ -10,7 +10,7 @@
 //! a "Verdict: Option <n>" line (pairwise) or one "<Nth> place is Option
 //! <letter>" line per item (lineup).
 
-use crate::bail;
+use crate::Error;
 use nanojudge_core::constants::{MAX_LINEUP_SIZE, MIN_LINEUP_SIZE};
 
 pub const DEFAULT_TEMPLATE: &str = "\
@@ -218,28 +218,28 @@ it uses {}. Use a template with exactly {} option variable(s), or change lineup-
 }
 
 /// Load a prompt template from a file path, validate it, and return the contents.
-pub fn load_template(path: &std::path::Path) -> String {
+pub fn load_template(path: &std::path::Path) -> crate::Result<String> {
     let content = std::fs::read_to_string(path)
-        .unwrap_or_else(|e| bail(format!("Failed to read prompt template {}: {e}", path.display())));
+        .map_err(|e| Error::Io(format!("Failed to read prompt template {}: {e}", path.display())))?;
 
     if let Err(msg) = validate_template(&content) {
-        bail(format!("{} (in {})", msg, path.display()));
+        return Err(Error::Input(format!("{} (in {})", msg, path.display())));
     }
 
-    content
+    Ok(content)
 }
 
 /// Load a lineup prompt template from a file path, validate it against the
 /// lineup size, and return it.
-pub fn load_lineup_template(path: &std::path::Path, lineup_size: usize) -> String {
+pub fn load_lineup_template(path: &std::path::Path, lineup_size: usize) -> crate::Result<String> {
     let content = std::fs::read_to_string(path)
-        .unwrap_or_else(|e| bail(format!("Failed to read prompt template {}: {e}", path.display())));
+        .map_err(|e| Error::Io(format!("Failed to read prompt template {}: {e}", path.display())))?;
 
     if let Err(msg) = validate_lineup_template(&content, lineup_size) {
-        bail(format!("{} (in {})", msg, path.display()));
+        return Err(Error::Input(format!("{} (in {})", msg, path.display())));
     }
 
-    content
+    Ok(content)
 }
 
 /// Build a judgement prompt by substituting variables into a template.

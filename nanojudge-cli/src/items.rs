@@ -2,7 +2,7 @@ use std::io::{self, BufRead, IsTerminal};
 use std::path::Path;
 
 use crate::args::RankArgs;
-use crate::bail;
+use crate::Error;
 
 const TITLE_MAX_LEN: usize = 20;
 
@@ -24,12 +24,12 @@ fn title_from_text(text: &str) -> String {
 }
 
 /// Parse a string as either a JSON array of strings or plain text (one item per line).
-fn parse_items_from_str(content: &str) -> Result<Vec<String>, String> {
+fn parse_items_from_str(content: &str) -> crate::Result<Vec<String>> {
     let trimmed = content.trim();
     if trimmed.starts_with('[') {
         // Try JSON array
         let items: Vec<String> = serde_json::from_str(trimmed)
-            .map_err(|e| format!("File looks like JSON but failed to parse: {e}"))?;
+            .map_err(|e| Error::Input(format!("File looks like JSON but failed to parse: {e}")))?;
         Ok(items.into_iter().filter(|s| !s.trim().is_empty()).collect())
     } else {
         // Plain text, one item per line
@@ -43,29 +43,28 @@ fn parse_items_from_str(content: &str) -> Result<Vec<String>, String> {
 
 /// Load items from all sources: --items file/dir, --item inline args, or stdin.
 /// Returns (titles, texts) where titles are for display and texts are sent to the LLM.
-pub fn load_items(args: &RankArgs) -> (Vec<String>, Vec<String>) {
+pub fn load_items(args: &RankArgs) -> crate::Result<(Vec<String>, Vec<String>)> {
     load_items_from(args.items.as_deref(), &args.inline_items, || {
         let stdin = io::stdin();
         if stdin.is_terminal() {
-            return Err(
+            return Err(Error::Input(
                 "No items provided. Use --items <file|dir>, --item <name>, or pipe items via stdin.".into(),
-            );
+            ));
         }
         stdin
             .lock()
             .lines()
             .collect::<Result<Vec<_>, _>>()
             .map(|lines| lines.join("\n"))
-            .map_err(|e| format!("Failed to read from stdin: {e}"))
+            .map_err(|e| Error::Io(format!("Failed to read from stdin: {e}")))
     })
-    .unwrap_or_else(|msg| bail(msg))
 }
 
 fn load_items_from(
     items_path: Option<&Path>,
     inline_items: &[String],
-    read_stdin: impl FnOnce() -> Result<String, String>,
-) -> Result<(Vec<String>, Vec<String>), String> {
+    read_stdin: impl FnOnce() -> crate::Result<String>,
+) -> crate::Result<(Vec<String>, Vec<String>)> {
     let mut titles = Vec::new();
     let mut texts = Vec::new();
 
@@ -73,7 +72,7 @@ fn load_items_from(
         if path.is_dir() {
             // Directory mode: each file is an item
             let entries = std::fs::read_dir(path)
-                .map_err(|e| format!("Failed to read directory {}: {e}", path.display()))?;
+                .map_err(|e| Error::Io(format!("Failed to read directory {}: {e}", path.display())))?;
 
             let mut files: Vec<_> = entries
                 .filter_map(|e| e.ok())
@@ -99,7 +98,7 @@ fn load_items_from(
                 }
 
                 let content = std::fs::read_to_string(&file_path)
-                    .map_err(|e| format!("Failed to read {}: {e}", file_path.display()))?;
+                    .map_err(|e| Error::Io(format!("Failed to read {}: {e}", file_path.display())))?;
                 let content = content.trim().to_string();
 
                 if content.is_empty() {
@@ -121,7 +120,7 @@ fn load_items_from(
         } else {
             // File mode: one item per line or JSON array
             let content = std::fs::read_to_string(path)
-                .map_err(|e| format!("Failed to read items file {}: {e}", path.display()))?;
+                .map_err(|e| Error::Io(format!("Failed to read items file {}: {e}", path.display())))?;
             texts = parse_items_from_str(&content)?;
             titles = texts.iter().map(|t| title_from_text(t)).collect();
         }
@@ -131,7 +130,7 @@ fn load_items_from(
     for item in inline_items {
         let trimmed = item.trim();
         if trimmed.is_empty() {
-            return Err("Inline --item cannot be empty".into());
+            return Err(Error::Input("Inline --item cannot be empty".into()));
         }
         titles.push(title_from_text(trimmed));
         texts.push(trimmed.to_string());
@@ -147,18 +146,18 @@ fn load_items_from(
     let mut seen: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
     for (i, text) in texts.iter().enumerate() {
         if let Some(&first) = seen.get(text.as_str()) {
-            return Err(format!(
+            return Err(Error::Input(format!(
                 "Duplicate item text: \"{}\" appears at positions {} and {} (1-indexed)",
                 title_from_text(text),
                 first + 1,
                 i + 1,
-            ));
+            )));
         }
         seen.insert(text, i);
     }
 
     if texts.len() < 2 {
-        return Err(format!("Need at least 2 items to rank, got {}", texts.len()));
+        return Err(Error::Input(format!("Need at least 2 items to rank, got {}", texts.len())));
     }
     Ok((titles, texts))
 }
@@ -168,7 +167,7 @@ mod tests {
     use super::*;
     use std::io::Write;
 
-    fn unused_stdin() -> Result<String, String> {
+    fn unused_stdin() -> crate::Result<String> {
         panic!("stdin should not be read when --items or --item is provided");
     }
 
@@ -176,7 +175,8 @@ mod tests {
     fn empty_items_file_does_not_fall_through_to_stdin() {
         let tmp = tempfile::NamedTempFile::new().unwrap();
         let err = load_items_from(Some(tmp.path()), &[], unused_stdin).unwrap_err();
-        assert!(err.contains("Need at least 2 items to rank, got 0"), "{err}");
+        assert!(matches!(err, Error::Input(_)), "{err:?}");
+        assert!(err.to_string().contains("Need at least 2 items to rank, got 0"), "{err}");
     }
 
     #[test]
@@ -200,7 +200,8 @@ mod tests {
 
         for blank in ["", "   ", "\t\n"] {
             let err = load_items_from(None, &["alpha".into(), blank.into()], unused_stdin).unwrap_err();
-            assert!(err.contains("cannot be empty"), "blank {blank:?}: {err}");
+            assert!(matches!(err, Error::Input(_)), "blank {blank:?}: {err:?}");
+            assert!(err.to_string().contains("cannot be empty"), "blank {blank:?}: {err}");
         }
     }
 

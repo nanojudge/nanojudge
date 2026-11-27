@@ -3,9 +3,13 @@
 //! Runs N pairs of judgements, each in both directions (A vs B and B vs A),
 //! collecting timing, token usage, verdict distribution, and flip rate statistics.
 
-use crate::bail;
-use crate::llm::{LlmConfig, send_pair_judgement_request};
+use crate::args::BenchmarkArgs;
+use crate::config;
+use crate::Error;
+use crate::llm::{FatalSlot, LlmConfig, LlmError, send_pair_judgement_request};
+use crate::probe;
 use crate::prompt::build_prompt;
+use crate::resolve::{resolve_config, resolve_judges};
 use nanojudge_core::seed;
 use rand::Rng;
 use rand::seq::SliceRandom;
@@ -38,6 +42,64 @@ struct SingleResult {
     response_text: String,
 }
 
+/// Entrypoint for the `benchmark` command.
+pub async fn run(args: BenchmarkArgs) -> crate::Result<()> {
+    let (config_path, cfg) = config::load_config(args.config.as_deref())?;
+    let resolved = resolve_config(&args.cfg, &cfg)?;
+    if resolved.lineup_size != 2 {
+        return Err(Error::Config(format!(
+            "benchmark only runs pairwise comparisons (got lineup_size = {}). Pass --lineup-size 2 to override.",
+            resolved.lineup_size
+        )));
+    }
+    let judges = resolve_judges(&args.cfg, &cfg, &config_path, resolved.deliberation_enabled, resolved.lineup_size)?;
+
+    if args.num_pairs == 0 {
+        return Err(Error::Config("--num-pairs must be at least 1".into()));
+    }
+
+    if !args.skip_probe {
+        probe::check_judges(&judges).await?;
+    }
+
+    let template = &resolved.prompt_template;
+
+    for judge in &judges {
+        let llm_config = LlmConfig {
+            endpoint: judge.endpoint.clone(),
+            model: judge.model.clone(),
+            api_key: judge.api_key.clone(),
+            temperature: judge.temperature,
+            temperature_jitter: judge.temperature_jitter,
+            presence_penalty: judge.presence_penalty,
+            top_p: judge.top_p,
+            logprobs: judge.logprobs,
+            max_tokens: judge.max_tokens,
+            reasoning_effort: judge.reasoning_effort.clone(),
+            chat_template_kwargs: judge.chat_template_kwargs.clone(),
+            provider: judge.provider.clone(),
+            request_timeout: judge.request_timeout,
+        };
+
+        run_benchmark(
+            &llm_config,
+            &judge.display_name,
+            args.num_pairs,
+            judge.concurrency,
+            judge.min_logprob_coverage,
+            template,
+            resolved.seed,
+        )
+        .await?;
+
+        if judges.len() > 1 {
+            eprintln!();
+        }
+    }
+
+    Ok(())
+}
+
 /// Run the benchmark for a single judge.
 pub async fn run_benchmark(
     llm_config: &LlmConfig,
@@ -47,9 +109,9 @@ pub async fn run_benchmark(
     min_logprob_coverage: f64,
     template: &str,
     run_seed: Option<u64>,
-) {
+) -> crate::Result<()> {
     let questions: Vec<BenchmarkQuestion> = serde_json::from_str(BENCHMARK_QUESTIONS)
-        .unwrap_or_else(|e| bail(format!("Failed to parse embedded benchmark questions: {e}")));
+        .expect("embedded benchmark_questions.json is valid JSON");
 
     // Sample N questions (with replacement if num_pairs > questions.len())
     let mut rng = seed::make_rng(run_seed, seed::SUBSYSTEM_BENCHMARK);
@@ -113,6 +175,7 @@ pub async fn run_benchmark(
     let wall_clock_start = Instant::now();
 
     // Run all judgements with bounded concurrency
+    let fatal = Arc::new(FatalSlot::new());
     let mut handles = Vec::with_capacity(tasks.len());
     for task in tasks {
         let sem = semaphore.clone();
@@ -121,6 +184,7 @@ pub async fn run_benchmark(
         let prompt = task.prompt;
         let pair_index = task.pair_index;
         let is_forward = task.is_forward;
+        let fatal = fatal.clone();
 
         let handle = tokio::spawn(async move {
             let _permit = sem.acquire().await.unwrap();
@@ -149,25 +213,30 @@ pub async fn run_benchmark(
                         response_text: reply.content.unwrap_or_else(|| "[NO CONTENT: endpoint returned null]".to_string()),
                     }
                 }
+                Err(LlmError::Fatal(msg)) => {
+                    fatal.set(msg.clone());
+                    return Err(msg);
+                }
                 Err(ref e) => {
                     eprintln!("\n  Error: {e}");
                     SingleResult {
-                    latency_secs: latency,
-                    prompt_tokens: 0,
-                    completion_tokens: 0,
-                    response_len_chars: 0,
-                    verdict_option: None,
-                    parseable: false,
-                    http_error: true,
-                    prompt_text: prompt,
-                    response_text: format!("[HTTP ERROR: {e}]"),
-                }}
+                        latency_secs: latency,
+                        prompt_tokens: 0,
+                        completion_tokens: 0,
+                        response_len_chars: 0,
+                        verdict_option: None,
+                        parseable: false,
+                        http_error: true,
+                        prompt_text: prompt,
+                        response_text: format!("[HTTP ERROR: {e}]"),
+                    }
+                }
             };
 
             // Print progress dot
             eprint!(".");
 
-            (pair_index, is_forward, single)
+            Ok((pair_index, is_forward, single))
         });
 
         handles.push(handle);
@@ -177,12 +246,46 @@ pub async fn run_benchmark(
     let mut forward_results: Vec<Option<SingleResult>> = (0..num_pairs).map(|_| None).collect();
     let mut reverse_results: Vec<Option<SingleResult>> = (0..num_pairs).map(|_| None).collect();
 
-    for handle in handles {
-        let (pair_index, is_forward, result) = handle.await.unwrap();
-        if is_forward {
-            forward_results[pair_index] = Some(result);
-        } else {
-            reverse_results[pair_index] = Some(result);
+    let mut handles_iter = handles.into_iter();
+    while let Some(handle) = handles_iter.next() {
+        if let Some(msg) = fatal.get() {
+            handle.abort();
+            for h in handles_iter {
+                h.abort();
+            }
+            return Err(Error::Endpoint(msg));
+        }
+        let abort_handle = handle.abort_handle();
+        let outcome = tokio::select! {
+            r = handle => Ok(r),
+            msg = fatal.wait() => {
+                abort_handle.abort();
+                Err(msg)
+            }
+        };
+        match outcome {
+            Ok(Ok(Ok((pair_index, is_forward, result)))) => {
+                if is_forward {
+                    forward_results[pair_index] = Some(result);
+                } else {
+                    reverse_results[pair_index] = Some(result);
+                }
+            }
+            Ok(Ok(Err(msg))) | Err(msg) => {
+                for h in handles_iter {
+                    h.abort();
+                }
+                return Err(Error::Endpoint(msg));
+            }
+            Ok(Err(join_err)) => {
+                for h in handles_iter {
+                    h.abort();
+                }
+                if join_err.is_panic() {
+                    std::panic::resume_unwind(join_err.into_panic());
+                }
+                panic!("Benchmark task cancelled unexpectedly: {join_err}");
+            }
         }
     }
 
@@ -304,7 +407,7 @@ pub async fn run_benchmark(
     let timestamp = {
         let secs = SystemTime::now()
             .duration_since(SystemTime::UNIX_EPOCH)
-            .unwrap()
+            .map_err(|e| Error::Io(format!("system clock is before 1970: {e}")))?
             .as_secs();
         // Manual UTC formatting (avoids chrono dependency)
         let s = secs % 60;
@@ -335,14 +438,15 @@ pub async fn run_benchmark(
     let verdict_names = ["Option 1", "Option 2"];
 
     let mut file = std::fs::File::create(&log_filename)
-        .unwrap_or_else(|e| bail(format!("Failed to create log file {log_filename}: {e}")));
+        .map_err(|e| Error::Io(format!("Failed to create log file {log_filename}: {e}")))?;
 
-    writeln!(file, "NanoJudge Benchmark Log").unwrap();
-    writeln!(file, "Generated: {} UTC", timestamp.replace('_', " ")).unwrap();
-    writeln!(file, "Judge: {} | Endpoint: {} | Model: {}", display_name, llm_config.endpoint, llm_config.model).unwrap();
-    writeln!(file, "Pairs: {} | Judgements: {} | Wall time: {:.1}s", num_pairs, total_judgements, wall_clock_secs).unwrap();
-    writeln!(file, "Parse rate: {}/{} ({:.1}%)", parseable_count, non_http_count, parseable_count as f64 / non_http_count.max(1) as f64 * 100.0).unwrap();
-    writeln!(file).unwrap();
+    let write_err = |e: std::io::Error| Error::Io(format!("Failed to write log file {log_filename}: {e}"));
+    writeln!(file, "NanoJudge Benchmark Log").map_err(write_err)?;
+    writeln!(file, "Generated: {} UTC", timestamp.replace('_', " ")).map_err(write_err)?;
+    writeln!(file, "Judge: {} | Endpoint: {} | Model: {}", display_name, llm_config.endpoint, llm_config.model).map_err(write_err)?;
+    writeln!(file, "Pairs: {} | Judgements: {} | Wall time: {:.1}s", num_pairs, total_judgements, wall_clock_secs).map_err(write_err)?;
+    writeln!(file, "Parse rate: {}/{} ({:.1}%)", parseable_count, non_http_count, parseable_count as f64 / non_http_count.max(1) as f64 * 100.0).map_err(write_err)?;
+    writeln!(file).map_err(write_err)?;
 
     let mut judgement_num = 0usize;
     for i in 0..num_pairs {
@@ -360,20 +464,21 @@ pub async fn run_benchmark(
                     "FAILED TO PARSE".to_string()
                 };
 
-                writeln!(file, "{}", "=".repeat(80)).unwrap();
-                writeln!(file, "#{} | Pair {} {} | {:.2}s | {}", judgement_num, i + 1, direction, result.latency_secs, status).unwrap();
-                writeln!(file, "{}", "=".repeat(80)).unwrap();
-                writeln!(file).unwrap();
-                writeln!(file, "--- PROMPT ---").unwrap();
-                writeln!(file, "{}", result.prompt_text).unwrap();
-                writeln!(file).unwrap();
-                writeln!(file, "--- RESPONSE ---").unwrap();
-                writeln!(file, "{}", result.response_text).unwrap();
-                writeln!(file).unwrap();
+                writeln!(file, "{}", "=".repeat(80)).map_err(write_err)?;
+                writeln!(file, "#{} | Pair {} {} | {:.2}s | {}", judgement_num, i + 1, direction, result.latency_secs, status).map_err(write_err)?;
+                writeln!(file, "{}", "=".repeat(80)).map_err(write_err)?;
+                writeln!(file).map_err(write_err)?;
+                writeln!(file, "--- PROMPT ---").map_err(write_err)?;
+                writeln!(file, "{}", result.prompt_text).map_err(write_err)?;
+                writeln!(file).map_err(write_err)?;
+                writeln!(file, "--- RESPONSE ---").map_err(write_err)?;
+                writeln!(file, "{}", result.response_text).map_err(write_err)?;
+                writeln!(file).map_err(write_err)?;
             }
         }
     }
 
     println!();
     println!("Detailed log written to: {}", log_filename);
+    Ok(())
 }

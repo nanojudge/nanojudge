@@ -10,15 +10,63 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::time::Duration;
 
-pub(crate) enum LlmError {
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LlmError {
     Retryable(String),
     Permanent(String),
+    Fatal(String),
 }
 
 impl std::fmt::Display for LlmError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            LlmError::Retryable(s) | LlmError::Permanent(s) => f.write_str(s),
+            LlmError::Retryable(s) | LlmError::Permanent(s) | LlmError::Fatal(s) => f.write_str(s),
+        }
+    }
+}
+
+/// Failure returned by `judge_pair` / `judge_lineup` after retries.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum JudgementError {
+    /// Request failed (permanent HTTP error or retries exhausted); the run
+    /// records a failed judgement and continues.
+    Failed(String),
+    /// Endpoint broke a protocol invariant (missing logprobs, inconsistent
+    /// token counts, conflicting reasoning fields); aborts the whole run.
+    Fatal(String),
+}
+
+/// Latch for the first fatal endpoint error in a concurrent batch, waking the
+/// collector immediately so remaining in-flight tasks can be aborted.
+pub(crate) struct FatalSlot {
+    msg: std::sync::OnceLock<String>,
+    notify: tokio::sync::Notify,
+}
+
+impl FatalSlot {
+    pub(crate) fn new() -> Self {
+        Self {
+            msg: std::sync::OnceLock::new(),
+            notify: tokio::sync::Notify::new(),
+        }
+    }
+
+    pub(crate) fn set(&self, msg: String) {
+        if self.msg.set(msg).is_ok() {
+            self.notify.notify_one();
+        }
+    }
+
+    pub(crate) fn get(&self) -> Option<String> {
+        self.msg.get().cloned()
+    }
+
+    pub(crate) async fn wait(&self) -> String {
+        loop {
+            if let Some(msg) = self.msg.get() {
+                return msg.clone();
+            }
+            self.notify.notified().await;
         }
     }
 }
@@ -333,16 +381,20 @@ async fn send_chat_raw(
 
     let message = choice.message;
     let reasoning = pick_reasoning(message.reasoning, message.reasoning_content)
-        .unwrap_or_else(|e| crate::bail(format!("{}: {e}", config.model)));
+        .map_err(|e| LlmError::Fatal(format!("{}: {e}", config.model)))?;
     if let Some(ref usage) = data.usage {
-        check_token_counts(usage).unwrap_or_else(|e| crate::bail(format!("{}: {e}", config.model)));
+        check_token_counts(usage)
+            .map_err(|e| LlmError::Fatal(format!("{}: {e}", config.model)))?;
     }
     let hit_max_tokens = choice.finish_reason.as_deref() == Some("length");
 
     let logprobs = if config.logprobs {
         let lp = choice.logprobs.and_then(|lp| lp.content).unwrap_or_default();
         if lp.is_empty() {
-            crate::bail(format!("{} returned no logprobs. If your endpoint does not support logprobs, disable logprobs in your config.", config.model));
+            return Err(LlmError::Fatal(format!(
+                "{} returned no logprobs. If your endpoint does not support logprobs, disable logprobs in your config.",
+                config.model
+            )));
         }
         lp
     } else {
@@ -409,7 +461,7 @@ pub async fn judge_pair(
     max_retries: usize,
     verbose: bool,
     judge_name: &str,
-) -> Result<PairJudgementResult, String> {
+) -> Result<PairJudgementResult, JudgementError> {
     let mut last_err = String::new();
     for attempt in 0..=max_retries {
         match send_pair_judgement_request(client, config, prompt, min_logprob_coverage).await {
@@ -423,8 +475,11 @@ pub async fn judge_pair(
                     hit_max_tokens: reply.hit_max_tokens,
                 });
             }
+            Err(LlmError::Fatal(e)) => {
+                return Err(JudgementError::Fatal(e));
+            }
             Err(LlmError::Permanent(e)) => {
-                return Err(e);
+                return Err(JudgementError::Failed(e));
             }
             Err(LlmError::Retryable(e)) => {
                 last_err = e;
@@ -444,7 +499,7 @@ pub async fn judge_pair(
         }
     }
 
-    Err(last_err)
+    Err(JudgementError::Failed(last_err))
 }
 
 /// Result of a single lineup judgement call.
@@ -495,7 +550,7 @@ pub async fn judge_lineup(
     max_retries: usize,
     verbose: bool,
     judge_name: &str,
-) -> Result<LineupJudgementResult, String> {
+) -> Result<LineupJudgementResult, JudgementError> {
     let mut last_err = String::new();
     for attempt in 0..=max_retries {
         match send_lineup_judgement_request(client, config, prompt, lineup_size, min_logprob_coverage).await {
@@ -509,8 +564,11 @@ pub async fn judge_lineup(
                     hit_max_tokens: reply.hit_max_tokens,
                 });
             }
+            Err(LlmError::Fatal(e)) => {
+                return Err(JudgementError::Fatal(e));
+            }
             Err(LlmError::Permanent(e)) => {
-                return Err(e);
+                return Err(JudgementError::Failed(e));
             }
             Err(LlmError::Retryable(e)) => {
                 last_err = e;
@@ -527,7 +585,7 @@ pub async fn judge_lineup(
         }
     }
 
-    Err(last_err)
+    Err(JudgementError::Failed(last_err))
 }
 
 #[cfg(test)]
