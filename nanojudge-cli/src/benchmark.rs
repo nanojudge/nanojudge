@@ -9,6 +9,7 @@ use crate::Error;
 use crate::llm::{FatalSlot, LlmConfig, LlmError, send_pair_judgement_request};
 use crate::probe;
 use crate::prompt::build_prompt;
+use crate::report::Reporter;
 use crate::resolve::{resolve_config, resolve_judges};
 use nanojudge_core::seed;
 use rand::Rng;
@@ -159,31 +160,39 @@ pub fn print_report(report: &BenchmarkReport) {
 }
 
 /// Entrypoint for the `benchmark` command.
-pub async fn run(args: BenchmarkArgs) -> crate::Result<Vec<BenchmarkReport>> {
-    run_with(args, |_| {}).await
+pub async fn run(args: BenchmarkArgs, reporter: Arc<dyn Reporter>) -> crate::Result<Vec<BenchmarkReport>> {
+    run_with(args, reporter, |_| {}).await
 }
 
 /// Run the `benchmark` command, invoking `on_report` as each judge finishes.
 pub async fn run_with(
     args: BenchmarkArgs,
+    reporter: Arc<dyn Reporter>,
     mut on_report: impl FnMut(&BenchmarkReport),
 ) -> crate::Result<Vec<BenchmarkReport>> {
     let (config_path, cfg) = config::load_config(args.config.as_deref())?;
-    let resolved = resolve_config(&args.cfg, &cfg)?;
+    let resolved = resolve_config(&args.cfg, &cfg, reporter.as_ref())?;
     if resolved.lineup_size != 2 {
         return Err(Error::Config(format!(
             "benchmark only runs pairwise comparisons (got lineup_size = {}). Pass --lineup-size 2 to override.",
             resolved.lineup_size
         )));
     }
-    let judges = resolve_judges(&args.cfg, &cfg, &config_path, resolved.deliberation_enabled, resolved.lineup_size)?;
+    let judges = resolve_judges(
+        &args.cfg,
+        &cfg,
+        &config_path,
+        resolved.deliberation_enabled,
+        resolved.lineup_size,
+        reporter.as_ref(),
+    )?;
 
     if args.num_pairs == 0 {
         return Err(Error::Config("--num-pairs must be at least 1".into()));
     }
 
     if !args.skip_probe {
-        probe::check_judges(&judges).await?;
+        probe::check_judges(&judges, reporter.as_ref()).await?;
     }
 
     let template = &resolved.prompt_template;
@@ -214,13 +223,14 @@ pub async fn run_with(
             judge.min_logprob_coverage,
             template,
             resolved.seed,
+            reporter.clone(),
         )
         .await?;
         on_report(&report);
         reports.push(report);
 
         if judges.len() > 1 {
-            eprintln!();
+            reporter.line("");
         }
     }
 
@@ -228,6 +238,7 @@ pub async fn run_with(
 }
 
 /// Run the benchmark for a single judge.
+#[allow(clippy::too_many_arguments)]
 pub async fn run_benchmark(
     llm_config: &LlmConfig,
     display_name: &str,
@@ -236,6 +247,7 @@ pub async fn run_benchmark(
     min_logprob_coverage: f64,
     template: &str,
     run_seed: Option<u64>,
+    reporter: Arc<dyn Reporter>,
 ) -> crate::Result<BenchmarkReport> {
     let questions: Vec<BenchmarkQuestion> = serde_json::from_str(BENCHMARK_QUESTIONS)
         .expect("embedded benchmark_questions.json is valid JSON");
@@ -256,11 +268,11 @@ pub async fn run_benchmark(
     };
 
     let total_judgements = num_pairs * 2; // Each pair runs both directions
-    eprintln!(
+    reporter.line(&format!(
         "Running benchmark for {}: {} pairs x 2 directions = {} judgements (concurrency: {})",
         display_name, num_pairs, total_judgements, concurrency
-    );
-    eprintln!("Endpoint: {} | Model: {}", llm_config.endpoint, llm_config.model);
+    ));
+    reporter.line(&format!("Endpoint: {} | Model: {}", llm_config.endpoint, llm_config.model));
 
     let llm_config = Arc::new(LlmConfig {
         endpoint: llm_config.endpoint.clone(),
@@ -312,6 +324,7 @@ pub async fn run_benchmark(
         let pair_index = task.pair_index;
         let is_forward = task.is_forward;
         let fatal = fatal.clone();
+        let reporter = reporter.clone();
 
         let handle = tokio::spawn(async move {
             let _permit = sem.acquire().await.unwrap();
@@ -345,7 +358,7 @@ pub async fn run_benchmark(
                     return Err(msg);
                 }
                 Err(ref e) => {
-                    eprintln!("\n  Error: {e}");
+                    reporter.line(&format!("\n  Error: {e}"));
                     SingleResult {
                         latency_secs: latency,
                         prompt_tokens: 0,
@@ -360,8 +373,8 @@ pub async fn run_benchmark(
                 }
             };
 
-            // Print progress dot
-            eprint!(".");
+            // Emit progress dot
+            reporter.raw(".");
 
             Ok((pair_index, is_forward, single))
         });
@@ -417,7 +430,7 @@ pub async fn run_benchmark(
     }
 
     let wall_clock_secs = wall_clock_start.elapsed().as_secs_f64();
-    eprintln!(" done ({:.1}s)\n", wall_clock_secs);
+    reporter.line(&format!(" done ({:.1}s)\n", wall_clock_secs));
 
     // Flatten all results for aggregate stats
     let all_results: Vec<&SingleResult> = forward_results.iter()

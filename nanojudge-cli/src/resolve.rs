@@ -10,6 +10,7 @@ use crate::config;
 use crate::Error;
 use crate::parse;
 use crate::prompt;
+use crate::report::Reporter;
 use crate::{
     DEFAULT_BIAS_PRIOR, DEFAULT_BIAS_PRIOR_TAU2, DEFAULT_CONFIDENCE_LEVEL, DEFAULT_PRIOR_TAU2,
     DEFAULT_REGULARIZATION_STRENGTH,
@@ -37,16 +38,17 @@ pub(crate) const DEFAULT_VERDICT_TEMPERATURE_DELIBERATION: f64 = 3.0;
 pub(crate) const DEFAULT_VERDICT_TEMPERATURE_NO_DELIBERATION: f64 = 1.0;
 
 /// Merge a CLI value with a config file value. CLI wins.
-/// Warns to stderr if both are set and differ.
+/// Warns via `reporter` if both are set and differ.
 fn merge_opt<T: PartialEq + std::fmt::Display>(
     cli: Option<T>,
     cfg: Option<T>,
     flag: &str,
+    reporter: &dyn Reporter,
 ) -> Option<T> {
     match (cli, cfg) {
         (Some(c), Some(f)) => {
             if c != f {
-                eprintln!("Warning: --{flag} ({c}) overrides config file value ({f})");
+                reporter.line(&format!("Warning: --{flag} ({c}) overrides config file value ({f})"));
             }
             Some(c)
         }
@@ -156,6 +158,7 @@ pub fn resolve_judges(
     config_path: &Path,
     deliberation_enabled: bool,
     lineup_size: usize,
+    reporter: &dyn Reporter,
 ) -> crate::Result<Vec<ResolvedJudge>> {
     let judge_configs = cfg.judge.as_ref().filter(|j| !j.is_empty()).ok_or_else(|| {
         Error::Config(format!(
@@ -177,16 +180,16 @@ pub fn resolve_judges(
         }
     }
 
-    let global_logprobs = merge_opt(shared.logprobs, cfg.logprobs, "logprobs")
+    let global_logprobs = merge_opt(shared.logprobs, cfg.logprobs, "logprobs", reporter)
         .unwrap_or(false);
 
-    let global_concurrency = merge_opt(shared.concurrency, cfg.concurrency, "concurrency")
+    let global_concurrency = merge_opt(shared.concurrency, cfg.concurrency, "concurrency", reporter)
         .unwrap_or(DEFAULT_CONCURRENCY);
     if global_concurrency == 0 {
         return Err(Error::Config("concurrency must be at least 1".into()));
     }
 
-    let global_min_logprob_coverage = merge_opt(shared.min_logprob_coverage, cfg.min_logprob_coverage, "min-logprob-coverage")
+    let global_min_logprob_coverage = merge_opt(shared.min_logprob_coverage, cfg.min_logprob_coverage, "min-logprob-coverage", reporter)
         .unwrap_or(parse::DEFAULT_MIN_LOGPROB_COVERAGE);
     if !global_min_logprob_coverage.is_finite() || global_min_logprob_coverage <= 0.0 || global_min_logprob_coverage > 1.0 {
         return Err(Error::Config(format!(
@@ -194,7 +197,7 @@ pub fn resolve_judges(
         )));
     }
 
-    let global_verdict_temperature = merge_opt(shared.verdict_temperature, cfg.verdict_temperature, "verdict-temperature")
+    let global_verdict_temperature = merge_opt(shared.verdict_temperature, cfg.verdict_temperature, "verdict-temperature", reporter)
         .unwrap_or(if deliberation_enabled {
             DEFAULT_VERDICT_TEMPERATURE_DELIBERATION
         } else {
@@ -392,10 +395,10 @@ pub fn resolve_judges(
         let specified: Vec<String> = judge_configs.iter()
             .filter_map(|jc| jc.max_tokens.map(|_| jc.model.clone()))
             .collect();
-        eprintln!(
+        reporter.line(&format!(
             "max_tokens not set for {}; using {} (average of {})",
             missing.join(", "), default_max_tokens, specified.join(", ")
-        );
+        ));
     }
 
     Ok(judges)
@@ -443,8 +446,12 @@ fn validate_judge_sampling_params(
 
 /// Resolve the ranking budget. Kept out of resolve_config() because only
 /// `rank` uses it; `probe` and `benchmark` shouldn't have to set it.
-pub fn resolve_judgements_per_item(shared: &ConfigArgs, cfg: &config::NanojudgeConfig) -> crate::Result<usize> {
-    let judgements_per_item = merge_opt(shared.judgements_per_item, cfg.judgements_per_item, "judgements-per-item")
+pub fn resolve_judgements_per_item(
+    shared: &ConfigArgs,
+    cfg: &config::NanojudgeConfig,
+    reporter: &dyn Reporter,
+) -> crate::Result<usize> {
+    let judgements_per_item = merge_opt(shared.judgements_per_item, cfg.judgements_per_item, "judgements-per-item", reporter)
         .ok_or_else(|| Error::Config("--judgements-per-item is required (set it on the CLI or in the config file)".into()))?;
     if judgements_per_item == 0 {
         return Err(Error::Config("--judgements-per-item must be at least 1".into()));
@@ -454,8 +461,12 @@ pub fn resolve_judgements_per_item(shared: &ConfigArgs, cfg: &config::NanojudgeC
 
 /// Resolve CLI args + config file + defaults into final config.
 /// Judge-specific settings (endpoint, model, temperature, etc.) are handled by resolve_judges().
-pub fn resolve_config(shared: &ConfigArgs, cfg: &config::NanojudgeConfig) -> crate::Result<ResolvedConfig> {
-    let judgement_distribution_str = merge_opt(shared.judgement_distribution.clone(), cfg.judgement_distribution.clone(), "judgement-distribution")
+pub fn resolve_config(
+    shared: &ConfigArgs,
+    cfg: &config::NanojudgeConfig,
+    reporter: &dyn Reporter,
+) -> crate::Result<ResolvedConfig> {
+    let judgement_distribution_str = merge_opt(shared.judgement_distribution.clone(), cfg.judgement_distribution.clone(), "judgement-distribution", reporter)
         .unwrap_or_else(|| "top-heavy".to_string());
     let judgement_distribution = match judgement_distribution_str.as_str() {
         "uniform" => JudgementDistribution::Uniform,
@@ -463,7 +474,7 @@ pub fn resolve_config(shared: &ConfigArgs, cfg: &config::NanojudgeConfig) -> cra
         other => return Err(Error::Config(format!("Unknown judgement distribution \"{other}\". Use \"uniform\" or \"top-heavy\"."))),
     };
 
-    let lineup_size = merge_opt(shared.lineup_size, cfg.lineup_size, "lineup-size")
+    let lineup_size = merge_opt(shared.lineup_size, cfg.lineup_size, "lineup-size", reporter)
         .unwrap_or(2);
     if !(MIN_LINEUP_SIZE..=MAX_LINEUP_SIZE).contains(&lineup_size) {
         return Err(Error::Config(format!(
@@ -475,34 +486,34 @@ pub fn resolve_config(shared: &ConfigArgs, cfg: &config::NanojudgeConfig) -> cra
     let uses_lineups = lineup_size >= 3;
 
     // Top-heavy selection tuning (only used with the top-heavy distribution).
-    let selection_sharpness = merge_opt(shared.selection_sharpness, cfg.selection_sharpness, "selection-sharpness")
+    let selection_sharpness = merge_opt(shared.selection_sharpness, cfg.selection_sharpness, "selection-sharpness", reporter)
         .unwrap_or(0.7);
     if !selection_sharpness.is_finite() || selection_sharpness <= 0.0 {
         return Err(Error::Config(format!("selection-sharpness={selection_sharpness}, must be finite and > 0")));
     }
-    let selection_top_k = merge_opt(shared.selection_top_k, cfg.selection_top_k, "selection-top-k")
+    let selection_top_k = merge_opt(shared.selection_top_k, cfg.selection_top_k, "selection-top-k", reporter)
         .unwrap_or(1);
     if selection_top_k < 1 {
         return Err(Error::Config(format!("selection-top-k={selection_top_k}, must be >= 1 (1 aims at first place)")));
     }
-    let selection_draws = merge_opt(shared.selection_draws, cfg.selection_draws, "selection-draws")
+    let selection_draws = merge_opt(shared.selection_draws, cfg.selection_draws, "selection-draws", reporter)
         .unwrap_or(DEFAULT_SELECTION_DRAWS);
     if selection_draws < 1 {
         return Err(Error::Config(format!("selection-draws={selection_draws}, must be >= 1")));
     }
-    let selection_cutoff = merge_opt(shared.cutoff, cfg.cutoff, "cutoff")
+    let selection_cutoff = merge_opt(shared.cutoff, cfg.cutoff, "cutoff", reporter)
         .unwrap_or(0.0);
     if !selection_cutoff.is_finite() || !(0.0..1.0).contains(&selection_cutoff) {
         return Err(Error::Config(format!("cutoff={selection_cutoff}, must be in [0.0, 1.0) — 0 disables the cutoff")));
     }
-    let selection_coverage = merge_opt(shared.coverage, cfg.coverage, "coverage")
+    let selection_coverage = merge_opt(shared.coverage, cfg.coverage, "coverage", reporter)
         .unwrap_or(1.0);
     if !selection_coverage.is_finite() || selection_coverage < 0.0 {
         return Err(Error::Config(format!("coverage={selection_coverage}, must be finite and >= 0 (0 disables it)")));
     }
     // Early stop has deliberately no default: absent means the run always uses
     // its full budget.
-    let stop_confidence = merge_opt(shared.stop_confidence, cfg.stop_confidence, "stop-confidence");
+    let stop_confidence = merge_opt(shared.stop_confidence, cfg.stop_confidence, "stop-confidence", reporter);
     if let Some(c) = stop_confidence {
         if !c.is_finite() || c <= 0.5 || c >= 1.0 {
             return Err(Error::Config(format!("stop-confidence={c}, must be in (0.5, 1.0), e.g. 0.95")));
@@ -513,67 +524,69 @@ pub fn resolve_config(shared: &ConfigArgs, cfg: &config::NanojudgeConfig) -> cra
             ));
         }
     }
-    let retries = merge_opt(shared.retries, cfg.retries, "retries")
+    let retries = merge_opt(shared.retries, cfg.retries, "retries", reporter)
         .unwrap_or(DEFAULT_MAX_RETRIES);
-    let deliberation_length = merge_opt(shared.deliberation_length.clone(), cfg.deliberation_length.clone(), "deliberation-length")
+    let deliberation_length = merge_opt(shared.deliberation_length.clone(), cfg.deliberation_length.clone(), "deliberation-length", reporter)
         .unwrap_or_else(|| DEFAULT_DELIBERATION_LENGTH.to_string());
 
-    let confidence_level = merge_opt(shared.confidence_level, cfg.confidence_level, "confidence-level")
+    let confidence_level = merge_opt(shared.confidence_level, cfg.confidence_level, "confidence-level", reporter)
         .unwrap_or(DEFAULT_CONFIDENCE_LEVEL);
     if !confidence_level.is_finite() || confidence_level <= 0.0 || confidence_level >= 1.0 {
         return Err(Error::Config(format!(
             "confidence-level={confidence_level}, must be between 0.0 and 1.0 (exclusive)"
         )));
     }
-    let regularization_strength = merge_opt(shared.regularization_strength, cfg.regularization_strength, "regularization-strength")
+    let regularization_strength = merge_opt(shared.regularization_strength, cfg.regularization_strength, "regularization-strength", reporter)
         .unwrap_or(DEFAULT_REGULARIZATION_STRENGTH);
     if !regularization_strength.is_finite() || regularization_strength <= 0.0 {
         return Err(Error::Config(format!("regularization-strength={regularization_strength}, must be finite and > 0")));
     }
-    let matchmaking_sharpness = merge_opt(shared.matchmaking_sharpness, cfg.matchmaking_sharpness, "matchmaking-sharpness")
+    let matchmaking_sharpness = merge_opt(shared.matchmaking_sharpness, cfg.matchmaking_sharpness, "matchmaking-sharpness", reporter)
         .unwrap_or(1.0);
     if !matchmaking_sharpness.is_finite() || matchmaking_sharpness <= 0.0 {
         return Err(Error::Config(format!("matchmaking-sharpness={matchmaking_sharpness}, must be finite and > 0")));
     }
-    let min_uniform_edges = merge_opt(shared.min_uniform_edges, cfg.min_uniform_edges, "min-uniform-edges")
+    let min_uniform_edges = merge_opt(shared.min_uniform_edges, cfg.min_uniform_edges, "min-uniform-edges", reporter)
         .unwrap_or(2);
     if min_uniform_edges == 0 {
         // 0 would let top-heavy pairing start before any results exist —
         // selection weights are only derived after a completed refit.
         return Err(Error::Config("min-uniform-edges must be at least 1".into()));
     }
-    let judgements_per_refit = merge_opt(shared.judgements_per_refit, cfg.judgements_per_refit, "judgements-per-refit");
+    let judgements_per_refit = merge_opt(shared.judgements_per_refit, cfg.judgements_per_refit, "judgements-per-refit", reporter);
     if judgements_per_refit == Some(0) {
         return Err(Error::Config("--judgements-per-refit must be at least 1".into()));
     }
-    let prior_tau2 = merge_opt(shared.prior_tau2, cfg.prior_tau2, "prior-tau2")
+    let prior_tau2 = merge_opt(shared.prior_tau2, cfg.prior_tau2, "prior-tau2", reporter)
         .unwrap_or(DEFAULT_PRIOR_TAU2);
     if !prior_tau2.is_finite() || prior_tau2 <= 0.0 {
         return Err(Error::Config(format!("prior-tau2={prior_tau2}, must be finite and > 0")));
     }
-    let bias_prior_tau2 = merge_opt(shared.bias_prior_tau2, cfg.bias_prior_tau2, "bias-prior-tau2")
+    let bias_prior_tau2 = merge_opt(shared.bias_prior_tau2, cfg.bias_prior_tau2, "bias-prior-tau2", reporter)
         .unwrap_or(DEFAULT_BIAS_PRIOR_TAU2);
     if !bias_prior_tau2.is_finite() || bias_prior_tau2 <= 0.0 {
         return Err(Error::Config(format!("bias-prior-tau2={bias_prior_tau2}, must be finite and > 0")));
     }
-    let live_top = merge_opt(shared.live_top, cfg.live_top, "live-top");
+    let live_top = merge_opt(shared.live_top, cfg.live_top, "live-top", reporter);
     let emit_interim_rankings = shared.emit_interim_rankings.unwrap_or(false);
     let save_successful_judgements = match (shared.save_successful_judgements.clone(), cfg.save_successful_judgements.clone()) {
         (Some(c), Some(f)) => {
             if c != f {
-                eprintln!("Warning: --save-successful-judgements ({}) overrides config file value ({})",
-                    c.display(), f.display());
+                reporter.line(&format!(
+                    "Warning: --save-successful-judgements ({}) overrides config file value ({})",
+                    c.display(), f.display()
+                ));
             }
             Some(c)
         }
         (c @ Some(_), None) => c,
         (None, f) => f,
     };
-    let save_prompt_text = merge_opt(shared.save_prompt_text, cfg.save_prompt_text, "save-prompt-text")
+    let save_prompt_text = merge_opt(shared.save_prompt_text, cfg.save_prompt_text, "save-prompt-text", reporter)
         .unwrap_or(false);
-    let save_response_text = merge_opt(shared.save_response_text, cfg.save_response_text, "save-response-text")
+    let save_response_text = merge_opt(shared.save_response_text, cfg.save_response_text, "save-response-text", reporter)
         .unwrap_or(false);
-    let save_reasoning_text = merge_opt(shared.save_reasoning_text, cfg.save_reasoning_text, "save-reasoning-text")
+    let save_reasoning_text = merge_opt(shared.save_reasoning_text, cfg.save_reasoning_text, "save-reasoning-text", reporter)
         .unwrap_or(false);
     if save_successful_judgements.is_none() {
         for (enabled, flag) in [
@@ -586,14 +599,16 @@ pub fn resolve_config(shared: &ConfigArgs, cfg: &config::NanojudgeConfig) -> cra
             }
         }
     }
-    let output_format = merge_opt(shared.output_format, cfg.output_format, "output-format")
+    let output_format = merge_opt(shared.output_format, cfg.output_format, "output-format", reporter)
         .unwrap_or_else(crate::output::default_format);
-    let verbose = merge_opt(shared.verbose, cfg.verbose, "verbose").unwrap_or(false);
+    let verbose = merge_opt(shared.verbose, cfg.verbose, "verbose", reporter).unwrap_or(false);
     let save_failed_judgements = match (shared.save_failed_judgements.clone(), cfg.save_failed_judgements.clone()) {
         (Some(c), Some(f)) => {
             if c != f {
-                eprintln!("Warning: --save-failed-judgements ({}) overrides config file value ({})",
-                    c.display(), f.display());
+                reporter.line(&format!(
+                    "Warning: --save-failed-judgements ({}) overrides config file value ({})",
+                    c.display(), f.display()
+                ));
             }
             Some(c)
         }
@@ -601,21 +616,21 @@ pub fn resolve_config(shared: &ConfigArgs, cfg: &config::NanojudgeConfig) -> cra
         (None, f) => f,
     };
 
-    let seed = merge_opt(shared.seed, cfg.seed, "seed");
+    let seed = merge_opt(shared.seed, cfg.seed, "seed", reporter);
 
     // bias_prior: user specifies in probability space, we convert to logit
-    let bias_prior = merge_opt(shared.bias_prior, cfg.bias_prior, "bias-prior")
+    let bias_prior = merge_opt(shared.bias_prior, cfg.bias_prior, "bias-prior", reporter)
         .unwrap_or(DEFAULT_BIAS_PRIOR);
     if !bias_prior.is_finite() || bias_prior <= 0.0 || bias_prior >= 1.0 {
         return Err(Error::Config("--bias-prior must be greater than 0.0 and less than 1.0".into()));
     }
     let bias_prior_logit = (bias_prior / (1.0 - bias_prior)).ln();
 
-    let deliberation_enabled = merge_opt(shared.deliberation, cfg.deliberation_enabled, "deliberation")
+    let deliberation_enabled = merge_opt(shared.deliberation, cfg.deliberation_enabled, "deliberation", reporter)
         .unwrap_or(true);
 
     if !deliberation_enabled && (shared.deliberation_length.is_some() || cfg.deliberation_length.is_some()) {
-        eprintln!("Warning: deliberation_length is ignored when deliberation is disabled");
+        reporter.line("Warning: deliberation_length is ignored when deliberation is disabled");
     }
 
     // Prompt template: CLI path > config path > built-in default
@@ -626,8 +641,10 @@ pub fn resolve_config(shared: &ConfigArgs, cfg: &config::NanojudgeConfig) -> cra
         if let (Some(cp), Some(fp)) = (&cli_path, &cfg_path)
             && cp != fp
         {
-            eprintln!("Warning: --prompt-template ({}) overrides config file value ({})",
-                cp.display(), fp.display());
+            reporter.line(&format!(
+                "Warning: --prompt-template ({}) overrides config file value ({})",
+                cp.display(), fp.display()
+            ));
         }
 
         let template_path = cli_path.or(cfg_path);
@@ -679,6 +696,7 @@ pub fn resolve_config(shared: &ConfigArgs, cfg: &config::NanojudgeConfig) -> cra
 mod tests {
     use super::*;
     use crate::config::{JudgeConfig, NanojudgeConfig};
+    use crate::report::SilentReporter;
 
     fn default_cli() -> ConfigArgs {
         ConfigArgs {
@@ -749,11 +767,11 @@ mod tests {
     fn test_request_timeout_unset_waits_indefinitely() {
         let cli = default_cli();
         let mut cfg = one_judge_config();
-        let judges = resolve_judges(&cli, &cfg, Path::new("test.toml"), true, 2).unwrap();
+        let judges = resolve_judges(&cli, &cfg, Path::new("test.toml"), true, 2, &SilentReporter).unwrap();
         assert_eq!(judges[0].request_timeout, None);
 
         cfg.judge.as_mut().unwrap()[0].request_timeout_secs = Some(2.5);
-        let judges = resolve_judges(&cli, &cfg, Path::new("test.toml"), true, 2).unwrap();
+        let judges = resolve_judges(&cli, &cfg, Path::new("test.toml"), true, 2, &SilentReporter).unwrap();
         assert_eq!(judges[0].request_timeout, Some(Duration::from_millis(2500)));
     }
 
@@ -764,7 +782,7 @@ mod tests {
         let judge = &mut cfg.judge.as_mut().unwrap()[0];
         judge.max_tokens = None;
         judge.reasoning_effort = Some("none".into());
-        let judges = resolve_judges(&cli, &cfg, Path::new("test.toml"), true, 2).unwrap();
+        let judges = resolve_judges(&cli, &cfg, Path::new("test.toml"), true, 2, &SilentReporter).unwrap();
         assert_eq!(judges[0].max_tokens, 2048);
     }
 
@@ -775,9 +793,9 @@ mod tests {
         let judge = &mut cfg.judge.as_mut().unwrap()[0];
         judge.max_tokens = None;
         judge.reasoning_effort = Some("none".into());
-        let pairwise = resolve_judges(&cli, &cfg, Path::new("test.toml"), false, 2).unwrap();
+        let pairwise = resolve_judges(&cli, &cfg, Path::new("test.toml"), false, 2, &SilentReporter).unwrap();
         assert_eq!(pairwise[0].max_tokens, NO_DELIBERATION_MAX_TOKENS);
-        let lineup = resolve_judges(&cli, &cfg, Path::new("test.toml"), false, 4).unwrap();
+        let lineup = resolve_judges(&cli, &cfg, Path::new("test.toml"), false, 4, &SilentReporter).unwrap();
         assert_eq!(lineup[0].max_tokens, TOKENS_PER_RANKING_LINE * 4);
     }
 
@@ -785,9 +803,9 @@ mod tests {
     fn test_max_tokens_explicit_kept_without_deliberation() {
         let cli = default_cli();
         let cfg = one_judge_config();
-        let pairwise = resolve_judges(&cli, &cfg, Path::new("test.toml"), false, 2).unwrap();
+        let pairwise = resolve_judges(&cli, &cfg, Path::new("test.toml"), false, 2, &SilentReporter).unwrap();
         assert_eq!(pairwise[0].max_tokens, 2048);
-        let lineup = resolve_judges(&cli, &cfg, Path::new("test.toml"), false, 4).unwrap();
+        let lineup = resolve_judges(&cli, &cfg, Path::new("test.toml"), false, 4, &SilentReporter).unwrap();
         assert_eq!(lineup[0].max_tokens, 2048);
     }
 
@@ -795,7 +813,7 @@ mod tests {
     fn test_min_logprob_coverage_default() {
         let cli = default_cli();
         let cfg = one_judge_config();
-        let judges = resolve_judges(&cli, &cfg, Path::new("test.toml"), true, 2).unwrap();
+        let judges = resolve_judges(&cli, &cfg, Path::new("test.toml"), true, 2, &SilentReporter).unwrap();
         assert_eq!(judges[0].min_logprob_coverage, parse::DEFAULT_MIN_LOGPROB_COVERAGE);
     }
 
@@ -804,7 +822,7 @@ mod tests {
         let mut cli = default_cli();
         cli.min_logprob_coverage = Some(0.9);
         let cfg = one_judge_config();
-        let judges = resolve_judges(&cli, &cfg, Path::new("test.toml"), true, 2).unwrap();
+        let judges = resolve_judges(&cli, &cfg, Path::new("test.toml"), true, 2, &SilentReporter).unwrap();
         assert_eq!(judges[0].min_logprob_coverage, 0.9);
     }
 
@@ -813,7 +831,7 @@ mod tests {
         let cli = default_cli();
         let mut cfg = one_judge_config();
         cfg.min_logprob_coverage = Some(0.85);
-        let judges = resolve_judges(&cli, &cfg, Path::new("test.toml"), true, 2).unwrap();
+        let judges = resolve_judges(&cli, &cfg, Path::new("test.toml"), true, 2, &SilentReporter).unwrap();
         assert_eq!(judges[0].min_logprob_coverage, 0.85);
     }
 
@@ -823,7 +841,7 @@ mod tests {
         cli.min_logprob_coverage = Some(0.9);
         let mut cfg = one_judge_config();
         cfg.min_logprob_coverage = Some(0.85);
-        let judges = resolve_judges(&cli, &cfg, Path::new("test.toml"), true, 2).unwrap();
+        let judges = resolve_judges(&cli, &cfg, Path::new("test.toml"), true, 2, &SilentReporter).unwrap();
         assert_eq!(judges[0].min_logprob_coverage, 0.9);
     }
 
@@ -833,7 +851,7 @@ mod tests {
         cli.min_logprob_coverage = Some(0.9);
         let mut cfg = one_judge_config();
         cfg.judge.as_mut().unwrap()[0].min_logprob_coverage = Some(0.7);
-        let judges = resolve_judges(&cli, &cfg, Path::new("test.toml"), true, 2).unwrap();
+        let judges = resolve_judges(&cli, &cfg, Path::new("test.toml"), true, 2, &SilentReporter).unwrap();
         assert_eq!(judges[0].min_logprob_coverage, 0.7);
     }
 
@@ -841,7 +859,7 @@ mod tests {
     fn test_verdict_temperature_default_deliberation() {
         let cli = default_cli();
         let cfg = one_judge_config();
-        let judges = resolve_judges(&cli, &cfg, Path::new("test.toml"), true, 2).unwrap();
+        let judges = resolve_judges(&cli, &cfg, Path::new("test.toml"), true, 2, &SilentReporter).unwrap();
         assert_eq!(judges[0].verdict_temperature, DEFAULT_VERDICT_TEMPERATURE_DELIBERATION);
     }
 
@@ -849,7 +867,7 @@ mod tests {
     fn test_verdict_temperature_default_no_deliberation() {
         let cli = default_cli();
         let cfg = one_judge_config();
-        let judges = resolve_judges(&cli, &cfg, Path::new("test.toml"), false, 2).unwrap();
+        let judges = resolve_judges(&cli, &cfg, Path::new("test.toml"), false, 2, &SilentReporter).unwrap();
         assert_eq!(judges[0].verdict_temperature, DEFAULT_VERDICT_TEMPERATURE_NO_DELIBERATION);
     }
 
@@ -858,7 +876,7 @@ mod tests {
         let mut cli = default_cli();
         cli.verdict_temperature = Some(6.0);
         let cfg = one_judge_config();
-        let judges = resolve_judges(&cli, &cfg, Path::new("test.toml"), true, 2).unwrap();
+        let judges = resolve_judges(&cli, &cfg, Path::new("test.toml"), true, 2, &SilentReporter).unwrap();
         assert_eq!(judges[0].verdict_temperature, 6.0);
     }
 
@@ -867,7 +885,7 @@ mod tests {
         let cli = default_cli();
         let mut cfg = one_judge_config();
         cfg.verdict_temperature = Some(2.0);
-        let judges = resolve_judges(&cli, &cfg, Path::new("test.toml"), true, 2).unwrap();
+        let judges = resolve_judges(&cli, &cfg, Path::new("test.toml"), true, 2, &SilentReporter).unwrap();
         assert_eq!(judges[0].verdict_temperature, 2.0);
     }
 
@@ -877,7 +895,7 @@ mod tests {
         cli.verdict_temperature = Some(6.0);
         let mut cfg = one_judge_config();
         cfg.verdict_temperature = Some(2.0);
-        let judges = resolve_judges(&cli, &cfg, Path::new("test.toml"), true, 2).unwrap();
+        let judges = resolve_judges(&cli, &cfg, Path::new("test.toml"), true, 2, &SilentReporter).unwrap();
         assert_eq!(judges[0].verdict_temperature, 6.0);
     }
 
@@ -887,7 +905,7 @@ mod tests {
         cli.verdict_temperature = Some(6.0);
         let mut cfg = one_judge_config();
         cfg.judge.as_mut().unwrap()[0].verdict_temperature = Some(2.5);
-        let judges = resolve_judges(&cli, &cfg, Path::new("test.toml"), true, 2).unwrap();
+        let judges = resolve_judges(&cli, &cfg, Path::new("test.toml"), true, 2, &SilentReporter).unwrap();
         assert_eq!(judges[0].verdict_temperature, 2.5);
     }
 
@@ -898,7 +916,7 @@ mod tests {
         let cli = default_cli();
         let mut cfg = one_judge_config();
         cfg.verdict_temperature = Some(4.0);
-        let judges = resolve_judges(&cli, &cfg, Path::new("test.toml"), false, 2).unwrap();
+        let judges = resolve_judges(&cli, &cfg, Path::new("test.toml"), false, 2, &SilentReporter).unwrap();
         assert_eq!(judges[0].verdict_temperature, 4.0);
     }
 
@@ -907,7 +925,7 @@ mod tests {
         let mut cli = default_cli();
         cli.concurrency = Some(32);
         let cfg = one_judge_config();
-        let judges = resolve_judges(&cli, &cfg, Path::new("test.toml"), true, 2).unwrap();
+        let judges = resolve_judges(&cli, &cfg, Path::new("test.toml"), true, 2, &SilentReporter).unwrap();
         assert_eq!(judges[0].concurrency, 32);
     }
 
@@ -917,7 +935,7 @@ mod tests {
         cli.concurrency = Some(32);
         let mut cfg = one_judge_config();
         cfg.concurrency = Some(8);
-        let judges = resolve_judges(&cli, &cfg, Path::new("test.toml"), true, 2).unwrap();
+        let judges = resolve_judges(&cli, &cfg, Path::new("test.toml"), true, 2, &SilentReporter).unwrap();
         assert_eq!(judges[0].concurrency, 32);
     }
 
@@ -926,7 +944,7 @@ mod tests {
         let mut cli = default_cli();
         cli.logprobs = Some(true);
         let cfg = one_judge_config();
-        let judges = resolve_judges(&cli, &cfg, Path::new("test.toml"), true, 2).unwrap();
+        let judges = resolve_judges(&cli, &cfg, Path::new("test.toml"), true, 2, &SilentReporter).unwrap();
         assert!(judges[0].logprobs);
     }
 
@@ -936,7 +954,7 @@ mod tests {
         cli.logprobs = Some(false);
         let mut cfg = one_judge_config();
         cfg.logprobs = Some(true);
-        let judges = resolve_judges(&cli, &cfg, Path::new("test.toml"), true, 2).unwrap();
+        let judges = resolve_judges(&cli, &cfg, Path::new("test.toml"), true, 2, &SilentReporter).unwrap();
         assert!(!judges[0].logprobs);
     }
 
@@ -945,7 +963,7 @@ mod tests {
         let mut cli = default_cli();
         cli.deliberation = Some(false);
         let cfg = NanojudgeConfig::default();
-        let resolved = resolve_config(&cli, &cfg).unwrap();
+        let resolved = resolve_config(&cli, &cfg, &SilentReporter).unwrap();
         assert!(!resolved.deliberation_enabled);
     }
 
@@ -954,7 +972,7 @@ mod tests {
         let mut cli = default_cli();
         cli.deliberation = Some(true);
         let cfg = NanojudgeConfig { deliberation_enabled: Some(false), ..Default::default() };
-        let resolved = resolve_config(&cli, &cfg).unwrap();
+        let resolved = resolve_config(&cli, &cfg, &SilentReporter).unwrap();
         assert!(resolved.deliberation_enabled);
     }
 
@@ -962,7 +980,7 @@ mod tests {
     fn test_deliberation_from_config() {
         let cli = default_cli();
         let cfg = NanojudgeConfig { deliberation_enabled: Some(false), ..Default::default() };
-        let resolved = resolve_config(&cli, &cfg).unwrap();
+        let resolved = resolve_config(&cli, &cfg, &SilentReporter).unwrap();
         assert!(!resolved.deliberation_enabled);
     }
 
@@ -970,7 +988,7 @@ mod tests {
     fn test_stop_confidence_absent_means_no_early_stop() {
         let cli = default_cli();
         let cfg = NanojudgeConfig::default();
-        let resolved = resolve_config(&cli, &cfg).unwrap();
+        let resolved = resolve_config(&cli, &cfg, &SilentReporter).unwrap();
         assert_eq!(resolved.stop_confidence, None);
     }
 
@@ -978,7 +996,7 @@ mod tests {
     fn test_judgements_per_refit_is_literal() {
         let mut cli = default_cli();
         cli.judgements_per_refit = Some(3);
-        let resolved = resolve_config(&cli, &NanojudgeConfig::default()).unwrap();
+        let resolved = resolve_config(&cli, &NanojudgeConfig::default(), &SilentReporter).unwrap();
         assert_eq!(resolved.judgements_per_refit, Some(3));
     }
 
@@ -988,7 +1006,7 @@ mod tests {
         cli.judgement_distribution = Some("top-heavy".into());
         cli.stop_confidence = Some(0.95);
         let cfg = NanojudgeConfig::default();
-        let resolved = resolve_config(&cli, &cfg).unwrap();
+        let resolved = resolve_config(&cli, &cfg, &SilentReporter).unwrap();
         assert_eq!(resolved.stop_confidence, Some(0.95));
     }
 
@@ -998,7 +1016,7 @@ mod tests {
         cli.judgement_distribution = Some("top-heavy".into());
         cli.stop_confidence = Some(0.99);
         let cfg = NanojudgeConfig { stop_confidence: Some(0.9), ..Default::default() };
-        let resolved = resolve_config(&cli, &cfg).unwrap();
+        let resolved = resolve_config(&cli, &cfg, &SilentReporter).unwrap();
         assert_eq!(resolved.stop_confidence, Some(0.99));
     }
 
@@ -1006,7 +1024,7 @@ mod tests {
     fn test_judgement_distribution_defaults_to_top_heavy() {
         let cli = default_cli();
         let cfg = NanojudgeConfig::default();
-        let resolved = resolve_config(&cli, &cfg).unwrap();
+        let resolved = resolve_config(&cli, &cfg, &SilentReporter).unwrap();
         assert_eq!(resolved.judgement_distribution, JudgementDistribution::TopHeavy);
     }
 
@@ -1043,19 +1061,19 @@ mod tests {
     fn test_resolve_errors_return_config_variant() {
         let cli = default_cli();
         let empty = NanojudgeConfig::default();
-        let err = resolve_judges(&cli, &empty, Path::new("test.toml"), true, 2).err().unwrap();
+        let err = resolve_judges(&cli, &empty, Path::new("test.toml"), true, 2, &SilentReporter).err().unwrap();
         assert!(matches!(err, Error::Config(_)), "{err:?}");
 
         let mut bad_cli = default_cli();
         bad_cli.judgement_distribution = Some("uniform".into());
         bad_cli.stop_confidence = Some(0.95);
-        let err = resolve_config(&bad_cli, &empty).err().unwrap();
+        let err = resolve_config(&bad_cli, &empty, &SilentReporter).err().unwrap();
         assert!(matches!(err, Error::Config(_)), "{err:?}");
         assert!(err.to_string().contains("top-heavy"), "{err}");
 
         let mut openrouter_cfg = one_judge_config();
         openrouter_cfg.judge.as_mut().unwrap()[0].endpoint = "https://openrouter.ai/api/v1".into();
-        let err = resolve_judges(&cli, &openrouter_cfg, Path::new("test.toml"), true, 2).err().unwrap();
+        let err = resolve_judges(&cli, &openrouter_cfg, Path::new("test.toml"), true, 2, &SilentReporter).err().unwrap();
         assert!(matches!(err, Error::Config(_)), "{err:?}");
         assert!(err.to_string().contains("OpenRouter"), "{err}");
     }

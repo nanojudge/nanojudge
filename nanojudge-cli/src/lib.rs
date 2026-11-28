@@ -9,6 +9,7 @@ pub mod parse;
 pub mod probe;
 pub mod prompt;
 pub mod rank;
+pub mod report;
 pub mod resolve;
 pub mod score;
 
@@ -16,6 +17,7 @@ pub use benchmark::{BenchmarkReport, LatencyStats};
 pub use error::{Error, Result};
 pub use output::RankingOutput;
 pub use probe::JudgeProbeResult;
+pub use report::{Reporter, SilentReporter, StderrReporter};
 
 pub(crate) const DEFAULT_BENCHMARK_PAIRS: &str = "100";
 

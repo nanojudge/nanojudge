@@ -13,6 +13,7 @@ use crate::args::ProbeArgs;
 use crate::config;
 use crate::Error;
 use crate::llm::{build_completions_url, describe_request_error, TOP_LOGPROBS};
+use crate::report::Reporter;
 use crate::resolve::{resolve_config, resolve_judges, ResolvedJudge, NO_DELIBERATION_MAX_TOKENS};
 
 /// Bumped whenever the record layout or the set of test requests changes.
@@ -55,26 +56,33 @@ pub struct JudgeProbeResult {
     pub problems: Vec<String>,
 }
 
-pub async fn run(args: ProbeArgs) -> crate::Result<Vec<JudgeProbeResult>> {
+pub async fn run(args: ProbeArgs, reporter: &dyn Reporter) -> crate::Result<Vec<JudgeProbeResult>> {
     let (config_path, cfg) = config::load_config(args.config.as_deref())?;
-    let resolved = resolve_config(&args.cfg, &cfg)?;
-    let judges = resolve_judges(&args.cfg, &cfg, &config_path, resolved.deliberation_enabled, resolved.lineup_size)?;
+    let resolved = resolve_config(&args.cfg, &cfg, reporter)?;
+    let judges = resolve_judges(
+        &args.cfg,
+        &cfg,
+        &config_path,
+        resolved.deliberation_enabled,
+        resolved.lineup_size,
+        reporter,
+    )?;
 
     let path = probes_path()?;
-    eprintln!("Probe records: {}", path.display());
+    reporter.line(&format!("Probe records: {}", path.display()));
 
     let client = Client::new();
     let mut results = Vec::with_capacity(judges.len());
     for judge in &judges {
-        eprintln!("Probing {}", judge.display_name);
-        let record = probe_judge(&client, judge).await?;
+        reporter.line(&format!("Probing {}", judge.display_name));
+        let record = probe_judge(&client, judge, reporter).await?;
         append_record(&path, &record)?;
         let problems = judge_problems(judge, &record["findings"]);
         if problems.is_empty() {
-            eprintln!("  OK: runs can use this judge");
+            reporter.line("  OK: runs can use this judge");
         } else {
             for p in &problems {
-                eprintln!("  Runs will refuse this judge: {p}");
+                reporter.line(&format!("  Runs will refuse this judge: {p}"));
             }
         }
         results.push(JudgeProbeResult {
@@ -96,7 +104,10 @@ pub async fn run(args: ProbeArgs) -> crate::Result<Vec<JudgeProbeResult>> {
 /// in the current format. Other settings don't change what the probe tests,
 /// except that a failed probe is redone under a longer `request_timeout_secs`
 /// or larger `max_tokens` (see `reprobe_reason`).
-pub async fn check_judges<'a>(judges: impl IntoIterator<Item = &'a ResolvedJudge>) -> crate::Result<()> {
+pub async fn check_judges<'a>(
+    judges: impl IntoIterator<Item = &'a ResolvedJudge>,
+    reporter: &dyn Reporter,
+) -> crate::Result<()> {
     let path = probes_path()?;
     let records = read_records(&path)?;
     let client = Client::new();
@@ -108,17 +119,20 @@ pub async fn check_judges<'a>(judges: impl IntoIterator<Item = &'a ResolvedJudge
             Some(record) if reprobe_reason(record, judge).is_none() => record.clone(),
             Some(record) => {
                 let reason = reprobe_reason(record, judge).expect("checked above");
-                eprintln!(
+                reporter.line(&format!(
                     "The last probe of {} failed under {reason}. Probing it again; records: {}",
                     judge.display_name, path.display()
-                );
-                let record = probe_judge(&client, judge).await?;
+                ));
+                let record = probe_judge(&client, judge, reporter).await?;
                 append_record(&path, &record)?;
                 record
             }
             None => {
-                eprintln!("No probe of {} yet. Probing it now; records: {}", judge.display_name, path.display());
-                let record = probe_judge(&client, judge).await?;
+                reporter.line(&format!(
+                    "No probe of {} yet. Probing it now; records: {}",
+                    judge.display_name, path.display()
+                ));
+                let record = probe_judge(&client, judge, reporter).await?;
                 append_record(&path, &record)?;
                 record
             }
@@ -264,12 +278,12 @@ fn base_request(judge: &ResolvedJudge, prompt: &str, max_tokens: u32) -> serde_j
     body
 }
 
-async fn probe_judge(client: &Client, judge: &ResolvedJudge) -> crate::Result<Value> {
+async fn probe_judge(client: &Client, judge: &ResolvedJudge, reporter: &dyn Reporter) -> crate::Result<Value> {
     let url = build_completions_url(&judge.endpoint);
     let max_tokens_limit = judge.max_tokens.min(NO_DELIBERATION_MAX_TOKENS);
 
     let main_body = base_request(judge, PROBE_PROMPT, max_tokens_limit);
-    let mut requests = vec![send_test(client, judge, &url, "probe", Value::Object(main_body)).await];
+    let mut requests = vec![send_test(client, judge, &url, "probe", Value::Object(main_body), reporter).await];
 
     let responded = first_choice(&requests[0]["response"]).is_some();
     let did_reason = reasoned(&requests[0]["response"]);
@@ -278,7 +292,7 @@ async fn probe_judge(client: &Client, judge: &ResolvedJudge) -> crate::Result<Va
         let mut lp_body = base_request(judge, LOGPROBS_PROBE_PROMPT, judge.max_tokens);
         lp_body.insert("logprobs".into(), json!(true));
         lp_body.insert("top_logprobs".into(), json!(TOP_LOGPROBS));
-        requests.push(send_test(client, judge, &url, "logprobs", Value::Object(lp_body)).await);
+        requests.push(send_test(client, judge, &url, "logprobs", Value::Object(lp_body), reporter).await);
         (
             logprobs_returned(&requests[1]["response"]),
             top_logprobs_returned(&requests[1]["response"]),
@@ -287,16 +301,16 @@ async fn probe_judge(client: &Client, judge: &ResolvedJudge) -> crate::Result<Va
         (None, None)
     };
 
-    eprintln!("  responded: {}", finding_str(Some(responded)));
-    eprintln!("  reasoned: {}", finding_str(did_reason));
+    reporter.line(&format!("  responded: {}", finding_str(Some(responded))));
+    reporter.line(&format!("  reasoned: {}", finding_str(did_reason)));
     if judge.logprobs {
-        eprintln!("  logprobs returned: {}", finding_str(has_logprobs));
+        reporter.line(&format!("  logprobs returned: {}", finding_str(has_logprobs)));
         match top_lp_count {
-            Some(n) => eprintln!("  top logprobs returned: {n} of {TOP_LOGPROBS}"),
-            None => eprintln!("  top logprobs returned: can't tell"),
+            Some(n) => reporter.line(&format!("  top logprobs returned: {n} of {TOP_LOGPROBS}")),
+            None => reporter.line("  top logprobs returned: can't tell"),
         }
     }
-    eprintln!("  max_tokens respected: {}", finding_str(kept_max_tokens));
+    reporter.line(&format!("  max_tokens respected: {}", finding_str(kept_max_tokens)));
 
     Ok(json!({
         "format_version": PROBE_FORMAT_VERSION,
@@ -413,7 +427,14 @@ fn reasoned(response: &Value) -> Option<bool> {
 
 /// Send one test request and record it. Never records headers, so the API key
 /// stays out of the probe file.
-async fn send_test(client: &Client, judge: &ResolvedJudge, url: &str, test: &str, body: Value) -> Value {
+async fn send_test(
+    client: &Client,
+    judge: &ResolvedJudge,
+    url: &str,
+    test: &str,
+    body: Value,
+    reporter: &dyn Reporter,
+) -> Value {
     let mut req = client.post(url).json(&body);
     if let Some(ref key) = judge.api_key {
         req = req.bearer_auth(key);
@@ -444,8 +465,8 @@ async fn send_test(client: &Client, judge: &ResolvedJudge, url: &str, test: &str
     let elapsed_ms = start.elapsed().as_millis() as u64;
 
     match (&http_status, &error) {
-        (_, Some(e)) => eprintln!("  {test}: {e}"),
-        (Some(s), None) => eprintln!("  {test}: HTTP {s} in {elapsed_ms} ms"),
+        (_, Some(e)) => reporter.line(&format!("  {test}: {e}")),
+        (Some(s), None) => reporter.line(&format!("  {test}: HTTP {s} in {elapsed_ms} ms")),
         (None, None) => unreachable!("a request with no status always has an error"),
     }
 

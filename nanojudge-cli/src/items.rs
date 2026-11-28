@@ -3,6 +3,7 @@ use std::path::Path;
 
 use crate::args::RankArgs;
 use crate::Error;
+use crate::report::Reporter;
 
 const TITLE_MAX_LEN: usize = 20;
 
@@ -43,8 +44,8 @@ fn parse_items_from_str(content: &str) -> crate::Result<Vec<String>> {
 
 /// Load items from all sources: --items file/dir, --item inline args, or stdin.
 /// Returns (titles, texts) where titles are for display and texts are sent to the LLM.
-pub fn load_items(args: &RankArgs) -> crate::Result<(Vec<String>, Vec<String>)> {
-    load_items_from(args.items.as_deref(), &args.inline_items, || {
+pub fn load_items(args: &RankArgs, reporter: &dyn Reporter) -> crate::Result<(Vec<String>, Vec<String>)> {
+    load_items_from(args.items.as_deref(), &args.inline_items, reporter, || {
         let stdin = io::stdin();
         if stdin.is_terminal() {
             return Err(Error::Input(
@@ -63,6 +64,7 @@ pub fn load_items(args: &RankArgs) -> crate::Result<(Vec<String>, Vec<String>)> 
 fn load_items_from(
     items_path: Option<&Path>,
     inline_items: &[String],
+    reporter: &dyn Reporter,
     read_stdin: impl FnOnce() -> crate::Result<String>,
 ) -> crate::Result<(Vec<String>, Vec<String>)> {
     let mut titles = Vec::new();
@@ -116,7 +118,9 @@ fn load_items_from(
             }
 
             let loaded = titles.len();
-            eprintln!("Found {total} files, loaded {loaded}, skipped {skipped} (unsupported format or empty)");
+            reporter.line(&format!(
+                "Found {total} files, loaded {loaded}, skipped {skipped} (unsupported format or empty)"
+            ));
         } else {
             // File mode: one item per line or JSON array
             let content = std::fs::read_to_string(path)
@@ -165,6 +169,7 @@ fn load_items_from(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::report::SilentReporter;
     use std::io::Write;
 
     fn unused_stdin() -> crate::Result<String> {
@@ -174,7 +179,7 @@ mod tests {
     #[test]
     fn empty_items_file_does_not_fall_through_to_stdin() {
         let tmp = tempfile::NamedTempFile::new().unwrap();
-        let err = load_items_from(Some(tmp.path()), &[], unused_stdin).unwrap_err();
+        let err = load_items_from(Some(tmp.path()), &[], &SilentReporter, unused_stdin).unwrap_err();
         assert!(matches!(err, Error::Input(_)), "{err:?}");
         assert!(err.to_string().contains("Need at least 2 items to rank, got 0"), "{err}");
     }
@@ -186,7 +191,7 @@ mod tests {
         std::fs::write(dir.path().join("B.MD"), "second item").unwrap();
         std::fs::write(dir.path().join("C.PNG"), "not text").unwrap();
 
-        let (titles, texts) = load_items_from(Some(dir.path()), &[], unused_stdin).unwrap();
+        let (titles, texts) = load_items_from(Some(dir.path()), &[], &SilentReporter, unused_stdin).unwrap();
         assert_eq!(titles, vec!["A", "B"]);
         assert_eq!(texts, vec!["first item", "second item"]);
     }
@@ -194,12 +199,12 @@ mod tests {
     #[test]
     fn inline_items_are_trimmed_and_blank_values_rejected() {
         let items = vec!["  alpha  ".into(), "beta".into()];
-        let (titles, texts) = load_items_from(None, &items, unused_stdin).unwrap();
+        let (titles, texts) = load_items_from(None, &items, &SilentReporter, unused_stdin).unwrap();
         assert_eq!(titles, vec!["alpha", "beta"]);
         assert_eq!(texts, vec!["alpha", "beta"]);
 
         for blank in ["", "   ", "\t\n"] {
-            let err = load_items_from(None, &["alpha".into(), blank.into()], unused_stdin).unwrap_err();
+            let err = load_items_from(None, &["alpha".into(), blank.into()], &SilentReporter, unused_stdin).unwrap_err();
             assert!(matches!(err, Error::Input(_)), "blank {blank:?}: {err:?}");
             assert!(err.to_string().contains("cannot be empty"), "blank {blank:?}: {err}");
         }
@@ -207,14 +212,14 @@ mod tests {
 
     #[test]
     fn stdin_is_used_when_no_items_or_inline_args_given() {
-        let (titles, texts) = load_items_from(None, &[], || Ok("first\nsecond\n".into())).unwrap();
+        let (titles, texts) = load_items_from(None, &[], &SilentReporter, || Ok("first\nsecond\n".into())).unwrap();
         assert_eq!(titles, vec!["first", "second"]);
         assert_eq!(texts, vec!["first", "second"]);
 
         // Also verify file mode with JSON array works through load_items_from.
         let mut tmp = tempfile::NamedTempFile::new().unwrap();
         write!(tmp, r#"["one", "two"]"#).unwrap();
-        let (_, texts) = load_items_from(Some(tmp.path()), &[], unused_stdin).unwrap();
+        let (_, texts) = load_items_from(Some(tmp.path()), &[], &SilentReporter, unused_stdin).unwrap();
         assert_eq!(texts, vec!["one", "two"]);
     }
 }

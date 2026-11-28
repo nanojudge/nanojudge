@@ -1,5 +1,6 @@
 /// Output formatting: terminal table and JSON.
 use crate::args::OutputFormat;
+use crate::report::Reporter;
 use nanojudge_core::{JudgeAnalytics, RankedItem, ScoringResult};
 use serde::Serialize;
 use std::collections::HashMap;
@@ -280,8 +281,8 @@ fn print_judge_panel_analytics(
     }
 }
 
-/// Print a compact live ranking table to stderr after a refit.
-/// If `limit` is 0, prints all items.
+/// Report a compact live ranking table after a refit.
+/// If `limit` is 0, emits all items.
 pub fn print_live_table(
     rankings: &[RankedItem],
     names: &[String],
@@ -289,6 +290,7 @@ pub fn print_live_table(
     total_judgements: usize,
     loaded_judgements: Option<usize>,
     limit: usize,
+    reporter: &dyn Reporter,
 ) {
     let show = if limit == 0 || limit >= rankings.len() {
         rankings
@@ -303,23 +305,23 @@ pub fn print_live_table(
         .unwrap_or(4)
         .max(4);
 
-    eprintln!(
+    reporter.line(&format!(
         "\n── Refit {} ({}) ──",
         refit,
         judgement_count(total_judgements, loaded_judgements, "judgements"),
-    );
+    ));
     for (i, r) in show.iter().enumerate() {
-        eprintln!(
+        reporter.line(&format!(
             " {:>2}. {:<name_width$}  {:>7.4}  [{:.2}, {:.2}]",
             i + 1,
             names[r.item as usize],
             r.score,
             r.lower_bound,
             r.upper_bound,
-        );
+        ));
     }
     if limit > 0 && limit < rankings.len() {
-        eprintln!("     … and {} more", rankings.len() - limit);
+        reporter.line(&format!("     … and {} more", rankings.len() - limit));
     }
 }
 

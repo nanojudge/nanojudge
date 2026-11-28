@@ -3,6 +3,7 @@ use crate::parse::{
     LogprobContent, ParseResult, parse_response, parse_response_text, parse_lineup,
     parse_lineup_text,
 };
+use crate::report::Reporter;
 use nanojudge_core::LineupVerdict;
 use rand::Rng;
 use reqwest::Client;
@@ -461,6 +462,7 @@ pub async fn judge_pair(
     max_retries: usize,
     verbose: bool,
     judge_name: &str,
+    reporter: &dyn Reporter,
 ) -> Result<PairJudgementResult, JudgementError> {
     let mut last_err = String::new();
     for attempt in 0..=max_retries {
@@ -485,13 +487,13 @@ pub async fn judge_pair(
                 last_err = e;
                 if attempt < max_retries {
                     if verbose {
-                        eprintln!(
+                        reporter.line(&format!(
                             "  Retry {}/{} for {} vs {} [{}]: {}",
                             attempt + 1, max_retries,
                             truncate_for_log(item1_name, 200),
                             truncate_for_log(item2_name, 200),
                             judge_name, last_err
-                        );
+                        ));
                     }
                     tokio::time::sleep(retry_backoff(attempt)).await;
                 }
@@ -550,6 +552,7 @@ pub async fn judge_lineup(
     max_retries: usize,
     verbose: bool,
     judge_name: &str,
+    reporter: &dyn Reporter,
 ) -> Result<LineupJudgementResult, JudgementError> {
     let mut last_err = String::new();
     for attempt in 0..=max_retries {
@@ -574,10 +577,10 @@ pub async fn judge_lineup(
                 last_err = e;
                 if attempt < max_retries {
                     if verbose {
-                        eprintln!(
+                        reporter.line(&format!(
                             "  Retry {}/{} for lineup [{}]: {}",
                             attempt + 1, max_retries, judge_name, last_err
-                        );
+                        ));
                     }
                     tokio::time::sleep(retry_backoff(attempt)).await;
                 }
