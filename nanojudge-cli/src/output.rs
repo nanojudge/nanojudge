@@ -1,7 +1,28 @@
 /// Output formatting: terminal table and JSON.
-use nanojudge_core::{JudgeAnalytics, RankedItem};
+use crate::args::OutputFormat;
+use nanojudge_core::{JudgeAnalytics, RankedItem, ScoringResult};
 use serde::Serialize;
 use std::collections::HashMap;
+
+/// Structured result of `rank` or `score`, ready for programmatic inspection
+/// or rendering via [`print`], [`print_table`], [`print_json`], or [`to_json`].
+#[derive(Debug, Clone)]
+pub struct RankingOutput {
+    pub scoring: ScoringResult,
+    pub item_names: Vec<String>,
+    pub item_hashes: Vec<String>,
+    pub edge_counts: Vec<usize>,
+    /// Every judgement the ranking is built on, including `loaded_judgements`.
+    pub total_judgements: usize,
+    /// Judgements from `--load-judgements` that contributed to this ranking.
+    pub loaded_judgements: Option<usize>,
+    pub confidence_level: f64,
+    pub judge_names: HashMap<u64, String>,
+    pub judge_tokens: HashMap<u64, (u64, u64)>,
+    pub judge_avg_wall_time: HashMap<u64, f64>,
+    /// Per-refit interim rankings when `--emit-interim-rankings` is set.
+    pub interim_rankings: Option<Vec<(usize, Vec<String>)>>,
+}
 
 #[derive(Serialize)]
 struct JsonRankedItem {
@@ -62,23 +83,30 @@ pub fn judgement_count(total: usize, loaded: Option<usize>, noun: &str) -> Strin
     }
 }
 
+/// Default output format: table when stdout is a terminal, JSON otherwise.
+pub fn default_format() -> OutputFormat {
+    if std::io::IsTerminal::is_terminal(&std::io::stdout()) {
+        OutputFormat::Table
+    } else {
+        OutputFormat::Json
+    }
+}
+
+/// Print results in the requested output format.
+pub fn print(out: &RankingOutput, format: OutputFormat) {
+    match format {
+        OutputFormat::Json => print_json(out),
+        OutputFormat::Table => print_table(out),
+    }
+}
+
 /// Print results as a formatted terminal table.
-#[allow(clippy::too_many_arguments)]
-pub fn print_table(
-    rankings: &[RankedItem],
-    names: &[String],
-    edge_counts: &[usize],
-    total_judgements: usize,
-    loaded_judgements: Option<usize>,
-    confidence_level: f64,
-    judge_analytics: &[JudgeAnalytics],
-    judge_names: &HashMap<u64, String>,
-    judge_tokens: &HashMap<u64, (u64, u64)>,
-    judge_avg_wall_time: &HashMap<u64, f64>,
-    panel_positional_bias: f64,
-    panel_positional_bias_ci: (f64, f64),
-) {
-    let ci_label = format!("{:.0}% CI", confidence_level * 100.0);
+pub fn print_table(out: &RankingOutput) {
+    let rankings = &out.scoring.rankings;
+    let names = &out.item_names;
+    let edge_counts = &out.edge_counts;
+    let judge_analytics = &out.scoring.judge_analytics;
+    let ci_label = format!("{:.0}% CI", out.confidence_level * 100.0);
 
     // Find the widest item name for padding
     let name_width = rankings
@@ -118,7 +146,7 @@ pub fn print_table(
     println!(
         "\n{} items ranked ({})",
         rankings.len(),
-        judgement_count(total_judgements, loaded_judgements, "judgements"),
+        judgement_count(out.total_judgements, out.loaded_judgements, "judgements"),
     );
 
     // Print per-judge analytics
@@ -128,7 +156,7 @@ pub fn print_table(
             "Position bias — estimated: {:.3} [{:.3}, {:.3}] (corrected for in scores, 0.5 = no bias)",
             ja.positional_bias, ja.positional_bias_ci.0, ja.positional_bias_ci.1,
         );
-        if let Some(&(input, output)) = judge_tokens.get(&ja.judge_id)
+        if let Some(&(input, output)) = out.judge_tokens.get(&ja.judge_id)
             && (input > 0 || output > 0)
         {
             println!(
@@ -137,7 +165,7 @@ pub fn print_table(
                 format_count(output as usize)
             );
         }
-        if let Some(&avg) = judge_avg_wall_time.get(&ja.judge_id)
+        if let Some(&avg) = out.judge_avg_wall_time.get(&ja.judge_id)
             && avg > 0.0
         {
             println!("Avg collection time: {}", format_duration(avg));
@@ -145,13 +173,15 @@ pub fn print_table(
     } else {
         print_judge_panel_analytics(
             judge_analytics,
-            judge_names,
-            judge_tokens,
-            judge_avg_wall_time,
+            &out.judge_names,
+            &out.judge_tokens,
+            &out.judge_avg_wall_time,
         );
         println!(
             "Panel position bias — estimated: {:.3} [{:.3}, {:.3}] (corrected for in scores, 0.5 = no bias)",
-            panel_positional_bias, panel_positional_bias_ci.0, panel_positional_bias_ci.1,
+            out.scoring.panel_positional_bias,
+            out.scoring.panel_positional_bias_ci.0,
+            out.scoring.panel_positional_bias_ci.1,
         );
     }
 }
@@ -317,35 +347,27 @@ fn format_count(n: usize) -> String {
     result.chars().rev().collect()
 }
 
-/// Build JSON output string.
-#[allow(clippy::too_many_arguments)]
-fn build_json(
-    rankings: &[RankedItem],
-    names: &[String],
-    hashes: &[String],
-    edge_counts: &[usize],
-    total_judgements: usize,
-    loaded_judgements: Option<usize>,
-    judge_analytics: &[JudgeAnalytics],
-    panel_positional_bias: f64,
-    panel_positional_bias_ci: (f64, f64),
-    interim_rankings_data: Option<&[(usize, Vec<String>)]>,
-) -> String {
-    let items: Vec<JsonRankedItem> = rankings
+/// Format results as pretty-printed JSON.
+pub fn to_json(out: &RankingOutput) -> String {
+    let items: Vec<JsonRankedItem> = out
+        .scoring
+        .rankings
         .iter()
         .enumerate()
         .map(|(i, r)| JsonRankedItem {
             rank: i + 1,
-            name: names[r.item as usize].clone(),
-            text_hash: hashes[r.item as usize].clone(),
+            name: out.item_names[r.item as usize].clone(),
+            text_hash: out.item_hashes[r.item as usize].clone(),
             score: r.score,
             lower_bound: r.lower_bound,
             upper_bound: r.upper_bound,
-            edges: edge_counts[r.item as usize],
+            edges: out.edge_counts[r.item as usize],
         })
         .collect();
 
-    let judge_analytics_json: Vec<JsonJudgeAnalytics> = judge_analytics
+    let judge_analytics_json: Vec<JsonJudgeAnalytics> = out
+        .scoring
+        .judge_analytics
         .iter()
         .map(|ja| JsonJudgeAnalytics {
             judge_id: ja.judge_id,
@@ -356,7 +378,7 @@ fn build_json(
         })
         .collect();
 
-    let interim_rankings_json = interim_rankings_data.map(|refits| {
+    let interim_rankings_json = out.interim_rankings.as_ref().map(|refits| {
         refits
             .iter()
             .map(|(judgements, order)| JsonInterimRanking {
@@ -368,11 +390,11 @@ fn build_json(
 
     let output = JsonOutput {
         items,
-        total_judgements,
-        loaded_judgements,
-        positional_bias: panel_positional_bias,
-        positional_bias_ci_low: panel_positional_bias_ci.0,
-        positional_bias_ci_high: panel_positional_bias_ci.1,
+        total_judgements: out.total_judgements,
+        loaded_judgements: out.loaded_judgements,
+        positional_bias: out.scoring.panel_positional_bias,
+        positional_bias_ci_low: out.scoring.panel_positional_bias_ci.0,
+        positional_bias_ci_high: out.scoring.panel_positional_bias_ci.1,
         judge_analytics: judge_analytics_json,
         interim_rankings: interim_rankings_json,
     };
@@ -381,41 +403,15 @@ fn build_json(
 }
 
 /// Print results as JSON.
-#[allow(clippy::too_many_arguments)]
-pub fn print_json(
-    rankings: &[RankedItem],
-    names: &[String],
-    hashes: &[String],
-    edge_counts: &[usize],
-    total_judgements: usize,
-    loaded_judgements: Option<usize>,
-    judge_analytics: &[JudgeAnalytics],
-    panel_positional_bias: f64,
-    panel_positional_bias_ci: (f64, f64),
-    interim_rankings: Option<&[(usize, Vec<String>)]>,
-) {
-    println!(
-        "{}",
-        build_json(
-            rankings,
-            names,
-            hashes,
-            edge_counts,
-            total_judgements,
-            loaded_judgements,
-            judge_analytics,
-            panel_positional_bias,
-            panel_positional_bias_ci,
-            interim_rankings,
-        )
-    );
+pub fn print_json(out: &RankingOutput) {
+    println!("{}", to_json(out));
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn sample_rankings() -> (Vec<RankedItem>, Vec<String>) {
+    fn sample_output(total_judgements: usize, loaded_judgements: Option<usize>) -> RankingOutput {
         let rankings = vec![
             RankedItem {
                 item: 2,
@@ -436,43 +432,55 @@ mod tests {
                 upper_bound: 0.68,
             },
         ];
-        let names = vec![
-            "Apple".to_string(),
-            "Banana".to_string(),
-            "Mango".to_string(),
-        ];
-        (rankings, names)
-    }
-
-    fn sample_analytics() -> Vec<JudgeAnalytics> {
-        vec![JudgeAnalytics {
-            judge_id: 42,
-            positional_bias: 0.523,
-            positional_bias_ci: (0.481, 0.567),
-            num_edges: 30,
-        }]
-    }
-
-    fn sample_hashes() -> Vec<String> {
-        vec!["aaaaaaaaaaaaaaaa".into(), "bbbbbbbbbbbbbbbb".into(), "cccccccccccccccc".into()]
+        RankingOutput {
+            scoring: ScoringResult {
+                rankings,
+                selection_weights: None,
+                partition_log_confidence: None,
+                item_means: vec![0.75, 0.42, 1.58],
+                item_stds: vec![0.15, 0.14, 0.20],
+                judge_analytics: vec![JudgeAnalytics {
+                    judge_id: 42,
+                    positional_bias: 0.523,
+                    positional_bias_ci: (0.481, 0.567),
+                    num_edges: 30,
+                }],
+                panel_positional_bias: 0.523,
+                panel_positional_bias_ci: (0.481, 0.567),
+            },
+            item_names: vec!["Apple".to_string(), "Banana".to_string(), "Mango".to_string()],
+            item_hashes: vec![
+                "aaaaaaaaaaaaaaaa".into(),
+                "bbbbbbbbbbbbbbbb".into(),
+                "cccccccccccccccc".into(),
+            ],
+            edge_counts: vec![11, 22, 33],
+            total_judgements,
+            loaded_judgements,
+            confidence_level: 0.95,
+            judge_names: HashMap::new(),
+            judge_tokens: HashMap::new(),
+            judge_avg_wall_time: HashMap::new(),
+            interim_rankings: None,
+        }
     }
 
     #[test]
     fn test_json_items_carry_text_hash() {
-        let (rankings, names) = sample_rankings();
-        let json = build_json(&rankings, &names, &sample_hashes(), &[11, 22, 33], 30, None, &sample_analytics(), 0.523, (0.481, 0.567), None);
+        let out = sample_output(30, None);
+        let json = to_json(&out);
         let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
         let items = parsed["items"].as_array().unwrap();
         for it in items {
-            let idx = names.iter().position(|n| n == it["name"].as_str().unwrap()).unwrap();
-            assert_eq!(it["text_hash"], sample_hashes()[idx]);
+            let idx = out.item_names.iter().position(|n| n == it["name"].as_str().unwrap()).unwrap();
+            assert_eq!(it["text_hash"], out.item_hashes[idx]);
         }
     }
 
     #[test]
     fn test_json_contains_all_fields() {
-        let (rankings, names) = sample_rankings();
-        let json = build_json(&rankings, &names, &sample_hashes(), &[11, 22, 33], 30, None, &sample_analytics(), 0.523, (0.481, 0.567), None);
+        let out = sample_output(30, None);
+        let json = to_json(&out);
         let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
 
         assert_eq!(parsed["total_judgements"], 30);
@@ -484,8 +492,8 @@ mod tests {
 
     #[test]
     fn test_json_loaded_judgements() {
-        let (rankings, names) = sample_rankings();
-        let json = build_json(&rankings, &names, &sample_hashes(), &[11, 22, 33], 30, Some(24), &sample_analytics(), 0.523, (0.481, 0.567), None);
+        let out = sample_output(30, Some(24));
+        let json = to_json(&out);
         let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
 
         assert_eq!(parsed["total_judgements"], 30);
@@ -501,8 +509,8 @@ mod tests {
 
     #[test]
     fn test_json_items_structure() {
-        let (rankings, names) = sample_rankings();
-        let json = build_json(&rankings, &names, &sample_hashes(), &[11, 22, 33], 30, None, &sample_analytics(), 0.523, (0.481, 0.567), None);
+        let out = sample_output(30, None);
+        let json = to_json(&out);
         let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
 
         let items = parsed["items"].as_array().unwrap();
@@ -521,8 +529,8 @@ mod tests {
 
     #[test]
     fn test_json_is_valid() {
-        let (rankings, names) = sample_rankings();
-        let json = build_json(&rankings, &names, &sample_hashes(), &[11, 22, 33], 15, None, &sample_analytics(), 0.523, (0.481, 0.567), None);
+        let out = sample_output(15, None);
+        let json = to_json(&out);
         let _: serde_json::Value = serde_json::from_str(&json).unwrap();
     }
 

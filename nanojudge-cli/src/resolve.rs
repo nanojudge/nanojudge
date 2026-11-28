@@ -586,13 +586,8 @@ pub fn resolve_config(shared: &ConfigArgs, cfg: &config::NanojudgeConfig) -> cra
             }
         }
     }
-    let output_format = merge_opt(shared.output_format, cfg.output_format, "output-format").unwrap_or_else(|| {
-        if std::io::IsTerminal::is_terminal(&std::io::stdout()) {
-            OutputFormat::Table
-        } else {
-            OutputFormat::Json
-        }
-    });
+    let output_format = merge_opt(shared.output_format, cfg.output_format, "output-format")
+        .unwrap_or_else(crate::output::default_format);
     let verbose = merge_opt(shared.verbose, cfg.verbose, "verbose").unwrap_or(false);
     let save_failed_judgements = match (shared.save_failed_judgements.clone(), cfg.save_failed_judgements.clone()) {
         (Some(c), Some(f)) => {

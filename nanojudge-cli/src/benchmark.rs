@@ -42,8 +42,132 @@ struct SingleResult {
     response_text: String,
 }
 
+/// Per-judgement latency summary for a benchmark run.
+#[derive(Debug, Clone)]
+pub struct LatencyStats {
+    pub p50: f64,
+    pub p95: f64,
+    pub p99: f64,
+    pub min: f64,
+    pub max: f64,
+}
+
+/// Structured result of benchmarking one judge.
+#[derive(Debug, Clone)]
+pub struct BenchmarkReport {
+    pub display_name: String,
+    pub endpoint: String,
+    pub model: String,
+    pub num_pairs: usize,
+    pub total_judgements: usize,
+    pub wall_clock_secs: f64,
+    pub judgements_per_sec: f64,
+    pub successful_count: usize,
+    pub total_prompt_tokens: u64,
+    pub total_completion_tokens: u64,
+    pub latency: Option<LatencyStats>,
+    pub http_errors: usize,
+    pub parseable_count: usize,
+    pub non_http_count: usize,
+    pub avg_response_chars: f64,
+    pub verdict_counts: [usize; 2],
+    pub log_filename: String,
+}
+
+/// Print a benchmark report to stdout.
+pub fn print_report(report: &BenchmarkReport) {
+    let total_tokens = report.total_prompt_tokens + report.total_completion_tokens;
+    let has_token_data = total_tokens > 0;
+    let verdict_labels = ["Option 1", "Option 2"];
+    let option1_wins = report.verdict_counts[0];
+    let verdicts_with_winner = report.verdict_counts[0] + report.verdict_counts[1];
+
+    println!("── Throughput ──────────────────────────────────");
+    println!("Judgements/sec:       {:.2}", report.judgements_per_sec);
+    if has_token_data {
+        println!("Output tokens/sec:     {:.0}", report.total_completion_tokens as f64 / report.wall_clock_secs);
+        println!("Avg input tokens:      {:.0}", report.total_prompt_tokens as f64 / report.successful_count.max(1) as f64);
+        println!("Avg output tokens:     {:.0}", report.total_completion_tokens as f64 / report.successful_count.max(1) as f64);
+    } else {
+        println!("(Token data not available from this endpoint)");
+    }
+
+    println!();
+    println!("── Latency (per judgement) ────────────────────");
+    if let Some(ref latency) = report.latency {
+        println!("P50:    {:.2}s", latency.p50);
+        println!("P95:    {:.2}s", latency.p95);
+        println!("P99:    {:.2}s", latency.p99);
+        println!("Min:    {:.2}s    Max: {:.2}s", latency.min, latency.max);
+    } else {
+        println!("(No successful judgements)");
+    }
+
+    println!();
+    println!("── Reliability ─────────────────────────────────");
+    if report.non_http_count > 0 {
+        println!(
+            "Verdict parse rate:    {:.1}%  ({}/{})",
+            report.parseable_count as f64 / report.non_http_count as f64 * 100.0,
+            report.parseable_count,
+            report.non_http_count,
+        );
+    }
+    println!(
+        "HTTP error rate:       {:.1}%  ({}/{})",
+        report.http_errors as f64 / report.total_judgements as f64 * 100.0,
+        report.http_errors,
+        report.total_judgements,
+    );
+    println!("Avg response length:   {:.0} chars", report.avg_response_chars);
+
+    println!();
+    println!("── Verdict Distribution ────────────────────────");
+    let total_verdicts: usize = report.verdict_counts.iter().sum();
+    if total_verdicts > 0 {
+        for (i, label) in verdict_labels.iter().enumerate() {
+            let pct = report.verdict_counts[i] as f64 / total_verdicts as f64 * 100.0;
+            println!("{}: {:>5.1}%  ({})", label, pct, report.verdict_counts[i]);
+        }
+    } else {
+        println!("(No parseable verdicts)");
+    }
+
+    println!();
+    println!("── Positional Bias ─────────────────────────────");
+    if verdicts_with_winner > 0 {
+        println!("Option 1 win rate:     {:.1}%", option1_wins as f64 / verdicts_with_winner as f64 * 100.0);
+    } else {
+        println!("(Insufficient data for positional bias)");
+    }
+
+    if has_token_data {
+        println!();
+        println!("── Cost Estimate ───────────────────────────────");
+        println!(
+            "Tokens used:           {:>7}  ({} in + {} out)",
+            total_tokens, report.total_prompt_tokens, report.total_completion_tokens,
+        );
+        if report.successful_count > 1 {
+            let tokens_per_judgement = total_tokens as f64 / report.successful_count as f64;
+            println!("At this rate, 1000 judgements ≈ {:.0}K tokens", tokens_per_judgement * 1000.0 / 1000.0);
+        }
+    }
+
+    println!();
+    println!("Detailed log written to: {}", report.log_filename);
+}
+
 /// Entrypoint for the `benchmark` command.
-pub async fn run(args: BenchmarkArgs) -> crate::Result<()> {
+pub async fn run(args: BenchmarkArgs) -> crate::Result<Vec<BenchmarkReport>> {
+    run_with(args, |_| {}).await
+}
+
+/// Run the `benchmark` command, invoking `on_report` as each judge finishes.
+pub async fn run_with(
+    args: BenchmarkArgs,
+    mut on_report: impl FnMut(&BenchmarkReport),
+) -> crate::Result<Vec<BenchmarkReport>> {
     let (config_path, cfg) = config::load_config(args.config.as_deref())?;
     let resolved = resolve_config(&args.cfg, &cfg)?;
     if resolved.lineup_size != 2 {
@@ -63,6 +187,7 @@ pub async fn run(args: BenchmarkArgs) -> crate::Result<()> {
     }
 
     let template = &resolved.prompt_template;
+    let mut reports = Vec::with_capacity(judges.len());
 
     for judge in &judges {
         let llm_config = LlmConfig {
@@ -81,7 +206,7 @@ pub async fn run(args: BenchmarkArgs) -> crate::Result<()> {
             request_timeout: judge.request_timeout,
         };
 
-        run_benchmark(
+        let report = run_benchmark(
             &llm_config,
             &judge.display_name,
             args.num_pairs,
@@ -91,13 +216,15 @@ pub async fn run(args: BenchmarkArgs) -> crate::Result<()> {
             resolved.seed,
         )
         .await?;
+        on_report(&report);
+        reports.push(report);
 
         if judges.len() > 1 {
             eprintln!();
         }
     }
 
-    Ok(())
+    Ok(reports)
 }
 
 /// Run the benchmark for a single judge.
@@ -109,7 +236,7 @@ pub async fn run_benchmark(
     min_logprob_coverage: f64,
     template: &str,
     run_seed: Option<u64>,
-) -> crate::Result<()> {
+) -> crate::Result<BenchmarkReport> {
     let questions: Vec<BenchmarkQuestion> = serde_json::from_str(BENCHMARK_QUESTIONS)
         .expect("embedded benchmark_questions.json is valid JSON");
 
@@ -302,21 +429,30 @@ pub async fn run_benchmark(
 
     // Throughput
     let successful: Vec<&&SingleResult> = all_results.iter().filter(|r| !r.http_error).collect();
+    let successful_count = successful.len();
     let total_prompt_tokens: u64 = successful.iter().map(|r| r.prompt_tokens).sum();
     let total_completion_tokens: u64 = successful.iter().map(|r| r.completion_tokens).sum();
-    let total_tokens = total_prompt_tokens + total_completion_tokens;
-    let has_token_data = total_tokens > 0;
 
-    let judgements_per_sec = successful.len() as f64 / wall_clock_secs;
+    let judgements_per_sec = successful_count as f64 / wall_clock_secs;
 
     // Latency
     let mut latencies: Vec<f64> = successful.iter().map(|r| r.latency_secs).collect();
     latencies.sort_by(|a, b| a.partial_cmp(b).unwrap());
 
     let percentile = |sorted: &[f64], p: f64| -> f64 {
-        if sorted.is_empty() { return 0.0; }
         let idx = (p * (sorted.len() - 1) as f64).round() as usize;
         sorted[idx.min(sorted.len() - 1)]
+    };
+    let latency = if !latencies.is_empty() {
+        Some(LatencyStats {
+            p50: percentile(&latencies, 0.50),
+            p95: percentile(&latencies, 0.95),
+            p99: percentile(&latencies, 0.99),
+            min: *latencies.first().unwrap(),
+            max: *latencies.last().unwrap(),
+        })
+    } else {
+        None
     };
 
     // Reliability
@@ -325,15 +461,12 @@ pub async fn run_benchmark(
     let non_http_count = all_results.len() - http_errors;
 
     // Verdict distribution (Option 1 / Option 2)
-    let verdict_labels = ["Option 1", "Option 2"];
     let mut verdict_counts = [0usize; 2];
     for r in &all_results {
         if let Some(option) = r.verdict_option {
             verdict_counts[option] += 1;
         }
     }
-    let option1_wins = verdict_counts[0];
-    let verdicts_with_winner = verdict_counts[0] + verdict_counts[1];
 
     // Average response length
     let avg_response_chars: f64 = if !successful.is_empty() {
@@ -341,67 +474,6 @@ pub async fn run_benchmark(
     } else {
         0.0
     };
-
-    // --- Print report ---
-
-    println!("── Throughput ──────────────────────────────────");
-    println!("Judgements/sec:       {:.2}", judgements_per_sec);
-    if has_token_data {
-        println!("Output tokens/sec:     {:.0}", total_completion_tokens as f64 / wall_clock_secs);
-        println!("Avg input tokens:      {:.0}", total_prompt_tokens as f64 / successful.len().max(1) as f64);
-        println!("Avg output tokens:     {:.0}", total_completion_tokens as f64 / successful.len().max(1) as f64);
-    } else {
-        println!("(Token data not available from this endpoint)");
-    }
-
-    println!();
-    println!("── Latency (per judgement) ────────────────────");
-    if !latencies.is_empty() {
-        println!("P50:    {:.2}s", percentile(&latencies, 0.50));
-        println!("P95:    {:.2}s", percentile(&latencies, 0.95));
-        println!("P99:    {:.2}s", percentile(&latencies, 0.99));
-        println!("Min:    {:.2}s    Max: {:.2}s", latencies.first().unwrap(), latencies.last().unwrap());
-    } else {
-        println!("(No successful judgements)");
-    }
-
-    println!();
-    println!("── Reliability ─────────────────────────────────");
-    if non_http_count > 0 {
-        println!("Verdict parse rate:    {:.1}%  ({}/{})", parseable_count as f64 / non_http_count as f64 * 100.0, parseable_count, non_http_count);
-    }
-    println!("HTTP error rate:       {:.1}%  ({}/{})", http_errors as f64 / all_results.len() as f64 * 100.0, http_errors, all_results.len());
-    println!("Avg response length:   {:.0} chars", avg_response_chars);
-
-    println!();
-    println!("── Verdict Distribution ────────────────────────");
-    let total_verdicts: usize = verdict_counts.iter().sum();
-    if total_verdicts > 0 {
-        for (i, label) in verdict_labels.iter().enumerate() {
-            let pct = verdict_counts[i] as f64 / total_verdicts as f64 * 100.0;
-            println!("{}: {:>5.1}%  ({})", label, pct, verdict_counts[i]);
-        }
-    } else {
-        println!("(No parseable verdicts)");
-    }
-
-    println!();
-    println!("── Positional Bias ─────────────────────────────");
-    if verdicts_with_winner > 0 {
-        println!("Option 1 win rate:     {:.1}%", option1_wins as f64 / verdicts_with_winner as f64 * 100.0);
-    } else {
-        println!("(Insufficient data for positional bias)");
-    }
-
-    if has_token_data {
-        println!();
-        println!("── Cost Estimate ───────────────────────────────");
-        println!("Tokens used:           {:>7}  ({} in + {} out)", total_tokens, total_prompt_tokens, total_completion_tokens);
-        if successful.len() > 1 {
-            let tokens_per_judgement = total_tokens as f64 / successful.len() as f64;
-            println!("At this rate, 1000 judgements ≈ {:.0}K tokens", tokens_per_judgement * 1000.0 / 1000.0);
-        }
-    }
 
     // --- Write detailed log file ---
     let timestamp = {
@@ -478,7 +550,23 @@ pub async fn run_benchmark(
         }
     }
 
-    println!();
-    println!("Detailed log written to: {}", log_filename);
-    Ok(())
+    Ok(BenchmarkReport {
+        display_name: display_name.to_string(),
+        endpoint: llm_config.endpoint.clone(),
+        model: llm_config.model.clone(),
+        num_pairs,
+        total_judgements: all_results.len(),
+        wall_clock_secs,
+        judgements_per_sec,
+        successful_count,
+        total_prompt_tokens,
+        total_completion_tokens,
+        latency,
+        http_errors,
+        parseable_count,
+        non_http_count,
+        avg_response_chars,
+        verdict_counts,
+        log_filename,
+    })
 }

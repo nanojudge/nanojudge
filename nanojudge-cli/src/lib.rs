@@ -12,7 +12,10 @@ pub mod rank;
 pub mod resolve;
 pub mod score;
 
+pub use benchmark::{BenchmarkReport, LatencyStats};
 pub use error::{Error, Result};
+pub use output::RankingOutput;
+pub use probe::JudgeProbeResult;
 
 pub(crate) const DEFAULT_BENCHMARK_PAIRS: &str = "100";
 

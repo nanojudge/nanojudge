@@ -47,7 +47,15 @@ pub fn probes_path() -> crate::Result<PathBuf> {
     Ok(data_dir.join("nanojudge").join("probes.jsonl"))
 }
 
-pub async fn run(args: ProbeArgs) -> crate::Result<()> {
+/// Result of probing a single configured judge.
+#[derive(Debug, Clone)]
+pub struct JudgeProbeResult {
+    pub display_name: String,
+    pub record: Value,
+    pub problems: Vec<String>,
+}
+
+pub async fn run(args: ProbeArgs) -> crate::Result<Vec<JudgeProbeResult>> {
     let (config_path, cfg) = config::load_config(args.config.as_deref())?;
     let resolved = resolve_config(&args.cfg, &cfg)?;
     let judges = resolve_judges(&args.cfg, &cfg, &config_path, resolved.deliberation_enabled, resolved.lineup_size)?;
@@ -56,6 +64,7 @@ pub async fn run(args: ProbeArgs) -> crate::Result<()> {
     eprintln!("Probe records: {}", path.display());
 
     let client = Client::new();
+    let mut results = Vec::with_capacity(judges.len());
     for judge in &judges {
         eprintln!("Probing {}", judge.display_name);
         let record = probe_judge(&client, judge).await?;
@@ -64,12 +73,17 @@ pub async fn run(args: ProbeArgs) -> crate::Result<()> {
         if problems.is_empty() {
             eprintln!("  OK: runs can use this judge");
         } else {
-            for p in problems {
+            for p in &problems {
                 eprintln!("  Runs will refuse this judge: {p}");
             }
         }
+        results.push(JudgeProbeResult {
+            display_name: judge.display_name.clone(),
+            record,
+            problems,
+        });
     }
-    Ok(())
+    Ok(results)
 }
 
 /// Check each judge against its latest probe, probing any judge that has

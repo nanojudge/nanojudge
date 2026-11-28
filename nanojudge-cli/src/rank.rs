@@ -20,7 +20,7 @@ use crate::config;
 use crate::Error;
 use crate::items::load_items;
 use crate::llm::{FatalSlot, JudgementError, LineupJudgementResult, LlmConfig, PairJudgementResult, judge_pair, judge_lineup};
-use crate::output;
+use crate::output::{self, RankingOutput};
 use crate::parse::ParseResult;
 use crate::prompt::{build_lineup_prompt, build_prompt};
 use crate::resolve::{resolve_config, resolve_judgements_per_item, resolve_judges, ResolvedConfig, ResolvedJudge};
@@ -1088,8 +1088,8 @@ struct RunTotals {
 }
 
 /// Return `Error::NoResults` if nothing usable was collected, otherwise run the
-/// final scoring, print the failure summary and print the ranking. `noun` as in
-/// `setup_run`.
+/// final scoring, print the failure summary and return the structured ranking.
+/// `noun` as in `setup_run`.
 #[allow(clippy::too_many_arguments)]
 fn finish_run(
     resolved: &ResolvedConfig,
@@ -1103,8 +1103,8 @@ fn finish_run(
     totals: RunTotals,
     early_stop: bool,
     cancelled: bool,
-    interim_rankings: &[(usize, Vec<String>)],
-) -> crate::Result<()> {
+    interim_rankings: Vec<(usize, Vec<String>)>,
+) -> crate::Result<RankingOutput> {
     let RunTotals {
         total_judgements,
         loaded_judgements,
@@ -1201,39 +1201,23 @@ fn finish_run(
         })
         .collect();
 
-    match resolved.output_format {
-        OutputFormat::Json => output::print_json(
-            &scoring_result.rankings,
-            titles,
-            text_hashes,
-            &engine.edge_counts,
-            shown_judgements,
-            loaded_judgements,
-            &scoring_result.judge_analytics,
-            scoring_result.panel_positional_bias,
-            scoring_result.panel_positional_bias_ci,
-            if resolved.emit_interim_rankings {
-                Some(interim_rankings)
-            } else {
-                None
-            },
-        ),
-        OutputFormat::Table => output::print_table(
-            &scoring_result.rankings,
-            titles,
-            &engine.edge_counts,
-            shown_judgements,
-            loaded_judgements,
-            resolved.confidence_level,
-            &scoring_result.judge_analytics,
-            &judge_names,
-            &judge_tokens,
-            &judge_avg_wall_time,
-            scoring_result.panel_positional_bias,
-            scoring_result.panel_positional_bias_ci,
-        ),
-    }
-    Ok(())
+    Ok(RankingOutput {
+        scoring: scoring_result,
+        item_names: titles.to_vec(),
+        item_hashes: text_hashes.to_vec(),
+        edge_counts: engine.edge_counts.clone(),
+        total_judgements: shown_judgements,
+        loaded_judgements,
+        confidence_level: resolved.confidence_level,
+        judge_names,
+        judge_tokens,
+        judge_avg_wall_time,
+        interim_rankings: if resolved.emit_interim_rankings {
+            Some(interim_rankings)
+        } else {
+            None
+        },
+    })
 }
 
 /// Validated, probed, and seeded run state ready to execute its refit loop.
@@ -1259,12 +1243,17 @@ pub async fn prepare(args: RankArgs) -> crate::Result<PreparedRun> {
     Ok(PreparedRun { resolved, setup })
 }
 
-pub async fn run(args: RankArgs, cancelled: Arc<AtomicBool>) -> crate::Result<()> {
+pub async fn run(args: RankArgs, cancelled: Arc<AtomicBool>) -> crate::Result<RankingOutput> {
     prepare(args).await?.run(cancelled).await
 }
 
 impl PreparedRun {
-    pub async fn run(self, cancelled: Arc<AtomicBool>) -> crate::Result<()> {
+    /// Output format resolved from CLI flags, config file, and terminal detection.
+    pub fn output_format(&self) -> OutputFormat {
+        self.resolved.output_format
+    }
+
+    pub async fn run(self, cancelled: Arc<AtomicBool>) -> crate::Result<RankingOutput> {
         let PreparedRun { resolved, setup } = self;
         if resolved.lineup_size >= 3 {
             run_lineup_judgements(resolved, setup, cancelled).await
@@ -1278,7 +1267,7 @@ async fn run_pairwise_judgements(
     resolved: ResolvedConfig,
     setup: RunSetup,
     cancelled: Arc<AtomicBool>,
-) -> crate::Result<()> {
+) -> crate::Result<RankingOutput> {
     let RunSetup {
         judges,
         logprobs_mode,
@@ -1708,7 +1697,7 @@ async fn run_pairwise_judgements(
     finish_run(
         &resolved, "judgements", &judges, &judge_info, &item_ids, &titles, &text_hashes, &engine,
         RunTotals { total_judgements, loaded_judgements, judgements_done, reused_judgements, total_retries, failed_http, failed_parse, judge_stats },
-        early_stop, cancelled.load(Ordering::Relaxed), &interim_rankings,
+        early_stop, cancelled.load(Ordering::Relaxed), interim_rankings,
     )
 }
 
@@ -1722,7 +1711,7 @@ async fn run_lineup_judgements(
     resolved: ResolvedConfig,
     setup: RunSetup,
     cancelled: Arc<AtomicBool>,
-) -> crate::Result<()> {
+) -> crate::Result<RankingOutput> {
     let resolved = &resolved;
     let RunSetup {
         judges,
@@ -2152,7 +2141,7 @@ async fn run_lineup_judgements(
     finish_run(
         resolved, "lineup judgements", &judges, &judge_info, &item_ids, &titles, &text_hashes, &engine,
         RunTotals { total_judgements, loaded_judgements, judgements_done, reused_judgements, total_retries, failed_http, failed_parse, judge_stats },
-        early_stop, cancelled.load(Ordering::Relaxed), &interim_rankings,
+        early_stop, cancelled.load(Ordering::Relaxed), interim_rankings,
     )
 }
 
@@ -2833,5 +2822,79 @@ mod tests {
         let err = run(rank_args, cancelled).await.unwrap_err();
         assert!(matches!(err, Error::NoResults(_)), "expected Error::NoResults, got {err:?}");
         assert!(err.to_string().contains("No results to score"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn test_rank_run_returns_structured_ranking_output() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = tokio::spawn(async move {
+            while let Ok((mut stream, _)) = listener.accept().await {
+                tokio::spawn(async move {
+                    let mut buf = [0u8; 8192];
+                    let n = stream.read(&mut buf).await.unwrap_or(0);
+                    let req = String::from_utf8_lossy(&buf[..n]);
+                    // Always pick whichever option contains "winner".
+                    let opt1_wins = req
+                        .find("Option 1:")
+                        .and_then(|o1| req.find("Option 2:").map(|o2| req[o1..o2].contains("winner")))
+                        .unwrap_or(true);
+                    let verdict = if opt1_wins { "Verdict: Option 1" } else { "Verdict: Option 2" };
+                    let body = serde_json::json!({
+                        "choices": [{"message": {"content": verdict}, "finish_reason": "stop"}],
+                        "usage": {"prompt_tokens": 10, "completion_tokens": 5}
+                    })
+                    .to_string();
+                    let resp = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                        body.len(),
+                        body
+                    );
+                    let _ = stream.write_all(resp.as_bytes()).await;
+                });
+            }
+        });
+
+        let mut cfg_file = tempfile::NamedTempFile::new().unwrap();
+        writeln!(
+            cfg_file,
+            "logprobs = false\n\
+             deliberation_enabled = false\n\
+             judgements_per_item = 2\n\
+             \n\
+             [[judge]]\n\
+             endpoint = \"http://127.0.0.1:{port}\"\n\
+             model = \"mock-judge\"\n\
+             temperature = 0.0\n\
+             reasoning_effort = \"none\"\n\
+             concurrency = 2\n"
+        ).unwrap();
+
+        let args = <crate::args::Cli as clap::Parser>::parse_from([
+            "nanojudge",
+            "rank",
+            "--config", cfg_file.path().to_str().unwrap(),
+            "--criterion", "Which is better?",
+            "--item", "winner",
+            "--item", "loser",
+            "--skip-probe",
+        ]);
+        let crate::args::Commands::Rank(rank_args) = args.command else {
+            unreachable!();
+        };
+
+        let out = run(rank_args, Arc::new(AtomicBool::new(false))).await.unwrap();
+        server.abort();
+
+        assert_eq!(out.total_judgements, 2);
+        assert_eq!(out.scoring.rankings.len(), 2);
+        let top_name = &out.item_names[out.scoring.rankings[0].item as usize];
+        assert_eq!(top_name, "winner");
+        // Verify JSON rendering works directly on the returned struct.
+        let parsed: serde_json::Value = serde_json::from_str(&output::to_json(&out)).unwrap();
+        assert_eq!(parsed["items"][0]["name"], "winner");
     }
 }

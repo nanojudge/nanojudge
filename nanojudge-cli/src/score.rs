@@ -7,9 +7,9 @@ use nanojudge_core::{
     run_scoring, judge_hash, lineup_verdict_to_edges, Edge, JudgeInfo, LineupVerdict, ScoringOptions,
 };
 
-use crate::args::{OutputFormat, ScoreArgs};
+use crate::args::ScoreArgs;
 use crate::Error;
-use crate::output;
+use crate::output::RankingOutput;
 use crate::rank::{temper_edges_in_place, temper_verdict};
 use crate::resolve::{DEFAULT_VERDICT_TEMPERATURE_DELIBERATION, DEFAULT_VERDICT_TEMPERATURE_NO_DELIBERATION};
 use crate::{
@@ -17,7 +17,7 @@ use crate::{
     DEFAULT_REGULARIZATION_STRENGTH,
 };
 
-pub fn run(args: ScoreArgs) -> crate::Result<()> {
+pub fn run(args: ScoreArgs) -> crate::Result<RankingOutput> {
     let path = &args.file;
     if !path.exists() {
         return Err(Error::Io(format!("File not found: {}", path.display())));
@@ -72,14 +72,6 @@ pub fn run(args: ScoreArgs) -> crate::Result<()> {
         }
         per_judge_temps.insert(key.to_string(), value);
     }
-
-    let output_format = args.output_format.unwrap_or_else(|| {
-        if std::io::IsTerminal::is_terminal(&std::io::stdout()) {
-            OutputFormat::Table
-        } else {
-            OutputFormat::Json
-        }
-    });
 
     let (edges, _, item_names, judge_ids, judge_display_names, judge_flag_keys, total_judgements, logprobs_mode, judge_temps_used, item_hashes, _) =
         load_edges(path, args.verdict_temperature, &per_judge_temps, None)?;
@@ -140,42 +132,24 @@ pub fn run(args: ScoreArgs) -> crate::Result<()> {
         edge_counts[e.item2 as usize] += 1;
     }
 
-    let judge_name_map: HashMap<u64, String> = judge_ids.iter()
+    let judge_names: HashMap<u64, String> = judge_ids.iter()
         .zip(judge_display_names.iter())
         .map(|(&id, name)| (id, name.clone()))
         .collect();
-    let empty_tokens: HashMap<u64, (u64, u64)> = HashMap::new();
-    let empty_wall_time: HashMap<u64, f64> = HashMap::new();
 
-    match output_format {
-        OutputFormat::Json => output::print_json(
-            &scoring_result.rankings,
-            &item_names,
-            &item_hashes,
-            &edge_counts,
-            total_judgements,
-            None,
-            &scoring_result.judge_analytics,
-            scoring_result.panel_positional_bias,
-            scoring_result.panel_positional_bias_ci,
-            None,
-        ),
-        OutputFormat::Table => output::print_table(
-            &scoring_result.rankings,
-            &item_names,
-            &edge_counts,
-            total_judgements,
-            None,
-            confidence_level,
-            &scoring_result.judge_analytics,
-            &judge_name_map,
-            &empty_tokens,
-            &empty_wall_time,
-            scoring_result.panel_positional_bias,
-            scoring_result.panel_positional_bias_ci,
-        ),
-    }
-    Ok(())
+    Ok(RankingOutput {
+        scoring: scoring_result,
+        item_names,
+        item_hashes,
+        edge_counts,
+        total_judgements,
+        loaded_judgements: None,
+        confidence_level,
+        judge_names,
+        judge_tokens: HashMap::new(),
+        judge_avg_wall_time: HashMap::new(),
+        interim_rankings: None,
+    })
 }
 
 fn resolve_edge_temperature(
@@ -882,5 +856,33 @@ mod tests {
         let j2 = judge_hash("http://e2", "m2");
         assert_eq!(temps[&j1], 1.0);
         assert_eq!(temps[&j2], 3.0);
+    }
+
+    #[test]
+    fn test_score_run_returns_ranking_output() {
+        let f = write_jsonl(&[
+            r#"{"refit":0,"item1":"A","item2":"B","item1_text_hash":"34482beefb0cc992","item2_text_hash":"b0e6004ac03e61d2","category_probs":[0.9,0.1],"judge_model":"m","judge_endpoint":"http://e","logprobs":true,"deliberation":false}"#,
+            r#"{"refit":0,"item1":"B","item2":"C","item1_text_hash":"b0e6004ac03e61d2","item2_text_hash":"9188835ed6d49e09","category_probs":[0.9,0.1],"judge_model":"m","judge_endpoint":"http://e","logprobs":true,"deliberation":false}"#,
+        ]);
+        let cli = <crate::args::Cli as clap::Parser>::parse_from([
+            "nanojudge",
+            "score",
+            f.path().to_str().unwrap(),
+        ]);
+        let crate::args::Commands::Score(score_args) = cli.command else {
+            unreachable!();
+        };
+
+        let out = run(score_args).unwrap();
+        assert_eq!(out.total_judgements, 2);
+        assert_eq!(out.loaded_judgements, None);
+        assert_eq!(out.scoring.rankings.len(), 3);
+        let ordered_names: Vec<&str> = out
+            .scoring
+            .rankings
+            .iter()
+            .map(|r| out.item_names[r.item as usize].as_str())
+            .collect();
+        assert_eq!(ordered_names, vec!["A", "B", "C"]);
     }
 }
