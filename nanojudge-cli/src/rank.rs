@@ -15,16 +15,19 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::sync::OnceCell;
 
-use crate::args::{OutputFormat, RankArgs};
+use crate::args::{ConfigArgs, OutputFormat, RankArgs};
 use crate::config;
 use crate::Error;
-use crate::items::load_items;
+use crate::items::{Item, load_items, validate_items};
 use crate::llm::{FatalSlot, JudgementError, LineupJudgementResult, LlmConfig, PairJudgementResult, judge_pair, judge_lineup};
 use crate::output::{self, RankingOutput};
 use crate::parse::ParseResult;
 use crate::prompt::{build_lineup_prompt, build_prompt};
 use crate::report::Reporter;
-use crate::resolve::{resolve_config, resolve_judgements_per_item, resolve_judges, ResolvedConfig, ResolvedJudge};
+use crate::resolve::{
+    resolve_config, resolve_config_with_template, resolve_judgements_per_item, resolve_judges,
+    ResolvedConfig, ResolvedJudge,
+};
 
 #[derive(Default)]
 struct JudgeStats {
@@ -643,34 +646,39 @@ struct RunSetup {
     reporter: Arc<dyn Reporter>,
 }
 
+struct SetupInputs {
+    judges: Vec<ResolvedJudge>,
+    titles: Vec<String>,
+    texts: Vec<String>,
+    criteria: Vec<String>,
+    load_judgements: Option<PathBuf>,
+    skip_probe: bool,
+}
+
 /// Build the shared run state. All validation happens here, before any LLM
 /// spend. `noun` names one judgement in messages ("judgements" or "lineup
 /// judgements").
 async fn setup_run(
-    args: &RankArgs,
-    config_path: &Path,
-    cfg: &config::NanojudgeConfig,
+    inputs: SetupInputs,
     resolved: &ResolvedConfig,
     judgements_per_item: usize,
     noun: &str,
     reporter: Arc<dyn Reporter>,
 ) -> crate::Result<RunSetup> {
-    // Resolve judges from [[judge]] blocks
-    let judges = resolve_judges(
-        &args.cfg,
-        cfg,
-        config_path,
-        resolved.deliberation_enabled,
-        resolved.lineup_size,
-        reporter.as_ref(),
-    )?;
+    let SetupInputs {
+        judges,
+        titles,
+        texts,
+        criteria,
+        load_judgements,
+        skip_probe,
+    } = inputs;
     let logprobs_mode = judges[0].logprobs;
 
     if !logprobs_mode {
         reporter.line("Warning: Running without logprobs. Requires more judgements to reach equivalent accuracy as when using logprobs.");
     }
 
-    let (titles, texts) = load_items(args, reporter.as_ref())?;
     let (titles, texts, text_hashes) = sort_and_dedup_items(titles, texts)?;
 
     let item_ids: Vec<i64> = (0..texts.len() as i64).collect();
@@ -739,22 +747,6 @@ async fn setup_run(
     let judge_min_logprob_coverages: Vec<f64> = judges.iter().map(|j| j.min_logprob_coverage).collect();
     let judge_verdict_temperatures: Vec<f64> = judges.iter().map(|j| j.verdict_temperature).collect();
 
-    let criteria: Vec<String> = if let Some(ref path) = args.criterion_file {
-        let content = std::fs::read_to_string(path)
-            .map_err(|e| Error::Io(format!("Failed to read criterion file {}: {e}", path.display())))?;
-        let parts = parse_criteria(&content);
-        if parts.is_empty() {
-            return Err(Error::Input(format!("No criteria found in {}", path.display())));
-        }
-        parts
-    } else {
-        let criterion = args
-            .criterion
-            .clone()
-            .ok_or_else(|| Error::Config("Either --criterion or --criterion-file is required".into()))?;
-        vec![criterion]
-    };
-
     let template = Arc::new(resolved.prompt_template.clone());
 
     if template.contains("$name1") || template.contains("$name2") {
@@ -771,7 +763,7 @@ async fn setup_run(
     }
 
     // Weight-0 judges only contribute prior data; they send no requests.
-    if !args.skip_probe {
+    if !skip_probe {
         crate::probe::check_judges(judges.iter().filter(|j| j.weight > 0.0), reporter.as_ref()).await?;
     }
 
@@ -865,7 +857,7 @@ async fn setup_run(
     // the very first selection pass and the final ranking. Kept out of the judge
     // balancer's ledger — this only touches the engine. The lineup-size guard in
     // load_edges rejects any file whose judgements are not this run's lineup size.
-    let (loaded_judgements, loaded_reuse) = if let Some(ref load_path) = args.load_judgements {
+    let (loaded_judgements, loaded_reuse) = if let Some(ref load_path) = load_judgements {
         let per_judge_verdict_temps: HashMap<String, f64> = judges
             .iter()
             .map(|j| (format!("{}@{}", j.model, j.endpoint), j.verdict_temperature))
@@ -1244,12 +1236,48 @@ fn finish_run(
     })
 }
 
+/// Programmatic inputs for a ranking run (no CLI args, config file, or stdin
+/// required).
+///
+/// `config` can be built directly in Rust, parsed from a TOML string via
+/// [`config::parse_config`], or loaded from disk via [`config::load_config`].
+#[derive(Default)]
+pub struct RankRequest {
+    /// Items to rank (at least 2, with distinct text).
+    pub items: Vec<Item>,
+    /// One or more criteria to judge items by (balanced across comparisons when
+    /// multiple are given).
+    pub criteria: Vec<String>,
+    /// Ranking and judge configuration.
+    pub config: config::NanojudgeConfig,
+    /// Fallback bearer token for judges without `api_key` or `api_key_env`
+    /// (falls back to `OPENAI_API_KEY` if unset).
+    pub api_key: Option<String>,
+    /// Optional raw prompt template string; overrides `config.prompt_template`
+    /// without reading from disk.
+    pub prompt_template: Option<String>,
+    /// Optional JSONL file of prior successful judgements to seed before
+    /// collecting new ones.
+    pub load_judgements: Option<PathBuf>,
+    /// Skip endpoint probing before sending ranking requests.
+    pub skip_probe: bool,
+}
+
 /// Validated, probed, and seeded run state ready to execute its refit loop.
-/// Built by [`prepare`], so callers (like the CLI) can install cancellation
-/// handlers only once setup, item loading, and endpoint probing have finished.
+/// Built by [`prepare`] or [`prepare_request`], so callers (like the CLI) can
+/// install cancellation handlers only once setup, item loading, and endpoint
+/// probing have finished.
 pub struct PreparedRun {
     resolved: ResolvedConfig,
     setup: RunSetup,
+}
+
+fn judgement_noun(lineup_size: usize) -> &'static str {
+    if lineup_size >= 3 {
+        "lineup judgements"
+    } else {
+        "judgements"
+    }
 }
 
 /// Validate config, load items, probe judges, open save files, and seed any
@@ -1258,12 +1286,90 @@ pub async fn prepare(args: RankArgs, reporter: Arc<dyn Reporter>) -> crate::Resu
     let (config_path, cfg) = config::load_config(args.config.as_deref())?;
     let resolved = resolve_config(&args.cfg, &cfg, reporter.as_ref())?;
     let judgements_per_item = resolve_judgements_per_item(&args.cfg, &cfg, reporter.as_ref())?;
-    let noun = if resolved.lineup_size >= 3 {
-        "lineup judgements"
+    let judges = resolve_judges(
+        &args.cfg,
+        &cfg,
+        Some(&config_path),
+        resolved.deliberation_enabled,
+        resolved.lineup_size,
+        reporter.as_ref(),
+    )?;
+    let (titles, texts) = load_items(&args, reporter.as_ref())?;
+    let criteria: Vec<String> = if let Some(ref path) = args.criterion_file {
+        let content = std::fs::read_to_string(path)
+            .map_err(|e| Error::Io(format!("Failed to read criterion file {}: {e}", path.display())))?;
+        let parts = parse_criteria(&content);
+        if parts.is_empty() {
+            return Err(Error::Input(format!("No criteria found in {}", path.display())));
+        }
+        parts
     } else {
-        "judgements"
+        let criterion = args
+            .criterion
+            .clone()
+            .ok_or_else(|| Error::Config("Either --criterion or --criterion-file is required".into()))?;
+        vec![criterion]
     };
-    let setup = setup_run(&args, &config_path, &cfg, &resolved, judgements_per_item, noun, reporter).await?;
+    let inputs = SetupInputs {
+        judges,
+        titles,
+        texts,
+        criteria,
+        load_judgements: args.load_judgements,
+        skip_probe: args.skip_probe,
+    };
+    let noun = judgement_noun(resolved.lineup_size);
+    let setup = setup_run(inputs, &resolved, judgements_per_item, noun, reporter).await?;
+    Ok(PreparedRun { resolved, setup })
+}
+
+/// Programmatic equivalent of [`prepare`]: takes in-memory items, criteria, and
+/// [`config::NanojudgeConfig`] directly without reading `stdin` or a config file.
+pub async fn prepare_request(
+    req: RankRequest,
+    reporter: Arc<dyn Reporter>,
+) -> crate::Result<PreparedRun> {
+    let cli = ConfigArgs {
+        api_key: req.api_key,
+        ..Default::default()
+    };
+    let resolved = resolve_config_with_template(
+        &cli,
+        &req.config,
+        req.prompt_template.as_deref(),
+        reporter.as_ref(),
+    )?;
+    let judgements_per_item = resolve_judgements_per_item(&cli, &req.config, reporter.as_ref())?;
+    let judges = resolve_judges(
+        &cli,
+        &req.config,
+        None,
+        resolved.deliberation_enabled,
+        resolved.lineup_size,
+        reporter.as_ref(),
+    )?;
+    let (titles, texts) = validate_items(req.items)?;
+    if req.criteria.is_empty() {
+        return Err(Error::Config("At least one criterion is required".into()));
+    }
+    let mut criteria = Vec::with_capacity(req.criteria.len());
+    for c in req.criteria {
+        let trimmed = c.trim();
+        if trimmed.is_empty() {
+            return Err(Error::Input("Criterion cannot be empty".into()));
+        }
+        criteria.push(trimmed.to_string());
+    }
+    let inputs = SetupInputs {
+        judges,
+        titles,
+        texts,
+        criteria,
+        load_judgements: req.load_judgements,
+        skip_probe: req.skip_probe,
+    };
+    let noun = judgement_noun(resolved.lineup_size);
+    let setup = setup_run(inputs, &resolved, judgements_per_item, noun, reporter).await?;
     Ok(PreparedRun { resolved, setup })
 }
 
@@ -1273,6 +1379,15 @@ pub async fn run(
     reporter: Arc<dyn Reporter>,
 ) -> crate::Result<RankingOutput> {
     prepare(args, reporter).await?.run(cancelled).await
+}
+
+/// Programmatic equivalent of [`run`].
+pub async fn run_request(
+    req: RankRequest,
+    cancelled: Arc<AtomicBool>,
+    reporter: Arc<dyn Reporter>,
+) -> crate::Result<RankingOutput> {
+    prepare_request(req, reporter).await?.run(cancelled).await
 }
 
 impl PreparedRun {
@@ -2992,5 +3107,85 @@ mod tests {
         let lines = reporter.0.lock().unwrap();
         assert!(lines.iter().any(|l| l.contains("Running without logprobs")), "{lines:?}");
         assert!(lines.iter().any(|l| l.contains("Cancelled. 0 judgements completed before interrupt.")), "{lines:?}");
+    }
+
+    #[tokio::test]
+    async fn test_rank_run_request_in_memory_without_config_file() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+
+        let seen_auth = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let seen_auth_server = seen_auth.clone();
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = tokio::spawn(async move {
+            while let Ok((mut stream, _)) = listener.accept().await {
+                let seen_auth = seen_auth_server.clone();
+                tokio::spawn(async move {
+                    let mut buf = [0u8; 8192];
+                    let n = stream.read(&mut buf).await.unwrap_or(0);
+                    let req = String::from_utf8_lossy(&buf[..n]);
+                    if let Some(auth_line) = req.lines().find(|l| l.to_ascii_lowercase().starts_with("authorization:")) {
+                        seen_auth.lock().unwrap().push(auth_line.trim().to_string());
+                    }
+                    let opt1_wins = req
+                        .find("[Option 1:")
+                        .and_then(|o1| req.find("[Option 2:").map(|o2| req[o1..o2].contains("golden body")))
+                        .unwrap_or(true);
+                    let verdict = if opt1_wins { "Verdict: Option 1" } else { "Verdict: Option 2" };
+                    let body = serde_json::json!({
+                        "choices": [{"message": {"content": verdict}, "finish_reason": "stop"}],
+                        "usage": {"prompt_tokens": 10, "completion_tokens": 5}
+                    })
+                    .to_string();
+                    let resp = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                        body.len(),
+                        body
+                    );
+                    let _ = stream.write_all(resp.as_bytes()).await;
+                });
+            }
+        });
+
+        let req = RankRequest {
+            items: vec![
+                Item::new("Best Doc", "the golden body text"),
+                Item::new("Other Doc", "the plain body text"),
+            ],
+            criteria: vec!["Criterion A".into(), "Criterion B".into()],
+            config: config::NanojudgeConfig {
+                logprobs: Some(false),
+                deliberation_enabled: Some(false),
+                judgements_per_item: Some(2),
+                judge: Some(vec![config::JudgeConfig {
+                    endpoint: format!("http://127.0.0.1:{port}"),
+                    model: "mock-judge".into(),
+                    temperature: Some(0.0),
+                    reasoning_effort: Some("none".into()),
+                    concurrency: Some(2),
+                    api_key: Some("in-memory-secret".into()),
+                    ..Default::default()
+                }]),
+                ..Default::default()
+            },
+            prompt_template: Some(
+                "$criterion\n[Option 1: $name1] $option1\n[Option 2: $name2] $option2\nVerdict: Option 1\nVerdict: Option 2".into()
+            ),
+            skip_probe: true,
+            ..Default::default()
+        };
+
+        let out = run_request(req, Arc::new(AtomicBool::new(false)), Arc::new(SilentReporter))
+            .await
+            .unwrap();
+        server.abort();
+
+        assert_eq!(out.total_judgements, 2);
+        let top_name = &out.item_names[out.scoring.rankings[0].item as usize];
+        assert_eq!(top_name, "Best Doc");
+        let auths = seen_auth.lock().unwrap();
+        assert!(!auths.is_empty());
+        assert!(auths.iter().all(|h| h.contains("Bearer in-memory-secret")), "{auths:?}");
     }
 }

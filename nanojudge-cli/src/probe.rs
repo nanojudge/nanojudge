@@ -9,7 +9,7 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 use reqwest::Client;
 use serde_json::{json, Value};
 
-use crate::args::ProbeArgs;
+use crate::args::{ConfigArgs, ProbeArgs};
 use crate::config;
 use crate::Error;
 use crate::llm::{build_completions_url, describe_request_error, TOP_LOGPROBS};
@@ -48,6 +48,15 @@ pub fn probes_path() -> crate::Result<PathBuf> {
     Ok(data_dir.join("nanojudge").join("probes.jsonl"))
 }
 
+/// Programmatic inputs for probing judges without CLI args or a config file.
+#[derive(Default)]
+pub struct ProbeRequest {
+    pub config: config::NanojudgeConfig,
+    /// Fallback bearer token for judges without `api_key` or `api_key_env`
+    /// (falls back to `OPENAI_API_KEY` if unset).
+    pub api_key: Option<String>,
+}
+
 /// Result of probing a single configured judge.
 #[derive(Debug, Clone)]
 pub struct JudgeProbeResult {
@@ -62,18 +71,45 @@ pub async fn run(args: ProbeArgs, reporter: &dyn Reporter) -> crate::Result<Vec<
     let judges = resolve_judges(
         &args.cfg,
         &cfg,
-        &config_path,
+        Some(&config_path),
         resolved.deliberation_enabled,
         resolved.lineup_size,
         reporter,
     )?;
+    run_judges(&judges, reporter).await
+}
 
+/// Programmatic equivalent of [`run`].
+pub async fn run_request(
+    req: ProbeRequest,
+    reporter: &dyn Reporter,
+) -> crate::Result<Vec<JudgeProbeResult>> {
+    let cli = ConfigArgs {
+        api_key: req.api_key,
+        ..Default::default()
+    };
+    let resolved = resolve_config(&cli, &req.config, reporter)?;
+    let judges = resolve_judges(
+        &cli,
+        &req.config,
+        None,
+        resolved.deliberation_enabled,
+        resolved.lineup_size,
+        reporter,
+    )?;
+    run_judges(&judges, reporter).await
+}
+
+async fn run_judges(
+    judges: &[ResolvedJudge],
+    reporter: &dyn Reporter,
+) -> crate::Result<Vec<JudgeProbeResult>> {
     let path = probes_path()?;
     reporter.line(&format!("Probe records: {}", path.display()));
 
     let client = Client::new();
     let mut results = Vec::with_capacity(judges.len());
-    for judge in &judges {
+    for judge in judges {
         reporter.line(&format!("Probing {}", judge.display_name));
         let record = probe_judge(&client, judge, reporter).await?;
         append_record(&path, &record)?;

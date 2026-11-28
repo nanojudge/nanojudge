@@ -18,42 +18,21 @@ use crate::{
     DEFAULT_REGULARIZATION_STRENGTH,
 };
 
+/// Programmatic scoring options for [`run_file`] and [`run_reader`].
+#[derive(Debug, Default, Clone)]
+pub struct ScoreOptions {
+    pub confidence_level: Option<f64>,
+    pub regularization_strength: Option<f64>,
+    pub prior_tau2: Option<f64>,
+    pub bias_prior_tau2: Option<f64>,
+    pub bias_prior: Option<f64>,
+    pub verdict_temperature: Option<f64>,
+    /// Per-judge verdict temperature overrides keyed by `MODEL@ENDPOINT`.
+    pub judge_verdict_temperatures: HashMap<String, f64>,
+}
+
 pub fn run(args: ScoreArgs, reporter: &dyn Reporter) -> crate::Result<RankingOutput> {
-    let path = &args.file;
-    if !path.exists() {
-        return Err(Error::Io(format!("File not found: {}", path.display())));
-    }
-
-    let bias_prior = args.bias_prior.unwrap_or(DEFAULT_BIAS_PRIOR);
-    if !bias_prior.is_finite() || bias_prior <= 0.0 || bias_prior >= 1.0 {
-        return Err(Error::Config("--bias-prior must be greater than 0.0 and less than 1.0".into()));
-    }
-    let bias_prior_logit = (bias_prior / (1.0 - bias_prior)).ln();
-
-    let confidence_level = args.confidence_level.unwrap_or(DEFAULT_CONFIDENCE_LEVEL);
-    if !confidence_level.is_finite() || confidence_level <= 0.0 || confidence_level >= 1.0 {
-        return Err(Error::Config(format!("confidence-level={confidence_level}, must be between 0.0 and 1.0 (exclusive)")));
-    }
-    let regularization_strength = args.regularization_strength.unwrap_or(DEFAULT_REGULARIZATION_STRENGTH);
-    if !regularization_strength.is_finite() || regularization_strength <= 0.0 {
-        return Err(Error::Config(format!("regularization-strength={regularization_strength}, must be finite and > 0")));
-    }
-    let prior_tau2 = args.prior_tau2.unwrap_or(DEFAULT_PRIOR_TAU2);
-    if !prior_tau2.is_finite() || prior_tau2 <= 0.0 {
-        return Err(Error::Config(format!("prior-tau2={prior_tau2}, must be finite and > 0")));
-    }
-    let bias_prior_tau2 = args.bias_prior_tau2.unwrap_or(DEFAULT_BIAS_PRIOR_TAU2);
-    if !bias_prior_tau2.is_finite() || bias_prior_tau2 <= 0.0 {
-        return Err(Error::Config(format!("bias-prior-tau2={bias_prior_tau2}, must be finite and > 0")));
-    }
-
-    if let Some(t) = args.verdict_temperature {
-        if !t.is_finite() || t <= 0.0 {
-            return Err(Error::Config(format!("verdict-temperature={t}, must be finite and > 0")));
-        }
-    }
-
-    let mut per_judge_temps: HashMap<String, f64> = HashMap::new();
+    let mut judge_verdict_temperatures: HashMap<String, f64> = HashMap::new();
     for spec in &args.judge_verdict_temperature {
         let eq_pos = spec.rfind('=').ok_or_else(|| {
             Error::Config(format!("invalid --judge-verdict-temperature: expected MODEL@ENDPOINT=TEMPERATURE, got: {spec}"))
@@ -68,23 +47,104 @@ pub fn run(args: ScoreArgs, reporter: &dyn Reporter) -> crate::Result<RankingOut
         if !value.is_finite() || value <= 0.0 {
             return Err(Error::Config(format!("judge-verdict-temperature {key}: {value} must be finite and > 0")));
         }
-        if per_judge_temps.contains_key(key) {
+        if judge_verdict_temperatures.contains_key(key) {
             return Err(Error::Config(format!("--judge-verdict-temperature {key} specified more than once")));
         }
-        per_judge_temps.insert(key.to_string(), value);
+        judge_verdict_temperatures.insert(key.to_string(), value);
+    }
+
+    run_file(
+        &args.file,
+        ScoreOptions {
+            confidence_level: args.confidence_level,
+            regularization_strength: args.regularization_strength,
+            prior_tau2: args.prior_tau2,
+            bias_prior_tau2: args.bias_prior_tau2,
+            bias_prior: args.bias_prior,
+            verdict_temperature: args.verdict_temperature,
+            judge_verdict_temperatures,
+        },
+        reporter,
+    )
+}
+
+/// Score a saved JSONL judgements file with programmatic [`ScoreOptions`].
+pub fn run_file(
+    path: &Path,
+    opts: ScoreOptions,
+    reporter: &dyn Reporter,
+) -> crate::Result<RankingOutput> {
+    if !path.exists() {
+        return Err(Error::Io(format!("File not found: {}", path.display())));
+    }
+    let file = std::fs::File::open(path)
+        .map_err(|e| Error::Io(format!("Failed to open {}: {e}", path.display())))?;
+    run_reader_named(std::io::BufReader::new(file), path, opts, reporter)
+}
+
+/// Score saved JSONL judgements from any in-memory reader (e.g. `Cursor`, `&[u8]`).
+pub fn run_reader(
+    reader: impl BufRead,
+    opts: ScoreOptions,
+    reporter: &dyn Reporter,
+) -> crate::Result<RankingOutput> {
+    run_reader_named(reader, Path::new("<input>"), opts, reporter)
+}
+
+fn run_reader_named(
+    reader: impl BufRead,
+    source: &Path,
+    opts: ScoreOptions,
+    reporter: &dyn Reporter,
+) -> crate::Result<RankingOutput> {
+    let bias_prior = opts.bias_prior.unwrap_or(DEFAULT_BIAS_PRIOR);
+    if !bias_prior.is_finite() || bias_prior <= 0.0 || bias_prior >= 1.0 {
+        return Err(Error::Config("bias-prior must be greater than 0.0 and less than 1.0".into()));
+    }
+    let bias_prior_logit = (bias_prior / (1.0 - bias_prior)).ln();
+
+    let confidence_level = opts.confidence_level.unwrap_or(DEFAULT_CONFIDENCE_LEVEL);
+    if !confidence_level.is_finite() || confidence_level <= 0.0 || confidence_level >= 1.0 {
+        return Err(Error::Config(format!("confidence-level={confidence_level}, must be between 0.0 and 1.0 (exclusive)")));
+    }
+    let regularization_strength = opts.regularization_strength.unwrap_or(DEFAULT_REGULARIZATION_STRENGTH);
+    if !regularization_strength.is_finite() || regularization_strength <= 0.0 {
+        return Err(Error::Config(format!("regularization-strength={regularization_strength}, must be finite and > 0")));
+    }
+    let prior_tau2 = opts.prior_tau2.unwrap_or(DEFAULT_PRIOR_TAU2);
+    if !prior_tau2.is_finite() || prior_tau2 <= 0.0 {
+        return Err(Error::Config(format!("prior-tau2={prior_tau2}, must be finite and > 0")));
+    }
+    let bias_prior_tau2 = opts.bias_prior_tau2.unwrap_or(DEFAULT_BIAS_PRIOR_TAU2);
+    if !bias_prior_tau2.is_finite() || bias_prior_tau2 <= 0.0 {
+        return Err(Error::Config(format!("bias-prior-tau2={bias_prior_tau2}, must be finite and > 0")));
+    }
+
+    if let Some(t) = opts.verdict_temperature
+        && (!t.is_finite() || t <= 0.0)
+    {
+        return Err(Error::Config(format!("verdict-temperature={t}, must be finite and > 0")));
+    }
+
+    for (key, &value) in &opts.judge_verdict_temperatures {
+        if !value.is_finite() || value <= 0.0 {
+            return Err(Error::Config(format!(
+                "judge-verdict-temperature {key}: {value} must be finite and > 0"
+            )));
+        }
     }
 
     let (edges, _, item_names, judge_ids, judge_display_names, judge_flag_keys, total_judgements, logprobs_mode, judge_temps_used, item_hashes, _) =
-        load_edges(path, args.verdict_temperature, &per_judge_temps, None, reporter)?;
+        load_edges_from_reader(reader, source, opts.verdict_temperature, &opts.judge_verdict_temperatures, None, reporter)?;
 
     if edges.is_empty() {
         return Err(Error::Input("No valid judgements found in the file".into()));
     }
 
-    for spec_key in per_judge_temps.keys() {
+    for spec_key in opts.judge_verdict_temperatures.keys() {
         if !judge_flag_keys.contains(spec_key) {
             return Err(Error::Config(format!(
-                "--judge-verdict-temperature {spec_key} does not match any judge in the file (judges found: {})",
+                "judge-verdict-temperature {spec_key} does not match any judge in the file (judges found: {})",
                 judge_flag_keys.join(", ")
             )));
         }
@@ -236,7 +296,25 @@ pub(crate) fn load_edges(
 ) -> crate::Result<(Vec<Edge>, Vec<usize>, Vec<String>, Vec<u64>, Vec<String>, Vec<String>, usize, bool, HashMap<u64, f64>, Vec<String>, Vec<serde_json::Value>)> {
     let file = std::fs::File::open(path)
         .map_err(|e| Error::Io(format!("Failed to open {}: {e}", path.display())))?;
-    let reader = std::io::BufReader::new(file);
+    load_edges_from_reader(
+        std::io::BufReader::new(file),
+        path,
+        global_verdict_temperature,
+        per_judge_verdict_temperatures,
+        expected_lineup_size,
+        reporter,
+    )
+}
+
+#[allow(clippy::type_complexity)]
+fn load_edges_from_reader(
+    reader: impl BufRead,
+    path: &Path,
+    global_verdict_temperature: Option<f64>,
+    per_judge_verdict_temperatures: &HashMap<String, f64>,
+    expected_lineup_size: Option<usize>,
+    reporter: &dyn Reporter,
+) -> crate::Result<(Vec<Edge>, Vec<usize>, Vec<String>, Vec<u64>, Vec<String>, Vec<String>, usize, bool, HashMap<u64, f64>, Vec<String>, Vec<serde_json::Value>)> {
 
     let mut item_to_id: HashMap<String, i64> = HashMap::new();
     let mut item_names: Vec<String> = Vec::new();
@@ -880,6 +958,24 @@ mod tests {
         assert_eq!(out.total_judgements, 2);
         assert_eq!(out.loaded_judgements, None);
         assert_eq!(out.scoring.rankings.len(), 3);
+        let ordered_names: Vec<&str> = out
+            .scoring
+            .rankings
+            .iter()
+            .map(|r| out.item_names[r.item as usize].as_str())
+            .collect();
+        assert_eq!(ordered_names, vec!["A", "B", "C"]);
+    }
+
+    #[test]
+    fn test_score_run_reader_scores_in_memory_jsonl() {
+        let jsonl = concat!(
+            r#"{"refit":0,"item1":"A","item2":"B","item1_text_hash":"34482beefb0cc992","item2_text_hash":"b0e6004ac03e61d2","category_probs":[0.9,0.1],"judge_model":"m","judge_endpoint":"http://e","logprobs":true,"deliberation":false}"#,
+            "\n",
+            r#"{"refit":0,"item1":"B","item2":"C","item1_text_hash":"b0e6004ac03e61d2","item2_text_hash":"9188835ed6d49e09","category_probs":[0.9,0.1],"judge_model":"m","judge_endpoint":"http://e","logprobs":true,"deliberation":false}"#,
+            "\n",
+        );
+        let out = run_reader(jsonl.as_bytes(), ScoreOptions::default(), &SilentReporter).unwrap();
         let ordered_names: Vec<&str> = out
             .scoring
             .rankings

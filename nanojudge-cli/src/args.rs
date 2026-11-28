@@ -43,7 +43,7 @@ pub enum Commands {
 
 /// Persistent configuration settings — available as both CLI flags and config file entries.
 /// These match the config file fields 1:1 (except api_key which is CLI/env only).
-#[derive(Parser)]
+#[derive(Parser, Default)]
 pub struct ConfigArgs {
     /// Bearer token for the API (also reads OPENAI_API_KEY env var).
     /// Used as fallback for judges without api_key_env.
@@ -252,7 +252,7 @@ pub struct ConfigArgs {
     pub seed: Option<u64>,
 }
 
-#[derive(Parser)]
+#[derive(Parser, Default)]
 pub struct ScoreArgs {
     /// Path to a JSONL file of saved successful judgements.
     pub file: PathBuf,
@@ -304,7 +304,7 @@ pub struct BenchmarkArgs {
     pub cfg: ConfigArgs,
 
     /// Number of judgement pairs to run (each pair runs both directions)
-    #[arg(short, long, default_value = DEFAULT_BENCHMARK_PAIRS)]
+    #[arg(short, long, default_value_t = DEFAULT_BENCHMARK_PAIRS)]
     pub num_pairs: usize,
 
     /// Skip the endpoint probe that normally checks each judge before the run.
@@ -316,7 +316,18 @@ pub struct BenchmarkArgs {
     pub config: Option<PathBuf>,
 }
 
-#[derive(Parser)]
+impl Default for BenchmarkArgs {
+    fn default() -> Self {
+        Self {
+            cfg: ConfigArgs::default(),
+            num_pairs: DEFAULT_BENCHMARK_PAIRS,
+            skip_probe: false,
+            config: None,
+        }
+    }
+}
+
+#[derive(Parser, Default)]
 pub struct ProbeArgs {
     #[command(flatten)]
     pub cfg: ConfigArgs,
@@ -326,7 +337,7 @@ pub struct ProbeArgs {
     pub config: Option<PathBuf>,
 }
 
-#[derive(Parser)]
+#[derive(Parser, Default)]
 pub struct RankArgs {
     #[command(flatten)]
     pub cfg: ConfigArgs,

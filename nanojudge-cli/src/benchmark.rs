@@ -3,14 +3,16 @@
 //! Runs N pairs of judgements, each in both directions (A vs B and B vs A),
 //! collecting timing, token usage, verdict distribution, and flip rate statistics.
 
-use crate::args::BenchmarkArgs;
+use crate::args::{BenchmarkArgs, ConfigArgs};
 use crate::config;
-use crate::Error;
+use crate::{DEFAULT_BENCHMARK_PAIRS, Error};
 use crate::llm::{FatalSlot, LlmConfig, LlmError, send_pair_judgement_request};
 use crate::probe;
 use crate::prompt::build_prompt;
 use crate::report::Reporter;
-use crate::resolve::{resolve_config, resolve_judges};
+use crate::resolve::{
+    resolve_config, resolve_config_with_template, resolve_judges, ResolvedConfig, ResolvedJudge,
+};
 use nanojudge_core::seed;
 use rand::Rng;
 use rand::seq::SliceRandom;
@@ -159,6 +161,33 @@ pub fn print_report(report: &BenchmarkReport) {
     println!("Detailed log written to: {}", report.log_filename);
 }
 
+/// Programmatic inputs for running the benchmark without CLI args or a config file.
+pub struct BenchmarkRequest {
+    pub config: config::NanojudgeConfig,
+    /// Fallback bearer token for judges without `api_key` or `api_key_env`
+    /// (falls back to `OPENAI_API_KEY` if unset).
+    pub api_key: Option<String>,
+    /// Optional raw prompt template string; overrides `config.prompt_template`
+    /// without reading from disk.
+    pub prompt_template: Option<String>,
+    /// Number of judgement pairs to run (each pair runs both directions).
+    pub num_pairs: usize,
+    /// Skip endpoint probing before running the benchmark.
+    pub skip_probe: bool,
+}
+
+impl Default for BenchmarkRequest {
+    fn default() -> Self {
+        Self {
+            config: config::NanojudgeConfig::default(),
+            api_key: None,
+            prompt_template: None,
+            num_pairs: DEFAULT_BENCHMARK_PAIRS,
+            skip_probe: false,
+        }
+    }
+}
+
 /// Entrypoint for the `benchmark` command.
 pub async fn run(args: BenchmarkArgs, reporter: Arc<dyn Reporter>) -> crate::Result<Vec<BenchmarkReport>> {
     run_with(args, reporter, |_| {}).await
@@ -168,7 +197,7 @@ pub async fn run(args: BenchmarkArgs, reporter: Arc<dyn Reporter>) -> crate::Res
 pub async fn run_with(
     args: BenchmarkArgs,
     reporter: Arc<dyn Reporter>,
-    mut on_report: impl FnMut(&BenchmarkReport),
+    on_report: impl FnMut(&BenchmarkReport),
 ) -> crate::Result<Vec<BenchmarkReport>> {
     let (config_path, cfg) = config::load_config(args.config.as_deref())?;
     let resolved = resolve_config(&args.cfg, &cfg, reporter.as_ref())?;
@@ -181,24 +210,75 @@ pub async fn run_with(
     let judges = resolve_judges(
         &args.cfg,
         &cfg,
-        &config_path,
+        Some(&config_path),
         resolved.deliberation_enabled,
         resolved.lineup_size,
         reporter.as_ref(),
     )?;
+    run_resolved(&resolved, &judges, args.num_pairs, args.skip_probe, reporter, on_report).await
+}
 
-    if args.num_pairs == 0 {
-        return Err(Error::Config("--num-pairs must be at least 1".into()));
+/// Programmatic equivalent of [`run`].
+pub async fn run_request(
+    req: BenchmarkRequest,
+    reporter: Arc<dyn Reporter>,
+) -> crate::Result<Vec<BenchmarkReport>> {
+    run_request_with(req, reporter, |_| {}).await
+}
+
+/// Programmatic equivalent of [`run_with`], invoking `on_report` as each judge finishes.
+pub async fn run_request_with(
+    req: BenchmarkRequest,
+    reporter: Arc<dyn Reporter>,
+    on_report: impl FnMut(&BenchmarkReport),
+) -> crate::Result<Vec<BenchmarkReport>> {
+    let cli = ConfigArgs {
+        api_key: req.api_key,
+        ..Default::default()
+    };
+    let resolved = resolve_config_with_template(
+        &cli,
+        &req.config,
+        req.prompt_template.as_deref(),
+        reporter.as_ref(),
+    )?;
+    if resolved.lineup_size != 2 {
+        return Err(Error::Config(format!(
+            "benchmark only runs pairwise comparisons (got lineup_size = {}). Set lineup_size = 2.",
+            resolved.lineup_size
+        )));
+    }
+    let judges = resolve_judges(
+        &cli,
+        &req.config,
+        None,
+        resolved.deliberation_enabled,
+        resolved.lineup_size,
+        reporter.as_ref(),
+    )?;
+    run_resolved(&resolved, &judges, req.num_pairs, req.skip_probe, reporter, on_report).await
+}
+
+async fn run_resolved(
+    resolved: &ResolvedConfig,
+    judges: &[ResolvedJudge],
+    num_pairs: usize,
+    skip_probe: bool,
+    reporter: Arc<dyn Reporter>,
+    mut on_report: impl FnMut(&BenchmarkReport),
+) -> crate::Result<Vec<BenchmarkReport>> {
+    if num_pairs == 0 {
+        return Err(Error::Config("num-pairs must be at least 1".into()));
     }
 
-    if !args.skip_probe {
-        probe::check_judges(&judges, reporter.as_ref()).await?;
+    if !skip_probe {
+        probe::check_judges(judges, reporter.as_ref()).await?;
     }
 
     let template = &resolved.prompt_template;
     let mut reports = Vec::with_capacity(judges.len());
 
-    for judge in &judges {
+    for judge in judges {
         let llm_config = LlmConfig {
             endpoint: judge.endpoint.clone(),
             model: judge.model.clone(),
@@ -218,7 +298,7 @@ pub async fn run_with(
         let report = run_benchmark(
             &llm_config,
             &judge.display_name,
-            args.num_pairs,
+            num_pairs,
             judge.concurrency,
             judge.min_logprob_coverage,
             template,

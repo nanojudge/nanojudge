@@ -13,13 +13,17 @@ pub mod report;
 pub mod resolve;
 pub mod score;
 
-pub use benchmark::{BenchmarkReport, LatencyStats};
+pub use benchmark::{BenchmarkReport, BenchmarkRequest, LatencyStats};
+pub use config::{JudgeConfig, NanojudgeConfig};
 pub use error::{Error, Result};
+pub use items::Item;
 pub use output::RankingOutput;
-pub use probe::JudgeProbeResult;
+pub use probe::{JudgeProbeResult, ProbeRequest};
+pub use rank::{PreparedRun, RankRequest};
 pub use report::{Reporter, SilentReporter, StderrReporter};
+pub use score::ScoreOptions;
 
-pub(crate) const DEFAULT_BENCHMARK_PAIRS: &str = "100";
+pub(crate) const DEFAULT_BENCHMARK_PAIRS: usize = 100;
 
 pub(crate) const DEFAULT_CONFIDENCE_LEVEL: f64 = 0.95;
 pub(crate) const DEFAULT_REGULARIZATION_STRENGTH: f64 = 0.01;

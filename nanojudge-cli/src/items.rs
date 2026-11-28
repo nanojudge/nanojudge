@@ -7,6 +7,43 @@ use crate::report::Reporter;
 
 const TITLE_MAX_LEN: usize = 20;
 
+/// One item to rank: a display `name` and the `text` sent to the judge.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Item {
+    pub name: String,
+    pub text: String,
+}
+
+impl Item {
+    /// Create an item with an explicit display name and body text.
+    pub fn new(name: impl Into<String>, text: impl Into<String>) -> Self {
+        Self {
+            name: name.into(),
+            text: text.into(),
+        }
+    }
+
+    /// Create an item whose display name is derived from its text (up to 20 chars).
+    pub fn from_text(text: impl Into<String>) -> Self {
+        let text = text.into();
+        let trimmed = text.trim();
+        let name = title_from_text(trimmed);
+        Self { name, text }
+    }
+}
+
+impl From<String> for Item {
+    fn from(text: String) -> Self {
+        Self::from_text(text)
+    }
+}
+
+impl From<&str> for Item {
+    fn from(text: &str) -> Self {
+        Self::from_text(text)
+    }
+}
+
 /// Plain text file extensions that we read from directories.
 const TEXT_EXTENSIONS: &[&str] = &[
     "txt", "md", "html", "csv", "json", "xml", "rst", "log", "yaml", "yml", "toml",
@@ -147,6 +184,33 @@ fn load_items_from(
         titles = texts.iter().map(|t| title_from_text(t)).collect();
     }
 
+    validate_titles_and_texts(titles, texts)
+}
+
+/// Validate in-memory items: trim names and texts, reject blanks or duplicate
+/// text, and require at least 2 items. Returns `(titles, texts)`.
+pub fn validate_items(items: Vec<Item>) -> crate::Result<(Vec<String>, Vec<String>)> {
+    let mut titles = Vec::with_capacity(items.len());
+    let mut texts = Vec::with_capacity(items.len());
+    for item in items {
+        let text = item.text.trim();
+        if text.is_empty() {
+            return Err(Error::Input("Item text cannot be empty".into()));
+        }
+        let name = item.name.trim();
+        if name.is_empty() {
+            return Err(Error::Input("Item name cannot be empty".into()));
+        }
+        titles.push(name.to_string());
+        texts.push(text.to_string());
+    }
+    validate_titles_and_texts(titles, texts)
+}
+
+fn validate_titles_and_texts(
+    titles: Vec<String>,
+    texts: Vec<String>,
+) -> crate::Result<(Vec<String>, Vec<String>)> {
     let mut seen: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
     for (i, text) in texts.iter().enumerate() {
         if let Some(&first) = seen.get(text.as_str()) {
@@ -221,5 +285,28 @@ mod tests {
         write!(tmp, r#"["one", "two"]"#).unwrap();
         let (_, texts) = load_items_from(Some(tmp.path()), &[], &SilentReporter, unused_stdin).unwrap();
         assert_eq!(texts, vec!["one", "two"]);
+    }
+
+    #[test]
+    fn validate_items_supports_named_and_inline_items_and_rejects_invalid() {
+        let (titles, texts) = validate_items(vec![
+            Item::new("Doc A", "  full text of A  "),
+            Item::from("beta"),
+        ])
+        .unwrap();
+        assert_eq!(titles, vec!["Doc A", "beta"]);
+        assert_eq!(texts, vec!["full text of A", "beta"]);
+
+        let err = validate_items(vec![Item::new("A", "   "), Item::from("b")]).unwrap_err();
+        assert!(matches!(err, Error::Input(_)) && err.to_string().contains("text cannot be empty"));
+
+        let err = validate_items(vec![Item::new("   ", "alpha"), Item::from("b")]).unwrap_err();
+        assert!(matches!(err, Error::Input(_)) && err.to_string().contains("name cannot be empty"));
+
+        let err = validate_items(vec![Item::from("same"), Item::from("same")]).unwrap_err();
+        assert!(matches!(err, Error::Input(_)) && err.to_string().contains("Duplicate"));
+
+        let err = validate_items(vec![Item::from("only one")]).unwrap_err();
+        assert!(matches!(err, Error::Input(_)) && err.to_string().contains("at least 2"));
     }
 }

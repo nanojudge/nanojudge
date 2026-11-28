@@ -10,7 +10,7 @@ use crate::args::OutputFormat;
 use crate::Error;
 
 /// Per-judge configuration from a [[judge]] TOML block.
-#[derive(Deserialize, Clone, Debug)]
+#[derive(Deserialize, Default, Clone)]
 #[serde(deny_unknown_fields)]
 pub struct JudgeConfig {
     pub endpoint: String,
@@ -26,6 +26,11 @@ pub struct JudgeConfig {
     /// (q^(1/T)) before scoring. Distinct from the sampling `temperature`.
     pub verdict_temperature: Option<f64>,
     pub api_key_env: Option<String>,
+    /// Bearer token supplied directly in memory (rejected in TOML files so
+    /// config files cannot accidentally store plaintext keys). Takes precedence
+    /// over `api_key_env` and any global fallback key.
+    #[serde(skip)]
+    pub api_key: Option<String>,
     pub max_tokens: Option<u32>,
     /// Sent as `reasoning_effort`: controls the model's reasoning.
     /// Set to "none" to turn reasoning off.
@@ -40,7 +45,51 @@ pub struct JudgeConfig {
     pub request_timeout_secs: Option<f64>,
 }
 
-#[derive(Deserialize, Default, Debug)]
+impl std::fmt::Debug for JudgeConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Exhaustive destructuring ensures any newly added field must be handled here.
+        let Self {
+            endpoint,
+            model,
+            concurrency,
+            weight,
+            temperature,
+            temperature_jitter,
+            presence_penalty,
+            top_p,
+            min_logprob_coverage,
+            verdict_temperature,
+            api_key_env,
+            api_key,
+            max_tokens,
+            reasoning_effort,
+            chat_template_kwargs,
+            provider,
+            request_timeout_secs,
+        } = self;
+        f.debug_struct("JudgeConfig")
+            .field("endpoint", endpoint)
+            .field("model", model)
+            .field("concurrency", concurrency)
+            .field("weight", weight)
+            .field("temperature", temperature)
+            .field("temperature_jitter", temperature_jitter)
+            .field("presence_penalty", presence_penalty)
+            .field("top_p", top_p)
+            .field("min_logprob_coverage", min_logprob_coverage)
+            .field("verdict_temperature", verdict_temperature)
+            .field("api_key_env", api_key_env)
+            .field("api_key", &api_key.as_ref().map(|_| "[REDACTED]"))
+            .field("max_tokens", max_tokens)
+            .field("reasoning_effort", reasoning_effort)
+            .field("chat_template_kwargs", chat_template_kwargs)
+            .field("provider", provider)
+            .field("request_timeout_secs", request_timeout_secs)
+            .finish()
+    }
+}
+
+#[derive(Deserialize, Default, Clone, Debug)]
 #[serde(deny_unknown_fields)]
 pub struct NanojudgeConfig {
     pub judgements_per_item: Option<usize>,
@@ -319,6 +368,27 @@ pub fn load_config(explicit_path: Option<&Path>) -> crate::Result<(PathBuf, Nano
     Ok((path, cfg))
 }
 
+/// Parse a [`NanojudgeConfig`] from a TOML string.
+pub fn parse_config(content: &str) -> crate::Result<NanojudgeConfig> {
+    parse_config_with_source(content, None)
+}
+
+fn parse_config_with_source(content: &str, path: Option<&Path>) -> crate::Result<NanojudgeConfig> {
+    toml::from_str(content).map_err(|e| {
+        let mut msg = match path {
+            Some(p) => format!("Bad config at {}:\n  {e}", p.display()),
+            None => format!("Bad config:\n  {e}"),
+        };
+        if let Some(span) = e.span() {
+            let line_num = content[..span.start].matches('\n').count() + 1;
+            if let Some(line) = content.lines().nth(line_num - 1) {
+                msg.push_str(&format!("\n\n  line {line_num}: {}", line.trim()));
+            }
+        }
+        Error::Config(msg)
+    })
+}
+
 fn try_load_config(path: &Path, is_default: bool) -> crate::Result<NanojudgeConfig> {
     let content = match std::fs::read_to_string(path) {
         Ok(content) => content,
@@ -334,16 +404,7 @@ fn try_load_config(path: &Path, is_default: bool) -> crate::Result<NanojudgeConf
         }
         Err(e) => return Err(Error::Io(format!("Failed to read config at {}: {e}", path.display()))),
     };
-    toml::from_str(&content).map_err(|e| {
-        let mut msg = format!("Bad config at {}:\n  {e}", path.display());
-        if let Some(span) = e.span() {
-            let line_num = content[..span.start].matches('\n').count() + 1;
-            if let Some(line) = content.lines().nth(line_num - 1) {
-                msg.push_str(&format!("\n\n  line {line_num}: {}", line.trim()));
-            }
-        }
-        Error::Config(msg)
-    })
+    parse_config_with_source(&content, Some(path))
 }
 
 /// Create the default config file. Errors if it already exists.
@@ -574,5 +635,30 @@ judgement_distribution = "top-heavy"
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
         assert!(err.contains("roudns"), "error should name the bad field: {err}");
+    }
+
+    #[test]
+    fn test_parse_config_and_reject_plaintext_api_key_in_toml() {
+        let cfg = parse_config("judgements_per_item = 4\n").unwrap();
+        assert_eq!(cfg.judgements_per_item, Some(4));
+
+        // In-memory api_key must stay rejected when written into TOML.
+        let err = parse_config(
+            "[[judge]]\nendpoint = \"http://localhost:8000\"\nmodel = \"m\"\napi_key = \"sk-secret\"\n",
+        )
+        .unwrap_err();
+        assert!(matches!(err, Error::Config(_)), "{err:?}");
+        assert!(err.to_string().contains("api_key"), "{err}");
+
+        // Debug output must not expose an in-memory api_key.
+        let judge = JudgeConfig {
+            endpoint: "http://localhost:8000".into(),
+            model: "m".into(),
+            api_key: Some("sk-super-secret".into()),
+            ..Default::default()
+        };
+        let dbg = format!("{judge:?}");
+        assert!(!dbg.contains("sk-super-secret"), "{dbg}");
+        assert!(dbg.contains("[REDACTED]"), "{dbg}");
     }
 }
